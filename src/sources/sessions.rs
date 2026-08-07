@@ -19,13 +19,42 @@ pub struct Agent {
     pub name: &'static str,
     /// How to resume, given a session id.
     pub resume: fn(&str) -> String,
+    /// How to start with an opening prompt. These genuinely differ: claude,
+    /// codex and pi take it positionally, opencode needs --prompt.
+    pub prompt: fn(&str) -> String,
 }
 
-const AGENTS: &[Agent] = &[
-    Agent { name: "claude", resume: |id| format!("claude --resume {id}") },
-    Agent { name: "codex", resume: |id| format!("codex resume {id}") },
-    Agent { name: "pi", resume: |id| format!("pi --session {id}") },
+pub const AGENTS: &[Agent] = &[
+    Agent {
+        name: "claude",
+        resume: |id| format!("claude --resume {id}"),
+        prompt: |p| format!("claude {}", shq(p)),
+    },
+    Agent {
+        name: "codex",
+        resume: |id| format!("codex resume {id}"),
+        prompt: |p| format!("codex {}", shq(p)),
+    },
+    Agent {
+        name: "pi",
+        resume: |id| format!("pi --session {id}"),
+        prompt: |p| format!("pi {}", shq(p)),
+    },
+    Agent {
+        name: "opencode",
+        resume: |id| format!("opencode --session {id}"),
+        prompt: |p| format!("opencode run {}", shq(p)),
+    },
 ];
+
+/// Agents that are actually installed, for the `@` completion.
+pub fn installed() -> Vec<&'static str> {
+    AGENTS
+        .iter()
+        .map(|a| a.name)
+        .filter(|n| crate::exec::which(n).is_some())
+        .collect()
+}
 
 fn resume_cmd(agent: &str, id: &str) -> String {
     AGENTS
@@ -274,10 +303,15 @@ pub fn start_cmd(agent: &str, cwd: Option<&str>, prompt: Option<&str>) -> String
     if let Some(d) = cwd {
         s.push_str(&format!("cd {} && ", shq(d)));
     }
-    s.push_str(agent);
-    if let Some(p) = prompt {
-        s.push(' ');
-        s.push_str(&shq(p));
+    match prompt {
+        Some(p) => {
+            let spec = AGENTS.iter().find(|a| a.name == agent);
+            s.push_str(&match spec {
+                Some(a) => (a.prompt)(p),
+                None => format!("{agent} {}", shq(p)),
+            });
+        }
+        None => s.push_str(agent),
     }
     s
 }

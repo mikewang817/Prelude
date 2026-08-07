@@ -411,8 +411,11 @@ pub fn agent_query(q: &str) -> Option<(String, String)> {
     if prompt.is_empty() || agent.is_empty() {
         return None;
     }
-    let known = ["claude", "codex", "pi", "opencode", "cursor-agent"];
-    let agent = known.iter().find(|k| k.starts_with(&agent.to_lowercase()))?;
+    let want = agent.to_lowercase();
+    let installed = crate::sources::sessions::installed();
+    // Exact name wins over a prefix, so `@pi` never resolves to something else.
+    let agent = installed.iter().find(|k| **k == want)
+        .or_else(|| installed.iter().find(|k| k.starts_with(&want)))?;
     Some((agent.to_string(), prompt.to_string()))
 }
 
