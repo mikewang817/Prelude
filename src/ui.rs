@@ -140,6 +140,8 @@ pub fn search(paste_target: Option<String>) -> i32 {
     // execute() hands the terminal over and comes back; execute-silent()
     // doesn't even repaint. This is what lets you do several things per open.
     args.push("--bind".into());
+    args.push(format!("enter:transform:{} _enter {{2}}", shq(&me)));
+    args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
     args.push(format!("ctrl-y:execute-silent({} _copy {{2}})", shq(&me)));
@@ -350,4 +352,47 @@ pub fn pick_raw(feed: &str, label: &str, prompt: &str, header: &str) -> Option<S
             .map(|(_, id)| id.trim().to_string());
     }
     None
+}
+
+/// Ask an agent and stream the answer into the preview pane.
+///
+/// The point is that you asked a question, so you should get an answer where
+/// you are looking — not a full-screen TUI that takes over the terminal, and
+/// not a command to press Enter on again. Uses each agent's non-interactive
+/// mode so the reply is plain text on stdout.
+pub fn ask(item: &Item) -> i32 {
+    use std::io::{BufRead, BufReader, Write};
+    let agent = item.get("agent");
+    let prompt = item.get("prompt");
+    if agent.is_empty() || prompt.is_empty() {
+        println!("nothing to ask");
+        return 1;
+    }
+    let Some(args) = crate::sources::sessions::ask_cmd(agent, prompt) else {
+        println!("{YELLOW}don't know how to run {agent} non-interactively{RESET}");
+        return 1;
+    };
+
+    println!("{DIM}asking {agent}…{RESET}\n");
+    let _ = std::io::stdout().flush();
+
+    let mut cmd = Command::new(&args[0]);
+    cmd.args(&args[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Some(dir) = item.data.get("cwd").filter(|d| std::path::Path::new(d).is_dir()) {
+        cmd.current_dir(dir);
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        println!("{YELLOW}could not run {agent}{RESET}");
+        return 1;
+    };
+    // Stream it, so a slow answer appears as it arrives rather than all at
+    // the end.
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+    let _ = child.wait();
+    0
 }

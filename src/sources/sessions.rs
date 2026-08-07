@@ -20,8 +20,11 @@ pub struct Agent {
     /// How to resume, given a session id.
     pub resume: fn(&str) -> String,
     /// How to start with an opening prompt. These genuinely differ: claude,
-    /// codex and pi take it positionally, opencode needs --prompt.
+    /// codex and pi take it positionally, opencode needs a subcommand.
     pub prompt: fn(&str) -> String,
+    /// Non-interactive form: print the answer to stdout and exit, so it can
+    /// be rendered inside the launcher instead of taking over the screen.
+    pub ask: fn(&str) -> Vec<String>,
 }
 
 pub const AGENTS: &[Agent] = &[
@@ -29,21 +32,25 @@ pub const AGENTS: &[Agent] = &[
         name: "claude",
         resume: |id| format!("claude --resume {id}"),
         prompt: |p| format!("claude {}", shq(p)),
+        ask: |p| vec!["claude".into(), "-p".into(), p.into()],
     },
     Agent {
         name: "codex",
         resume: |id| format!("codex resume {id}"),
         prompt: |p| format!("codex {}", shq(p)),
+        ask: |p| vec!["codex".into(), "exec".into(), p.into()],
     },
     Agent {
         name: "pi",
         resume: |id| format!("pi --session {id}"),
         prompt: |p| format!("pi {}", shq(p)),
+        ask: |p| vec!["pi".into(), "--print".into(), p.into()],
     },
     Agent {
         name: "opencode",
         resume: |id| format!("opencode --session {id}"),
         prompt: |p| format!("opencode run {}", shq(p)),
+        ask: |p| vec!["opencode".into(), "run".into(), p.into()],
     },
 ];
 
@@ -295,6 +302,11 @@ pub fn search(term: &str) -> Vec<Item> {
         })
         .take(80)
         .collect()
+}
+
+/// The non-interactive invocation for an agent, if we know one.
+pub fn ask_cmd(agent: &str, prompt: &str) -> Option<Vec<String>> {
+    AGENTS.iter().find(|a| a.name == agent).map(|a| (a.ask)(prompt))
 }
 
 /// Start a fresh agent session in a directory, optionally invoking a skill.

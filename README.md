@@ -166,11 +166,20 @@ skill, so it knows which do not:
      ^K  →  Copy it to codex / Copy it to pi / Copy it to all missing
 ```
 
-**Start a session from the launcher** with `@claude refactor this`. Enter
-runs it right there in the panel and shows the answer — you asked a question,
-so you get the answer, not a command to press Enter on again. Resuming an
-existing session still goes onto your prompt, because you want that in a real
-terminal rather than a popup.
+**Ask an agent without leaving the launcher.** `@claude what does EADDRINUSE
+mean` — Enter renders the answer in the panel, streaming as it arrives, and
+the launcher stays open so you can ask the next thing:
+
+```
+⌕ @claude 1+1                     1/1  │ asking claude…
+▸ claude: 1+1     session · ⏎ answers  │ 2
+```
+
+It uses each agent's non-interactive mode (`claude -p`, `codex exec`,
+`pi --print`, `opencode run`) so the reply is plain text rather than a
+full-screen TUI taking over the terminal. Resuming an existing session still
+goes onto your prompt, because a long-lived session belongs in a real
+terminal rather than a popup that closes.
 
 Each agent is invoked with its own syntax (`opencode` needs `opencode run`,
 the others take the prompt positionally), and `@` completes only against

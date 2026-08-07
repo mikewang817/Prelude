@@ -76,6 +76,23 @@ fn main() -> ExitCode {
         ["_dynamic", q] => dynamic(q, "", term_width()),
         ["_dynamic", q, path] => dynamic(q, path, term_width()),
         ["_dynamic", q, path, cols] => dynamic(q, path, cols.parse().unwrap_or_else(|_| term_width())),
+        ["_ask", line] => match render::parse_line(line) {
+            Some(i) => ui::ask(&i),
+            None => 1,
+        },
+        // Decides, per keypress of Enter, whether to accept the selection or
+        // answer it in place. Only fzf can make that conditional.
+        ["_enter", line] => {
+            let ask = render::parse_line(line)
+                .is_some_and(|i| i.get("mode") == "start" && !i.get("prompt").is_empty());
+            let me = exec::shq(&std::env::current_exe().unwrap_or_default().to_string_lossy());
+            if ask {
+                println!("change-preview-window(right,55%,wrap,border-left)+preview({me} _ask {{2}})");
+            } else {
+                println!("accept");
+            }
+            0
+        }
         ["_preview", line] => { if let Some(i) = render::parse_line(line) { preview::show(&i); } 0 }
         ["_copy", line] => copy_line(line),
         ["_runhere", line] => match render::parse_line(line) {

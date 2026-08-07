@@ -491,8 +491,9 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
         rows.push(
             Item::new(cmd, Kind::Session)
                 .title(format!("{agent}: {prompt}"))
-                .fields([agent.clone(), "runs here".to_string()])
+                .fields([agent.clone(), "⏎ answers in the panel".to_string()])
                 .put("agent", agent)
+                .put("prompt", prompt)
                 .put("mode", "start"),
         );
     }
