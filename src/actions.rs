@@ -229,20 +229,28 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     if let Some(label) = crate::defaults::describe_secondary(it, host) {
         acts.insert(1, a("secondary", label, "the other one"));
     }
-    // Everything the removed shortcuts used to do stays reachable here —
-    // except running the thing, which for a file means executing your JSON
-    // and for a question means running an English sentence as a command.
-    let runnable = !matches!(
-        it.kind,
-        Kind::File | Kind::Find | Kind::Config | Kind::Run | Kind::Msg
-    );
-    if runnable && !acts.iter().any(|(id, ..)| *id == "runhere") {
+    // Everything the removed shortcuts used to do stays reachable here — but
+    // only where it means anything. Offering to run a translation, or to
+    // paint an agent's TUI into a preview pane, is not a fallback.
+    // `docs/ACTIONS.md`, R3 and R5.
+    // A port's and a process's command line *is* the kill, and both kinds
+    // already offer it, named, at the bottom. Adding "Run here, inside this
+    // window" is a second route to the same kill wearing a harmless label —
+    // in the third row, where the destructive one was moved out of.
+    let generic_run_would_kill = matches!(it.kind, Kind::Port | Kind::Proc);
+    if it.kind.is_command_line()
+        && !it.kind.is_interactive()
+        && !generic_run_would_kill
+        && !acts.iter().any(|(id, ..)| *id == "runhere")
+    {
         acts.push(a("runhere", "Run here, inside this window", ""));
     }
-    if runnable && !acts.iter().any(|(id, ..)| *id == "run") {
+    if it.kind.is_command_line() && !acts.iter().any(|(id, ..)| *id == "run") {
         acts.push(a("run", "Run in the shell below", ""));
     }
-    if !acts.iter().any(|(id, ..)| *id == "copy") {
+    // `copyabs` already copies the path, and for a file that is exactly what
+    // `copy` copies too — the same action twice, worded differently.
+    if !acts.iter().any(|(id, ..)| *id == "copy" || *id == "copyabs") {
         acts.push(a("copy", "Copy to clipboard", ""));
     }
     // "Ask an agent about this" makes no sense for a question an agent has
@@ -256,7 +264,41 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     if it.kind == Kind::Dir {
         acts.push(a("here", "Insert path without cd", ""));
     }
+    // The order is the five questions, in the order a person asks them.
+    // Stable, so each kind's own sequencing survives inside its group.
+    acts.sort_by_key(|(id, ..)| group(it.kind, id));
     acts
+}
+
+/// Which of the five questions in `docs/ACTIONS.md` an entry answers.
+///
+/// Kept as one function over ids rather than as structure in each kind's
+/// list, so the ordering is a property of the panel rather than of
+/// twenty-five independent decisions that agreed for a while.
+///
+/// It needs the kind because one id is genuinely two verbs: `run` means
+/// "start it" nearly everywhere and "kill it now" on a port or a process.
+fn group(kind: Kind, id: &str) -> u8 {
+    const ACT: u8 = 2;
+    const TAKE: u8 = 3;
+    const GO: u8 = 4;
+    const DESTROY: u8 = 5;
+    match id {
+        "default" => 0,
+        "secondary" => 1,
+        // Irreversible, so last however the kind happened to list it.
+        "killrun" | "stop" => DESTROY,
+        _ if id.starts_with("rm:") => DESTROY,
+        "run" if matches!(kind, Kind::Port | Kind::Proc) => DESTROY,
+        // Text out of the row.
+        "insert" | "copy" | "copyabs" | "here" | "desc" | "inspect" | "tr_src" => TAKE,
+        // Where it lives.
+        "reveal" | "reveal-finder" | "cd" | "cdrun" | "cdsession" | "zoom" | "jump" | "editsnips"
+        | "editssh" => GO,
+        // Everything else is another way to act on it, including the two
+        // tenses of "not like that": `openwith` and `openalways`.
+        _ => ACT,
+    }
 }
 
 /// Everything you might want to do with a file, in the order you want it.

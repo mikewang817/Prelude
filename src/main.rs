@@ -843,6 +843,128 @@ mod tests {
         assert_eq!(t, "plain question");
     }
 
+    /// Build one row of every kind, the way `_actions` does, so the panel's
+    /// own invariants can be checked without standing up an fzf.
+    #[cfg(test)]
+    fn every_kind_row() -> Vec<crate::item::Item> {
+        use crate::item::{Item, Kind};
+        Kind::all()
+            .iter()
+            .map(|k| {
+                Item::new("x", *k)
+                    .title("x")
+                    .put("path", "/tmp/a.json")
+                    .put("pid", "1")
+                    .put("port", "80")
+                    .put("name", "n")
+                    .put("agent", "claude")
+                    .put("pane", "%1")
+                    .put("cwd", "/tmp")
+                    .put("dir", "/tmp/d")
+                    .put("file", "/tmp/f")
+                    .put("desc", "d")
+                    .put("missing", "codex")
+                    .put("copies", r#"[["claude","/tmp/d"]]"#)
+            })
+            .collect()
+    }
+
+    /// Nothing irreversible may sit anywhere but the end.
+    ///
+    /// `Delete claude's copy…` followed by `Copy to clipboard` is an accident
+    /// waiting for a fast scroll, and the panel had exactly that: destructive
+    /// entries landed wherever their kind happened to list them, with the
+    /// generic tail appended after. See `docs/ACTIONS.md`, R4.
+    #[test]
+    fn destructive_actions_are_always_last() {
+        use crate::item::Kind;
+        let destructive = |kind: Kind, id: &str| {
+            id.starts_with("rm:")
+                || matches!(id, "killrun" | "stop")
+                || (id == "run" && matches!(kind, Kind::Port | Kind::Proc))
+        };
+        for it in every_kind_row() {
+            let ids: Vec<String> =
+                crate::actions::actions_for(&it).iter().map(|(i, ..)| i.to_string()).collect();
+            let first = ids.iter().position(|i| destructive(it.kind, i));
+            if let Some(first) = first {
+                assert!(
+                    ids[first..].iter().all(|i| destructive(it.kind, i)),
+                    "{:?}: something harmless sits below a destructive entry: {ids:?}",
+                    it.kind
+                );
+            }
+            // And the two defaults are always the first two, in that order.
+            assert_eq!(ids[0], "default", "{:?}", it.kind);
+        }
+    }
+
+    /// "Run it" is offered only where there is something to run.
+    ///
+    /// The generic tail used to be appended to every kind that had not
+    /// claimed it, which offered to execute a calculator result, a
+    /// translation, and `/skill-name`. See `docs/ACTIONS.md`, R3.
+    #[test]
+    fn running_is_offered_only_where_it_means_something() {
+        use crate::item::Kind;
+        for it in every_kind_row() {
+            let ids: Vec<&str> =
+                crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+            if !it.kind.is_command_line() {
+                assert!(
+                    !ids.contains(&"runhere"),
+                    "{:?} has no command line, so nothing to run here: {ids:?}",
+                    it.kind
+                );
+            }
+            // A full-screen TUI cannot be painted into a preview pane.
+            if it.kind.is_interactive() {
+                assert!(!ids.contains(&"runhere"), "{:?} is interactive: {ids:?}", it.kind);
+            }
+        }
+        // The specific rows that were wrong, named so they stay fixed.
+        for k in [Kind::Calc, Kind::Translate, Kind::Skill, Kind::Msg] {
+            assert!(!k.is_command_line(), "{k:?} is not a command line");
+        }
+        for k in [Kind::History, Kind::Script, Kind::Port, Kind::Sys] {
+            assert!(k.is_command_line() && !k.is_interactive(), "{k:?} runs");
+        }
+    }
+
+    /// No two entries may do the same thing under different words.
+    ///
+    /// A port's command line *is* its kill, so "Run here, inside this
+    /// window" was a second route to the destructive action — with an
+    /// innocuous label, three rows from the top, right after the destructive
+    /// one had been moved to the bottom for safety. And on a file, `copy`
+    /// and `copyabs` both copy the path. See `docs/ACTIONS.md`, R5.
+    #[test]
+    fn no_entry_repeats_another_in_different_words() {
+        use crate::item::Kind;
+        for it in every_kind_row() {
+            let ids: Vec<&str> =
+                crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+            if matches!(it.kind, Kind::Port | Kind::Proc) {
+                assert!(
+                    !ids.contains(&"runhere"),
+                    "{:?}: running its command line is the kill, already offered: {ids:?}",
+                    it.kind
+                );
+            }
+            assert!(
+                !(ids.contains(&"copy") && ids.contains(&"copyabs")),
+                "{:?}: two ways to copy the same path: {ids:?}",
+                it.kind
+            );
+            // No id may appear twice at all.
+            let mut seen: Vec<&str> = ids.clone();
+            seen.sort_unstable();
+            let before = seen.len();
+            seen.dedup();
+            assert_eq!(before, seen.len(), "{:?} repeats an id: {ids:?}", it.kind);
+        }
+    }
+
     /// Deleting is the only destructive thing Prelude does to a user's
     /// files, and the path it acts on has been through JSON, a row, and a
     /// shell. A launcher that removes whatever it is handed is one malformed

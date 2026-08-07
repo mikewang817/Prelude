@@ -122,6 +122,33 @@ impl Kind {
         }
     }
 
+    /// Is `cmd` something a shell could actually run?
+    ///
+    /// The panel used to append "Run in the shell" to every kind that had
+    /// not already claimed it, which is not a fallback but a bug with a
+    /// fallback's manners: a calculator row is `424.81`, a translation row
+    /// is the translation, and a skill row is `/cnipa-ooa`, which a shell
+    /// answers with "no such file". See `docs/ACTIONS.md`, R3.
+    pub fn is_command_line(self) -> bool {
+        use Kind::*;
+        matches!(
+            self,
+            History | Script | Path | Snippet | Ssh | Container | Git | Port | Proc | Sys | Clip
+                | Agent | Dir | App | Link | Session | Mcp
+        )
+    }
+
+    /// Does running it take over the terminal?
+    ///
+    /// "Run here" renders output inside the launcher, which is right for a
+    /// command that prints and wrong for one that paints: an agent, a
+    /// resumed session, ssh and `docker exec -it` are all full-screen, and
+    /// belong in a real terminal or not at all.
+    pub fn is_interactive(self) -> bool {
+        use Kind::*;
+        matches!(self, Ssh | Agent | Session | Container)
+    }
+
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
