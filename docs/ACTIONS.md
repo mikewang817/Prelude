@@ -3,19 +3,92 @@
 What `Ctrl+K` offers on each row, and why each entry is there — or was
 removed. `Enter` is decided in `defaults.rs`; this is everything else.
 
+> **Status: sections 1–2 are proposals awaiting agreement. Not implemented.**
+> Everything from "Every kind" onwards describes the code as it stands.
+
 ## The test every entry has to pass
 
 > Would a person, having selected *this kind of row*, reach for this?
-> And is it something they cannot already do from the two rows above?
+> **And is it something they cannot already do without opening this panel?**
 
-That second half is where the panel had rotted. `Enter` and the secondary are
-listed at the top as *statements* of what those two keys do. Every kind then
-listed its own verbs — and a dozen of them re-listed the same two actions
-under better wording. On an agent row you got `Run it in the shell` at row
-two and `Run in the shell below` at row four: one six-line panel, one action,
-twice. Checking ids never catches that; the duplication is in the behaviour.
+The second half is the whole of it, and it has two halves of its own. The
+easy one is *no entry may repeat another entry* — a dozen kinds were
+relisting their own default under better wording, and that is fixed.
 
-**A panel whose third row repeats its first is teaching you not to read it.**
+The hard one is **no entry may repeat a key**. That one is still broken.
+
+## 1. The `Enter` row should go
+
+On an agent row the panel opens with:
+
+```
+Insert into prompt              · Enter
+```
+
+But the main list's footer, while you were standing on that row, already
+said:
+
+```
+Insert into prompt  Enter   ·   Actions  Ctrl+K
+```
+
+So the first row of the panel tells you what the screen you just left was
+already telling you, and offers to do what the key you did not press would
+have done. It is not redundant with another row — it is redundant with
+`Enter` itself. The rule that put it there (*"Enter's behaviour is always
+stated, and always first"*) was written before the footer existed, and the
+footer does that job better: it states it **without being asked**, on every
+row, as you move.
+
+**Proposed:** drop the row. Keep the information by putting it in the
+panel's own header, which is currently empty and unselectable — so it costs
+no entry and cannot be chosen by accident:
+
+```
+╭─ pi ──────────────────────────────────────────────╮
+│ ⌘                                            4/4  │
+│ Enter, back in the list, inserts it into your prompt
+│ ▸ Run it in the shell                             │
+│   Resume its most recent session   Prelude · 8h ago│
+│   Ask pi something                                │
+│   Open its settings                ~/.pi/agent/…  │
+╰───────────────────────────────────────────────────╯
+```
+
+Four rows, four things you cannot do any other way.
+
+## 2. "the other one" should go
+
+The second row is the *secondary action*, which is real and has no key of
+its own — so unlike the Enter row it genuinely belongs here. But it is
+labelled:
+
+```
+Run it in the shell             · the other one
+```
+
+"the other one" is an internal concept leaking out. To the person reading
+it, this is simply the most likely alternative, and it should read as an
+action like every other row.
+
+**Proposed:** keep the row, drop the sub-label. `on_secondary` stays as the
+mechanism by which a kind names its most likely alternative; it just stops
+announcing itself.
+
+## 3. Open questions for you
+
+- **Should the panel be able to run the default at all?** Dropping the row
+  means the answer is no — you press Esc and Enter. That is one extra
+  keystroke in the case where you opened the panel and changed your mind.
+- **Is the header the right home for it**, or should the border label carry
+  it (`─ pi · Enter inserts it ─`)? The header is a full line and can hold a
+  sentence; the border label is tighter but competes with the row's name.
+- **Do the counts stay?** With both rows gone, `calc` has a **one-line**
+  panel (`Copy the original` is `translate` only) — arguably it should not
+  open a panel at all, and `^K` on a calc row could say so rather than show
+  a list of one.
+
+---
 
 ## Order
 
@@ -261,9 +334,12 @@ secondary, relisted.
 
 ## The rules, extracted
 
-**R1** Enter's behaviour is always stated, and always first.
+**R1** Enter's behaviour is always stated — by the footer, as you move, and
+(proposed) by the panel's header, not by a row. *A panel entry may not
+duplicate a key any more than it may duplicate another entry.*
 
-**R2** The secondary is always second, and is always Enter's opposite.
+**R2** The secondary is always first among the actions, and is always
+Enter's opposite. It has no key, so this row is the whole of it.
 
 **R3** A generic verb is offered only where it means something.
 `is_command_line()` gates `Run in the shell`; `is_interactive()` suppresses
