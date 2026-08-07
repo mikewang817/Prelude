@@ -121,5 +121,6 @@ pub fn pick_app(subject: &str) -> Option<String> {
         &format!(" open {subject} with "),
         "⌕ ",
         "Open  Enter   ·   Back  Esc",
+        "",
     )
 }

@@ -265,11 +265,25 @@ pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
 /// A human-readable name for the current default, shown as the first entry of
 /// the action panel so the behaviour is never a mystery.
 pub fn describe(item: &Item, host: Host) -> &'static str {
-    describe_action(on_enter(item, host))
+    name(item, on_enter(item, host))
 }
 
 pub fn describe_secondary(item: &Item, host: Host) -> Option<&'static str> {
-    on_secondary(item, host).map(describe_action)
+    on_secondary(item, host).map(|d| name(item, d))
+}
+
+/// One verb can read two ways depending on what it is pointed at.
+///
+/// `Inspect` is "show what is using it" for a port and "show its full
+/// command" for a process — the same action, two different questions. The
+/// kind used to carry a second entry with the right wording, which was the
+/// same action listed twice; once Enter's row left the panel the two sat
+/// adjacent and it stopped being arguable.
+fn name(item: &Item, d: Default_) -> &'static str {
+    if d == Default_::Act(Verb::Inspect) && item.kind == Kind::Proc {
+        return "Show its full command";
+    }
+    describe_action(d)
 }
 
 fn describe_action(d: Default_) -> &'static str {

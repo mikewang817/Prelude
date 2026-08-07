@@ -100,12 +100,10 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         Kind::Config => open_actions(it.get("path"), &editor),
         Kind::Port => vec![
             a("run", "Kill it now", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
-            a("inspect", "Show what's using it", format!("lsof -nP -iTCP:{}", it.get("port"))),
             a("copy", "Copy the pid", it.get("pid")),
         ],
         Kind::Proc => vec![
             a("run", "Kill it now", format!("{} · {}% CPU", it.get("name"), it.get("cpu"))),
-            a("inspect", "Show its full command", it.get("cmd").chars().take(50).collect::<String>()),
             a("copy", "Copy the pid", it.get("pid")),
         ],
         Kind::Container => vec![
@@ -234,13 +232,18 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // third row repeats its first is teaching you not to read it.
         _ => vec![],
     };
-    // Say plainly what Enter does here, so the behaviour is never a mystery.
-    acts.insert(0, a("default", crate::defaults::describe(it, host), "Enter"));
-    // The secondary action has no key of its own, so this row is the whole
-    // of it. It sits directly under Enter's because it is Enter's opposite,
-    // and it is the answer to "that is not quite what I wanted".
+    // Enter's own behaviour is not a row here. The list's footer already
+    // states it on every row as you move, so an entry would duplicate the
+    // *key* rather than another entry — and it could only ever be reached by
+    // someone who chose not to press that key. It goes in the panel's
+    // header, which cannot be selected. See `docs/ACTIONS.md`, section 1.
+    //
+    // The secondary is the opposite case: it has no key at all, so this row
+    // is the whole of it. It leads, being the most likely alternative, and
+    // says what it does rather than announcing itself as "the other one" —
+    // an internal word for it that was leaking onto the screen.
     if let Some(label) = crate::defaults::describe_secondary(it, host) {
-        acts.insert(1, a("secondary", label, "the other one"));
+        acts.insert(0, a("secondary", label, ""));
     }
     // Everything the removed shortcuts used to do stays reachable here — but
     // only where it means anything. Offering to run a translation, or to
@@ -371,7 +374,15 @@ fn parent_of(p: impl AsRef<str>) -> String {
 }
 
 pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
-    let acts = actions_for(it);
+    // The panel reflects where you opened it from, exactly as the footer
+    // does — in a popup over an agent, Enter means something else and the
+    // header has to say so.
+    let host = if paste_target.is_some() {
+        crate::defaults::Host::Agent
+    } else {
+        crate::defaults::Host::Shell
+    };
+    let acts = actions_for_host(it, host);
     let feed: String = acts
         .iter()
         .map(|(id, label, sub)| {
@@ -383,7 +394,17 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
     let short = crate::width::dtrunc(&crate::width::flatten(&it.cmd), 56);
     // The panel's payload is a bare action id, not JSON, so take the raw
     // selection rather than trying to parse an Item out of it.
-    match ui::pick_raw(feed.trim_end(), &format!(" {short} "), "⌘ ", "Run  Enter   ·   Back  Esc") {
+    let header = format!(
+        "Enter, back in the list:  {}",
+        crate::defaults::describe(it, host)
+    );
+    match ui::pick_raw(
+        feed.trim_end(),
+        &format!(" {short} "),
+        "⌘ ",
+        "Run  Enter   ·   Back  Esc",
+        &header,
+    ) {
         Some(id) => apply(&id, it, &paste_target),
         None => 130,
     }

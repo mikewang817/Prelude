@@ -603,19 +603,28 @@ mod tests {
     }
 
     /// Removing the secondary's key is only defensible because the action
-    /// itself did not go anywhere. Pin that: the panel's first two entries
-    /// are what Enter does and its opposite, in that order.
+    /// itself did not go anywhere. It leads the panel, and it is the one
+    /// entry that has to be there — everything else in the panel could in
+    /// principle be reached another way; this could not be reached at all.
+    ///
+    /// Enter, by contrast, is not an entry. Its behaviour is stated by the
+    /// list's footer as you move and by the panel's unselectable header, so
+    /// a row for it would duplicate the key rather than another row.
     #[test]
-    fn the_panel_still_carries_the_secondary() {
+    fn the_panel_carries_the_secondary_and_not_the_default() {
         use crate::defaults::{describe, describe_secondary, Host};
         use crate::item::{Item, Kind};
         let it = Item::new("/tmp/x.txt", Kind::File).title("x.txt").put("path", "/tmp/x.txt");
         let acts = crate::actions::actions_for(&it);
-        assert_eq!(acts[0].0, "default");
-        assert_eq!(acts[0].1, describe(&it, Host::Shell), "first entry states what Enter does");
-        assert_eq!(acts[1].0, "secondary");
-        assert_eq!(acts[1].1, describe_secondary(&it, Host::Shell).unwrap());
-        assert_ne!(acts[0].1, acts[1].1, "two rows saying the same thing is worse than one");
+        assert_eq!(acts[0].0, "secondary");
+        assert_eq!(acts[0].1, describe_secondary(&it, Host::Shell).unwrap());
+        // No sub-label: "the other one" was an internal name for this row
+        // leaking onto the screen. To the reader it is simply an action.
+        assert_eq!(acts[0].2, "", "the secondary announces what it does, not what it is");
+        assert!(!acts.iter().any(|(id, ..)| *id == "default"), "{acts:?}");
+        // And what Enter does is still knowable — it is what the panel's
+        // header is built from.
+        assert!(!describe(&it, Host::Shell).is_empty());
     }
 
     /// What the ^K panel actually offers, without standing up an fzf to
@@ -894,8 +903,11 @@ mod tests {
                     it.kind
                 );
             }
-            // And the two defaults are always the first two, in that order.
-            assert_eq!(ids[0], "default", "{:?}", it.kind);
+            // The secondary leads, being the only action with no key of its
+            // own. Enter's behaviour is not a row at all — the footer says
+            // it, and the panel's header repeats it unselectably.
+            assert_eq!(ids[0], "secondary", "{:?}", it.kind);
+            assert!(!ids.contains(&"default".to_string()), "{:?}: {ids:?}", it.kind);
         }
     }
 

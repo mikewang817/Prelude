@@ -75,6 +75,41 @@ action like every other row.
 mechanism by which a kind names its most likely alternative; it just stops
 announcing itself.
 
+## 2a. What Raycast actually does
+
+Prelude takes its shape from Raycast, so its Action Panel is worth reading
+rather than remembering. Four things it does, and what each means here.
+
+**It keeps the primary action inside the panel.** *"The primary action
+appears both in the Action Panel and as the default triggered by ↵."* The
+bottom action bar names it as well — so Raycast has exactly the duplication
+section 1 proposes to remove, and keeps it on purpose. The reason is
+searchability: the panel opens with *"Search for actions…"* and fuzzy
+matching **collapses every section into one flat list**. A primary that is
+not in the list cannot be found by typing its name, and the panel stops
+being the complete inventory of what is possible.
+
+Our panel is an fzf, so it is searchable in exactly the same way. This is a
+real argument against section 1, and it is Raycast's, not mine.
+
+**It draws named sections.** Not just an order — visible groups with titles:
+*Favorites*, *Configure*, *Deeplink*, *Manage*, and a **Danger zone** for
+destructive actions. Our five groups are enforced and invisible. fzf has no
+non-selectable row, so titled sections are not directly available — but the
+thing the *Danger zone* title is really doing is available another way.
+
+**It styles destructive actions red**, via `Action.Style.Destructive`, and
+its rule for the stronger measure is precise: *"Use the confirmation Alert if
+the action is doing something that user cannot revert."* By that rule Prelude
+is inconsistent — deleting a skill confirms, but **End it** on a live agent
+and **Kill it now** on a process do not, and neither can be undone.
+
+**It uses submenus when an action needs to pick from a range.** Ours
+enumerate instead: a skill offers `Copy it to codex`, `Copy it to pi`,
+`Copy it to opencode`, `Copy it to all missing agents`, `Use it in pi, just
+this run`, `Delete claude's copy…`, `Delete codex's copy…` — seven rows that
+are three verbs and a choice of agent.
+
 ## 3. Open questions for you
 
 - **Should the panel be able to run the default at all?** Dropping the row

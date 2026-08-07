@@ -544,7 +544,7 @@ pub fn confirm(question: &str, go_ahead: &str, detail: &str) -> bool {
         "{:<34}{SEP}no\n{:<34}{tail}{SEP}yes",
         "Cancel", go_ahead
     );
-    pick_raw(&feed, &format!(" {question} "), "? ", "Choose  Enter   ·   Cancel  Esc")
+    pick_raw(&feed, &format!(" {question} "), "? ", "Choose  Enter   ·   Cancel  Esc", "")
         .as_deref()
         == Some("yes")
 }
@@ -581,8 +581,20 @@ pub fn act_jump(item: &Item, paste: &Option<String>, zoom: bool) -> i32 {
     }
 }
 
-pub fn pick_raw(feed: &str, label: &str, prompt: &str, header: &str) -> Option<String> {
-    let args = base_args(prompt, label, Some(&format!("{DIM}{header}{RESET}")));
+/// `footer` names the keys; `header` is a line above the list that cannot be
+/// selected — which is what makes it the right home for a statement rather
+/// than an action.
+pub fn pick_raw(
+    feed: &str,
+    label: &str,
+    prompt: &str,
+    footer: &str,
+    header: &str,
+) -> Option<String> {
+    let mut args = base_args(prompt, label, Some(&format!("{DIM}{footer}{RESET}")));
+    if !header.is_empty() {
+        args.push(format!("--header={header}"));
+    }
     let mut modes: Vec<Vec<String>> = Vec::new();
     if env_flag("PRELUDE_IN_POPUP") {
         modes.push(vec![]);
