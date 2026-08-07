@@ -38,7 +38,14 @@ pub const AGENTS: &[Agent] = &[
         name: "codex",
         resume: |id| format!("codex resume {id}"),
         prompt: |p| format!("codex {}", shq(p)),
-        ask: |p| vec!["codex".into(), "exec".into(), p.into()],
+        // --skip-git-repo-check: codex exec refuses to run outside a git
+        // repo, and the launcher is used from any directory.
+        ask: |p| vec![
+            "codex".into(),
+            "exec".into(),
+            "--skip-git-repo-check".into(),
+            p.into(),
+        ],
     },
     Agent {
         name: "pi",

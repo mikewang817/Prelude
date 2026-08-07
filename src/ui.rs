@@ -377,7 +377,10 @@ pub fn ask(item: &Item) -> i32 {
     let _ = std::io::stdout().flush();
 
     let mut cmd = Command::new(&args[0]);
-    cmd.args(&args[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // stderr is kept: discarding it turned every failure into a silent,
+    // permanent "asking…" with no clue why. Agents also refuse for ordinary
+    // reasons — not a git repo, not logged in — and you need to see that.
+    cmd.args(&args[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(dir) = item.data.get("cwd").filter(|d| std::path::Path::new(d).is_dir()) {
         cmd.current_dir(dir);
     }
@@ -385,14 +388,33 @@ pub fn ask(item: &Item) -> i32 {
         println!("{YELLOW}could not run {agent}{RESET}");
         return 1;
     };
-    // Stream it, so a slow answer appears as it arrives rather than all at
-    // the end.
+    // Drain stderr on a helper thread; a child that fills its stderr pipe
+    // while we read stdout would deadlock.
+    let errs = child.stderr.take().map(|e| {
+        std::thread::spawn(move || {
+            BufReader::new(e).lines().map_while(Result::ok).collect::<Vec<_>>()
+        })
+    });
+
+    // Stream stdout, so a slow answer appears as it arrives rather than all
+    // at the end.
+    let mut any = false;
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
+            any = true;
             println!("{line}");
             let _ = std::io::stdout().flush();
         }
     }
-    let _ = child.wait();
+    let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+    let errs: Vec<String> = errs.and_then(|h| h.join().ok()).unwrap_or_default();
+
+    if !any {
+        // Say what went wrong rather than leaving "asking…" on screen.
+        println!("{YELLOW}{agent} returned nothing (exit {code}){RESET}");
+        for l in errs.iter().rev().take(6).rev() {
+            println!("{DIM}{l}{RESET}");
+        }
+    }
     0
 }
