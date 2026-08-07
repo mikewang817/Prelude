@@ -584,6 +584,19 @@ Every selection is recorded in `frecency.tsv` — a plain text file you can read
 and edit. What you actually pick floats up, with recent use weighted far above
 old use.
 
+**Within its kind, and never across.** Sorting asks two questions in order:
+*what kind of thing is this*, then *how much do you use this one*. So a skill
+you ran twice this morning leads the other skills, and still sits below the
+agents; a question an agent is blocked on leads everything, whatever you have
+been picking all week.
+
+That order used to be one number — kind priority plus a bonus — and the
+arithmetic could not hold it. The agent cluster spans 25 points while the
+bonus reached 60, so the bands stopped being bands: a much-used skill
+outranked `claude` itself, and a config file outranked a skill. Comparing the
+band first makes it structural rather than a matter of two constants staying
+out of each other's way.
+
 ## Latency
 
 Latency is the whole product. A launcher that takes 250ms to appear feels

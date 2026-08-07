@@ -195,6 +195,35 @@ pub fn gather_agents() -> Vec<Item> {
     finish(items)
 }
 
+/// The one rule for what comes first: **kind decides the band, and learned
+/// ranking only orders things inside it.**
+///
+/// This used to be a single number — kind priority plus a frecency bonus
+/// capped at 60 — and the cap was doing a job it could not do. The whole
+/// agent cluster spans 25 points (Agent 1000 down to Config 975) while the
+/// bonus reached 60, so the bonus was two and a half times wider than the
+/// thing it was supposed to nudge within. The bands stopped being bands: a
+/// skill used twice this morning outranked `claude` itself, and a config
+/// file outranked a skill. The comment on the cap even said what it was for
+/// — rise within your kind, do not vault over a whole category — while the
+/// arithmetic guaranteed the opposite.
+///
+/// Comparing the band first makes that structural instead of arithmetical.
+/// No cap can be miscalibrated, no future change to a priority can silently
+/// re-open the hole, and the two questions stay separate: *what kind of
+/// thing is this* and *how much do you use this one*.
+///
+/// `score` still carries the band as a constant, which is harmless: it is
+/// identical for every item being compared at the second level, so it
+/// cancels. What is left there is the source's own ordering (a run's state,
+/// a session's recency) plus frecency.
+pub fn by_rank(a: &Item, b: &Item) -> std::cmp::Ordering {
+    b.kind
+        .priority()
+        .cmp(&a.kind.priority())
+        .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+}
+
 /// Dedupe, apply learned ranking, sort.
 pub fn finish(items: Vec<Item>) -> Vec<Item> {
     let freq = crate::frecency::load();
@@ -207,13 +236,16 @@ pub fn finish(items: Vec<Item>) -> Vec<Item> {
             continue;
         }
         if let Some((n, last)) = freq.get(&it.cmd) {
-            // Capped: what you use often should rise within its kind, not
-            // vault over a whole category. Without a ceiling, copying one
-            // command a few times put it above every agent row.
+            // Still capped, but for a different reason now that it cannot
+            // cross a band: past a point, what the source itself knows —
+            // that this session is the most recent, that this run is the
+            // one that is stuck — is better than one more use.
             it.score += (crate::frecency::score(*n, *last) * 12.0).min(60.0);
         }
         out.push(it);
     }
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Stable, so items the frecency cap has tied keep the order their source
+    // produced them in — newest session first, and so on.
+    out.sort_by(by_rank);
     out
 }

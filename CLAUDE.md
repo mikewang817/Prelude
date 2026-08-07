@@ -116,6 +116,17 @@ runs in a separate process. If both sides measure their own widths they
 drift, and computed rows land in a different column. With the detail pane
 showing, measure the *list* width, not the terminal's.
 
+**Kind decides the band; frecency only orders things inside it.** The two
+questions — *what kind of thing is this* and *how much do you use this one* —
+are separate, and `cache::by_rank` compares them in that order. They used to
+be added into one number, and the arithmetic could not hold: the agent
+cluster spans 25 points (Agent 1000 → Config 975) while the bonus reached 60,
+so a skill used twice that morning sat above `claude` itself and a config
+file sat above a skill. Do not reintroduce a single total and do not try to
+fix it by tuning the cap — the cap can only move the threshold, and any later
+edit to a priority silently re-opens the hole. A test walks every pair of
+kinds with the lower band given an absurd score.
+
 **Column widths are shared across all kinds and taken at a percentile.**
 Per-kind widths only align within a kind, so the dots scatter. And one
 outlier — a session in a deep iCloud path, 127 columns — will set the column

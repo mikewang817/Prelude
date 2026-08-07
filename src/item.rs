@@ -42,12 +42,18 @@ impl Kind {
     pub fn priority(self) -> i64 {
         use Kind::*;
         match self {
-            // Above even the agents, and by more than the learned ranking
-            // can ever make up: frecency adds up to 60, so a band ten points
-            // clear was not clear at all — a claude you pick every day sat
-            // above a question blocked on you. Nothing on this machine
-            // outranks something that has stopped and asked.
-            Msg => 1100,
+            // Above even the agents. A run that has gone quiet *might* want
+            // something; one of these has said so and is blocked until you
+            // answer.
+            //
+            // Ten points is enough, because these numbers are compared to
+            // each other and nothing else — `cache::by_rank` settles the
+            // band before it ever looks at a score. It was not always so:
+            // when everything went into one total, this had to sit a hundred
+            // clear of Agent to survive a frecency bonus that reached sixty,
+            // and the rest of the cluster, spanning twenty-five points, did
+            // not survive it at all.
+            Msg => 1010,
             // Agents occupy their own band, far enough above everything
             // else that learned ranking cannot lift another kind past them.
             // They are what this launcher is for; everything else is one

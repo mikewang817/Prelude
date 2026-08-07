@@ -836,27 +836,46 @@ mod tests {
         assert_eq!(t, "plain question");
     }
 
-    /// A question an agent is blocked on outranks everything, and it has to
-    /// outrank it by more than the learned ranking can make up.
+    /// Kind decides the band; how much you use something only orders it
+    /// *inside* that band. Nothing you pick often can climb out.
     ///
-    /// This was a real bug: Msg sat ten points above Agent, frecency adds up
-    /// to sixty, and so the claude row you pick every day floated above a
-    /// question waiting on you. The band has to clear the whole bonus.
+    /// This was a real bug and a visible one. The agent cluster spans 25
+    /// points (Agent 1000 down to Config 975) while the frecency bonus
+    /// reached 60, so on a real machine a skill used twice that morning sat
+    /// above `claude` itself and a config file sat above a skill. Tuning the
+    /// cap would only move the threshold; comparing the band first removes
+    /// the possibility.
     #[test]
-    fn a_question_outranks_everything_frecency_can_lift() {
-        use crate::item::Kind;
-        let msg = Kind::Msg.priority();
-        // 60 is the cap `finish` applies to the frecency bonus.
-        for k in Kind::all() {
-            if *k == Kind::Msg {
-                continue;
+    fn frecency_orders_within_a_kind_and_never_across_kinds() {
+        use crate::cache::by_rank;
+        use crate::item::{Item, Kind};
+        use std::cmp::Ordering;
+
+        // Every pair of distinct kinds, with the *lower* band handed an
+        // absurd score and the higher band none at all.
+        for hi in Kind::all() {
+            for lo in Kind::all() {
+                if hi.priority() <= lo.priority() {
+                    continue;
+                }
+                let mut top = Item::new("x", *hi);
+                top.score = 0.0;
+                let mut bottom = Item::new("y", *lo);
+                bottom.score = 1e9;
+                assert_eq!(
+                    by_rank(&top, &bottom),
+                    Ordering::Less,
+                    "{lo:?} with unlimited frecency climbed over {hi:?}"
+                );
             }
-            assert!(
-                k.priority() + 60 < msg,
-                "{k:?} at {} + frecency can reach a blocked question at {msg}",
-                k.priority()
-            );
         }
+
+        // And inside one kind the learned ranking is exactly what decides.
+        let mut a = Item::new("a", Kind::History);
+        let mut b = Item::new("b", Kind::History);
+        a.score = 100.0;
+        b.score = 160.0;
+        assert_eq!(by_rank(&a, &b), Ordering::Greater, "b is used more, b comes first");
     }
 
     /// The status bar says something only when there is something to say.
