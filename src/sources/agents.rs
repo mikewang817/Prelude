@@ -303,13 +303,13 @@ pub fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resul
 pub fn configs() -> Vec<Item> {
     let h = crate::paths::home();
     let mut v: Vec<(std::path::PathBuf, &str)> = vec![
-        (h.join(".claude/CLAUDE.md"), "claude · global instructions"),
-        (h.join(".claude/settings.json"), "claude · settings"),
-        (h.join(".claude.json"), "claude · mcp + projects"),
-        (h.join(".codex/config.toml"), "codex · config"),
-        (h.join(".codex/AGENTS.md"), "codex · instructions"),
-        (h.join(".pi/agent/settings.json"), "pi · settings"),
-        (h.join(".config/opencode/opencode.jsonc"), "opencode · config"),
+        (h.join(".claude/CLAUDE.md"), "claude"),
+        (h.join(".claude/settings.json"), "claude"),
+        (h.join(".claude.json"), "claude"),
+        (h.join(".codex/config.toml"), "codex"),
+        (h.join(".codex/AGENTS.md"), "codex"),
+        (h.join(".pi/agent/settings.json"), "pi"),
+        (h.join(".config/opencode/opencode.jsonc"), "opencode"),
     ];
     // whatever the project you're standing in defines
     if let Some(root) = super::project::root() {
@@ -325,6 +325,7 @@ pub fn configs() -> Vec<Item> {
             Item::new(format!("$EDITOR {}", shq(&s)), Kind::Config)
                 .title(name)
                 .fields([what.to_string(), crate::paths::tilde(&s)])
+                .put("agent", what)
                 .put("path", s)
         })
         .collect()

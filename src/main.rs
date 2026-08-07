@@ -60,7 +60,7 @@ fn main() -> ExitCode {
         // diffing behaviour without standing up a terminal.
         ["_dump"] => {
             let items = cache::gather();
-            println!("{}", render::render(&items, term_width(), None));
+            println!("{}", render::render(&items, term_width()));
             0
         }
         // Scriptable equivalent of the ^K action, and what its test drives.

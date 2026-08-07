@@ -151,8 +151,8 @@ pub fn search(paste_target: Option<String>) -> i32 {
     // Compute the layout once and hand it to the per-keystroke helper. Both
     // sides must agree; if each measured its own, computed rows would land
     // in a different column from the static ones.
-    let widths = render::field_widths(&items);
     let tw = render::title_width(&items, cols);
+    let widths = render::column_widths(&items, render::middle_budget(cols, tw));
     let feed = render::render_with(&items, cols, Some(&widths), Some(tw));
 
     // Park the static list on disk so the per-keystroke reload only has to

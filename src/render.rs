@@ -29,22 +29,68 @@ pub fn label_width() -> usize {
     })
 }
 
-/// Column widths per kind, taken from the items that carry structured fields.
-pub fn field_widths(items: &[Item]) -> HashMap<Kind, Vec<usize>> {
-    let mut w: HashMap<Kind, Vec<usize>> = HashMap::new();
+/// Width available to the middle columns, given the title column.
+pub fn middle_budget(width: usize, tw: usize) -> usize {
+    let usable = width.max(48) - 8;
+    usable.saturating_sub(tw + 2 + label_width() + 3)
+}
+
+/// One set of column widths for the whole list, not one per kind.
+///
+/// Per-kind widths line up within a kind and nowhere else, so the separators
+/// scatter: agents put theirs at 20/31/39, skills at 20/37/57/100. Sharing
+/// the widths turns the dots into continuous vertical rules down the list,
+/// which is what makes it read as a table rather than as rows that happen to
+/// be near each other.
+pub fn column_widths(items: &[Item], budget: usize) -> Vec<usize> {
+    // Gather every value per column, then take a high percentile rather than
+    // the maximum. One session recorded in a deep iCloud folder is 127
+    // columns wide; letting it set the column left a hundred blanks after
+    // "0 mcp" on every other row.
+    let mut per: Vec<Vec<usize>> = Vec::new();
     for it in items {
-        if it.fields.is_empty() {
-            continue;
-        }
-        let cur = w.entry(it.kind).or_default();
         for (i, f) in it.fields.iter().enumerate() {
             let fw = dwidth(&flatten(f));
-            if i < cur.len() {
-                cur[i] = cur[i].max(fw);
-            } else {
-                cur.push(fw);
+            if i >= per.len() {
+                per.push(Vec::new());
             }
+            per[i].push(fw);
         }
+    }
+    let mut w: Vec<usize> = per
+        .into_iter()
+        .map(|mut v| {
+            v.sort_unstable();
+            v[(v.len() * 90 / 100).min(v.len() - 1)]
+        })
+        .collect();
+    if w.is_empty() {
+        return w;
+    }
+    // Trim from the right until it fits: the last column is a description,
+    // which tolerates truncation far better than a pid or a timestamp.
+    loop {
+        let total: usize = w.iter().sum::<usize>() + 3 * (w.len() - 1);
+        if total <= budget {
+            break;
+        }
+        let over = total - budget;
+        let last = w.len() - 1;
+        if w[last] > over + 8 {
+            w[last] -= over;
+            break;
+        }
+        if w.len() == 1 {
+            w[0] = w[0].min(budget);
+            break;
+        }
+        w.pop();
+    }
+    // Anything left over goes to the final column so the row reaches the
+    // right-hand edge instead of stopping short.
+    let total: usize = w.iter().sum::<usize>() + 3 * (w.len() - 1);
+    if let Some(last) = w.last_mut() {
+        *last += budget.saturating_sub(total);
     }
     w
 }
@@ -73,28 +119,30 @@ pub fn title_width(items: &[Item], width: usize) -> usize {
     p85.clamp(18, usable * 45 / 100)
 }
 
-pub fn render(items: &[Item], width: usize, widths: Option<&HashMap<Kind, Vec<usize>>>) -> String {
-    render_with(items, width, widths, None)
+pub fn render(items: &[Item], width: usize) -> String {
+    render_with(items, width, None, None)
 }
 
 pub fn render_with(
     items: &[Item],
     width: usize,
-    widths: Option<&HashMap<Kind, Vec<usize>>>,
+    widths: Option<&[usize]>,
     tw_override: Option<usize>,
 ) -> String {
-    let owned;
-    let widths = match widths {
-        Some(w) => w,
-        None => {
-            owned = field_widths(items);
-            &owned
-        }
-    };
+
     // Leave room for fzf's border, pointer and scrollbar, or lines wrap.
     let usable = width.max(48) - 8;
     let tw = tw_override.unwrap_or_else(|| title_width(items, width));
     let lw = label_width();
+    let budget = middle_budget(width, tw);
+    let owned;
+    let cols_w: &[usize] = match widths {
+        Some(w) => w,
+        None => {
+            owned = column_widths(items, budget);
+            &owned
+        }
+    };
 
     let mut out = String::with_capacity(items.len() * 96);
     for it in items {
@@ -105,24 +153,25 @@ pub fn render_with(
         // The kind label is pinned to the right edge, as Raycast pins its
         // result type. That gives it a single column on every row for free,
         // and lets the middle stretch to fill everything in between.
-        let budget = usable.saturating_sub(tw + 2 + lw + 3);
         let mut middle = String::new();
         if budget >= 8 {
             let tail = if !it.fields.is_empty() {
-                let w = widths.get(&it.kind);
                 let cols: Vec<String> = it
                     .fields
                     .iter()
                     .enumerate()
+                    .take(cols_w.len())
                     .map(|(i, f)| {
-                        let f = flatten(f);
-                        // Numbers read best right-aligned so digits stack.
-                        let right = f.starts_with(|c: char| c.is_ascii_digit());
-                        let cw = w.and_then(|w| w.get(i)).copied().unwrap_or_else(|| dwidth(&f));
-                        pad_to(&f, cw, right)
+                        // Everything left-aligned, hard against its
+                        // separator. Right-aligning numbers stacks digits
+                        // neatly within one kind, but the columns are shared
+                        // across all of them — so "2 skills" got shoved to
+                        // the far end of a column widened by "claude,
+                        // shared", metres away from the dot it belongs to.
+                        pad_to(&dtrunc(&flatten(f), cols_w[i]), cols_w[i], false)
                     })
                     .collect();
-                Some(cols.join(" · ").trim_end().to_string())
+                Some(cols.join(" · "))
             } else if !it.subtitle.is_empty() {
                 Some(flatten(&it.subtitle))
             } else {

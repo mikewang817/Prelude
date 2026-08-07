@@ -13,30 +13,30 @@ use crate::paths::tilde;
 pub fn show(it: &Item) {
     let (color, label) = it.kind.style();
     let mut out = vec![format!("{color}{label}{RESET}"), String::new()];
-    let mut kv = |k: &str, v: &str| {
+    fn kv(out: &mut Vec<String>, k: &str, v: &str) {
         if !v.is_empty() {
             out.push(format!("{DIM}{k:<9}{RESET}{v}"));
         }
-    };
+    }
 
     match it.kind {
         Kind::Skill => {
-            kv("agents", it.get("agent"));
-            kv("file", &tilde(it.get("file")));
+            kv(&mut out, "agents", it.get("agent"));
+            kv(&mut out, "file", &tilde(it.get("file")));
             if !it.get("desc").is_empty() {
                 out.push(String::new());
                 out.push(it.get("desc").to_string());
             }
         }
         Kind::Mcp => {
-            kv("agent", it.get("agent"));
-            kv("name", it.get("name"));
-            kv("config", &tilde(it.get("config")));
+            kv(&mut out, "agent", it.get("agent"));
+            kv(&mut out, "name", it.get("name"));
+            kv(&mut out, "config", &tilde(it.get("config")));
         }
         Kind::Proc => {
-            kv("pid", it.get("pid"));
-            kv("cpu", &format!("{}%", it.get("cpu")));
-            kv("memory", it.get("mem"));
+            kv(&mut out, "pid", it.get("pid"));
+            kv(&mut out, "cpu", &format!("{}%", it.get("cpu")));
+            kv(&mut out, "memory", it.get("mem"));
             if !it.get("cmd").is_empty() {
                 out.push(String::new());
                 out.push(format!("{DIM}command{RESET}"));
@@ -44,15 +44,15 @@ pub fn show(it: &Item) {
             }
         }
         Kind::Port => {
-            kv("port", it.get("port"));
-            kv("process", it.get("proc"));
-            kv("pid", it.get("pid"));
+            kv(&mut out, "port", it.get("port"));
+            kv(&mut out, "process", it.get("proc"));
+            kv(&mut out, "pid", it.get("pid"));
         }
         Kind::File | Kind::Find => {
             let p = it.get("path");
-            kv("path", &tilde(p));
+            kv(&mut out, "path", &tilde(p));
             if let Ok(m) = std::fs::metadata(p) {
-                kv("size", &format!("{} bytes", group(m.len())));
+                kv(&mut out, "size", &format!("{} bytes", group(m.len())));
             }
             if let Ok(text) = std::fs::read_to_string(p) {
                 out.push(String::new());
@@ -61,9 +61,56 @@ pub fn show(it: &Item) {
             }
         }
         Kind::Clip => out.push(it.get("full").to_string()),
-        Kind::App => kv("path", &tilde(it.get("path"))),
-        Kind::Link => kv("url", it.get("url")),
-        _ => {}
+        Kind::App => kv(&mut out, "path", &tilde(it.get("path"))),
+        Kind::Link => kv(&mut out, "url", it.get("url")),
+        Kind::Agent => {
+            for (k, v) in [("skills", 0), ("mcp", 1), ("sessions", 2)] {
+                kv(&mut out, k, it.fields.get(v).map(String::as_str).unwrap_or(""));
+            }
+            out.push(String::new());
+            out.push(format!("{DIM}start it{RESET}"));
+            out.push(it.get("agent").to_string());
+        }
+        Kind::Session => {
+            kv(&mut out, "agent", it.get("agent"));
+            kv(&mut out, "id", it.get("id"));
+            kv(&mut out, "where", &tilde(it.get("cwd")));
+            if !it.get("opening").is_empty() {
+                out.push(String::new());
+                out.push(format!("{DIM}opened with{RESET}"));
+                out.push(it.get("opening").to_string());
+            }
+        }
+        Kind::Config => {
+            kv(&mut out, "agent", it.get("agent"));
+            let p = it.get("path");
+            kv(&mut out, "path", &tilde(p));
+            if let Ok(text) = std::fs::read_to_string(p) {
+                out.push(String::new());
+                out.push(format!("{DIM}head{RESET}"));
+                out.extend(text.lines().take(24).map(str::to_string));
+            }
+        }
+        Kind::Snippet => {
+            kv(&mut out, "name", it.get("name"));
+            out.push(String::new());
+            out.push(crate::ui::fill_placeholders(&it.cmd));
+        }
+        Kind::Container => {
+            kv(&mut out, "name", it.get("name"));
+            kv(&mut out, "image", it.get("image"));
+        }
+        Kind::Ssh => kv(&mut out, "host", it.get("host")),
+        Kind::Dir | Kind::Script | Kind::Git | Kind::History | Kind::Path
+        | Kind::Sys | Kind::Calc | Kind::Translate => {
+            if !it.subtitle.is_empty() {
+                out.push(it.subtitle.clone());
+                out.push(String::new());
+            }
+            if let Some(cwd) = &it.cwd {
+                kv(&mut out, "in", &tilde(cwd));
+            }
+        }
     }
     if it.kind != Kind::Clip {
         out.push(String::new());
