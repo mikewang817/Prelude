@@ -295,18 +295,29 @@ mod tests {
 
     #[test]
     fn enter_defaults_split_commands_from_objects() {
-        use crate::defaults::{on_enter, Default_, Host};
-        use crate::item::Kind::*;
+        use crate::defaults::{on_enter, on_secondary, Default_, Host};
+        use crate::item::{Item, Kind::*};
         // Commands are never acted on, in either host.
         for k in [History, Script, Path, Snippet, Port, Proc, Sys] {
+            let it = Item::new("x", k);
             for h in [Host::Shell, Host::Agent] {
-                assert_eq!(on_enter(k, h), Default_::Insert, "{k:?} in {h:?}");
+                assert_eq!(on_enter(&it, h), Default_::Insert, "{k:?} in {h:?}");
             }
         }
         // Objects act at a shell but hand over text to an agent.
         for k in [File, App, Link] {
-            assert!(matches!(on_enter(k, Host::Shell), Default_::Act(_)), "{k:?}");
-            assert!(matches!(on_enter(k, Host::Agent), Default_::InsertText(_)), "{k:?}");
+            let it = Item::new("x", k);
+            assert!(matches!(on_enter(&it, Host::Shell), Default_::Act(_)), "{k:?}");
+            assert!(matches!(on_enter(&it, Host::Agent), Default_::InsertText(_)), "{k:?}");
+        }
+        // Raycast defines Cmd+Enter as the *secondary* action, so it must
+        // differ from the primary rather than repeat it.
+        for k in [History, Script, File, App, Calc, Clip, Session] {
+            let it = Item::new("x", k);
+            let p = on_enter(&it, Host::Shell);
+            if let Some(s) = on_secondary(&it, Host::Shell) {
+                assert_ne!(p, s, "{k:?} primary and secondary are the same");
+            }
         }
     }
 

@@ -156,6 +156,9 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     };
     // Say plainly what Enter does here, so the behaviour is never a mystery.
     acts.insert(0, a("default", crate::defaults::describe(it, host), "⏎"));
+    if let Some(label) = crate::defaults::describe_secondary(it, host) {
+        acts.insert(1, a("secondary", label, "⌥⏎"));
+    }
     // Everything the removed shortcuts used to do stays reachable here.
     if !acts.iter().any(|(id, ..)| *id == "runhere") {
         acts.push(a("runhere", "Run here, inside this window", "^O"));
@@ -257,6 +260,13 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         }
         "tr_src" => ui::copy(it.get("source")),
         "default" => return ui::apply_default(it, paste),
+        "secondary" => {
+            let host = if paste.is_some() { crate::defaults::Host::Agent }
+                       else { crate::defaults::Host::Shell };
+            if let Some(d) = crate::defaults::on_secondary(it, host) {
+                return ui::perform(it, d, paste);
+            }
+        }
         "cdsession" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd"))), paste),
         "newsession" => ui::emit("INSERT",
             &crate::sources::sessions::start_cmd(it.get("agent"),

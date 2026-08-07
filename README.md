@@ -85,13 +85,32 @@ it at all.
 
 ## Keys
 
-Three keys, and the header always says what the first one will do:
+Three keys, mirroring Raycast, whose manual defines them as *run the primary
+action*, *execute the secondary action*, and *open the action panel*:
 
-| Key | Action |
-|---|---|
-| `⏎` | The obvious thing for what you selected |
-| `^K` | Everything else, for this particular item |
-| `esc` | Close |
+| Key | Raycast | Prelude |
+|---|---|---|
+| `⏎` | primary action | The obvious thing for what you selected |
+| `⌥⏎` | secondary action (`⌘⏎` there) | Its opposite — see below |
+| `^K` | action panel (`⌘K` there) | Everything else for this item |
+| `esc` | close | Close |
+
+Neither action is a fixed verb. The two are opposites: where the primary
+*does* something, the secondary hands you the text; where the primary hands
+you text, the secondary does the thing.
+
+| | `⏎` | `⌥⏎` |
+|---|---|---|
+| a command | insert it | run it |
+| a file | open it | insert its path |
+| an app | launch it | insert its name |
+| a port | insert the kill | show what is using it |
+| a result | copy it | insert it |
+| a session | resume it | cd to where it ran |
+
+`⌥⏎` rather than `⌘⏎`: terminals never receive Cmd — the terminal app keeps
+it — and fzf supports neither `ctrl-enter` nor `shift-enter`. Option+Enter is
+the only variant available.
 
 ```
 ⏎ open in editor        ^K actions   esc close     ← on a file

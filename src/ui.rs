@@ -177,7 +177,18 @@ pub fn search(paste_target: Option<String>) -> i32 {
 
     match out.key.as_str() {
         "ctrl-k" => crate::actions::panel(&item, paste_target),
-        "ctrl-x" | "alt-enter" => {
+        "alt-enter" => {
+            let host = if paste_target.is_some() { crate::defaults::Host::Agent }
+                       else { crate::defaults::Host::Shell };
+            match crate::defaults::on_secondary(&item, host) {
+                Some(d) => {
+                    crate::frecency::bump(&item.cmd);
+                    perform(&item, d, &paste_target)
+                }
+                None => 130,
+            }
+        }
+        "ctrl-x" => {
             crate::frecency::bump(&item.cmd);
             emit("RUN", &item.cmd, &paste_target);
             0
@@ -188,10 +199,15 @@ pub fn search(paste_target: Option<String>) -> i32 {
 
 /// Carry out whatever Enter means for this item in this host.
 pub fn apply_default(item: &Item, paste: &Option<String>) -> i32 {
-    use crate::defaults::{on_enter, text_for, Default_, Host, Verb};
+    use crate::defaults::{on_enter, Host};
     let host = if paste.is_some() { Host::Agent } else { Host::Shell };
     crate::frecency::bump(&item.cmd);
-    match on_enter(item, host) {
+    perform(item, on_enter(item, host), paste)
+}
+
+pub fn perform(item: &Item, what: crate::defaults::Default_, paste: &Option<String>) -> i32 {
+    use crate::defaults::{text_for, Default_};
+    match what {
         Default_::Insert => {
             let cmd = if item.kind == Kind::Snippet {
                 fill_placeholders(&item.cmd)
@@ -228,6 +244,19 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
         }
         ResumeSession => emit("INSERT", &item.cmd, paste),
         RunHere => return crate::runhere::run_item(item),
+        RunInShell => emit("RUN", &item.cmd, paste),
+        Inspect => {
+            let c = if item.kind == Kind::Proc {
+                format!("ps -p {} -o command=", item.get("pid"))
+            } else {
+                format!("lsof -nP -iTCP:{} -sTCP:LISTEN", item.get("port"))
+            };
+            emit("INSERT", &c, paste);
+        }
+        CdThere => {
+            let d = if item.get("cwd").is_empty() { item.get("path") } else { item.get("cwd") };
+            emit("INSERT", &format!("cd {}", shq(d)), paste);
+        }
         RunSkill => {
             // A skill name means nothing to a shell, so pick an agent that
             // actually has it and hand the invocation over.

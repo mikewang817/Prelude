@@ -55,6 +55,9 @@ pub enum Verb {
     ResumeSession,
     /// Run it right here in the launcher and show the output.
     RunHere,
+    RunInShell,
+    Inspect,
+    CdThere,
 }
 
 /// The one place that decides what Enter means.
@@ -112,10 +115,57 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
     }
 }
 
+/// The secondary action, reached with Option+Enter.
+///
+/// Raycast's manual defines ⌘↵ as "execute the secondary action", so it is
+/// per-item like the primary one rather than a fixed verb. The pattern
+/// throughout is that the two are opposites: where the primary *does*
+/// something, the secondary hands you the text, and where the primary hands
+/// you text, the secondary does the thing.
+///
+/// Option+Enter, not Cmd+Enter: terminals never receive Cmd at all, and fzf
+/// supports neither ctrl-enter nor shift-enter.
+pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
+    use Default_::*;
+    use Kind::*;
+    let alt = match item.kind {
+        // Primary inserts a command, so the secondary runs it.
+        History | Script | Path | Snippet | Ssh | Container | Git | Sys | Agent => {
+            Act(Verb::RunInShell)
+        }
+        // Primary kills or acts; the secondary shows you what you would hit.
+        Port | Proc => Act(Verb::Inspect),
+        // Primary does something to the object, so the secondary yields text.
+        File | Find | Config => InsertText(Text::AbsolutePath),
+        App | Mcp | Skill => InsertText(Text::Name),
+        Link => InsertText(Text::Name),
+        // Primary copies the result, so the secondary puts it on the prompt.
+        Calc | Translate => Insert,
+        // Primary pastes it; the secondary puts it on the system clipboard.
+        Clip => Act(Verb::CopyResult),
+        Session => Act(Verb::CdThere),
+        Dir => InsertText(Text::AbsolutePath),
+    };
+    // In an agent's input box the primary is already "hand over the text",
+    // so an inserting secondary would be the same keystroke twice.
+    if host == Host::Agent && matches!(alt, InsertText(_) | Insert) {
+        return None;
+    }
+    Some(alt)
+}
+
 /// A human-readable name for the current default, shown as the first entry of
 /// the action panel so the behaviour is never a mystery.
 pub fn describe(item: &Item, host: Host) -> &'static str {
-    match on_enter(item, host) {
+    describe_action(on_enter(item, host))
+}
+
+pub fn describe_secondary(item: &Item, host: Host) -> Option<&'static str> {
+    on_secondary(item, host).map(describe_action)
+}
+
+fn describe_action(d: Default_) -> &'static str {
+    match d {
         Default_::Insert => "Insert into prompt",
         Default_::InsertText(Text::AbsolutePath) => "Insert the full path",
         Default_::InsertText(Text::Name) => "Insert its name",
@@ -128,6 +178,9 @@ pub fn describe(item: &Item, host: Host) -> &'static str {
         Default_::Act(Verb::RunSkill) => "Run it with an agent",
         Default_::Act(Verb::ResumeSession) => "Resume this session",
         Default_::Act(Verb::RunHere) => "Run it here and show the output",
+        Default_::Act(Verb::RunInShell) => "Run it in the shell",
+        Default_::Act(Verb::Inspect) => "Show what is using it",
+        Default_::Act(Verb::CdThere) => "Go to its directory",
     }
 }
 
