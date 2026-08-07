@@ -170,17 +170,64 @@ pub fn search(paste_target: Option<String>) -> i32 {
             emit("RUN", &item.cmd, &paste_target);
             0
         }
-        _ => {
-            crate::frecency::bump(&item.cmd);
+        _ => apply_default(&item, &paste_target),
+    }
+}
+
+/// Carry out whatever Enter means for this item in this host.
+pub fn apply_default(item: &Item, paste: &Option<String>) -> i32 {
+    use crate::defaults::{on_enter, text_for, Default_, Host, Verb};
+    let host = if paste.is_some() { Host::Agent } else { Host::Shell };
+    crate::frecency::bump(&item.cmd);
+    match on_enter(item.kind, host) {
+        Default_::Insert => {
             let cmd = if item.kind == Kind::Snippet {
                 fill_placeholders(&item.cmd)
             } else {
                 item.cmd.clone()
             };
-            emit("INSERT", &cmd, &paste_target);
-            0
+            emit("INSERT", &cmd, paste);
+        }
+        Default_::InsertText(what) => emit("INSERT", &text_for(item, what), paste),
+        Default_::Act(verb) => return act(item, verb, paste),
+    }
+    0
+}
+
+fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 {
+    use crate::defaults::Verb::*;
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    match verb {
+        // Opening a file, launching an app and following a link are all
+        // harmless and reversible, unlike running a shell command — which is
+        // what the insert-first rule actually exists to guard.
+        OpenInEditor => {
+            let p = if item.get("path").is_empty() { item.cmd.clone() } else { item.get("path").into() };
+            emit("RUN", &format!("{editor} {}", shq(&p)), paste);
+        }
+        Launch | OpenUrl => emit("RUN", &item.cmd, paste),
+        OpenConfig => {
+            let p = first_of(item, &["config", "path", "file"]);
+            emit("RUN", &format!("{editor} {}", shq(&p)), paste);
+        }
+        CopyResult => {
+            copy(&item.cmd);
+            eprintln!("copied: {}", item.cmd);
+        }
+        ResumeSession => emit("INSERT", &item.cmd, paste),
+        RunSkill => {
+            // A skill name means nothing to a shell, so pick an agent that
+            // actually has it and hand the invocation over.
+            let agent = item.get("agent").split(',').next().unwrap_or("claude").trim().to_string();
+            let agent = if agent == "shared" { "claude".to_string() } else { agent };
+            emit("INSERT", &format!("{agent} {}", shq(&item.cmd)), paste);
         }
     }
+    0
+}
+
+fn first_of(it: &Item, keys: &[&str]) -> String {
+    keys.iter().map(|k| it.get(k)).find(|v| !v.is_empty()).unwrap_or("").to_string()
 }
 
 /// Turn `{{port}}` into `<port>` — visible blanks you tab over and replace.

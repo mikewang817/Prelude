@@ -240,7 +240,9 @@ pub fn translate_query(q: &str) -> Option<(String, String)> {
     let (lang, text) = q.trim().split_once(':')?;
     let lang = lang.trim();
     let text = text.trim();
-    if text.is_empty() || lang.is_empty() || lang.len() > 7 {
+    // Language codes are at least two letters. Without this, the `s:` and
+    // `f:` prefixes get swallowed as if `s` and `f` were languages.
+    if text.is_empty() || lang.len() < 2 || lang.len() > 7 {
         return None;
     }
     if !lang.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
@@ -389,6 +391,31 @@ pub fn search_fileindex(term: &str) -> Option<Vec<Item>> {
     Some(out)
 }
 
+/// `s:query` — search every past agent session, not just the recent ones.
+pub fn session_query(q: &str) -> Option<&str> {
+    let t = q.trim();
+    for p in ["s:", "S:"] {
+        if let Some(rest) = t.strip_prefix(p) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// `@claude refactor this` — start an agent in the current directory with a
+/// prompt, turning the launcher into the agent's front door.
+pub fn agent_query(q: &str) -> Option<(String, String)> {
+    let t = q.trim().strip_prefix('@')?;
+    let (agent, prompt) = t.split_once(char::is_whitespace)?;
+    let prompt = prompt.trim();
+    if prompt.is_empty() || agent.is_empty() {
+        return None;
+    }
+    let known = ["claude", "codex", "pi", "opencode", "cursor-agent"];
+    let agent = known.iter().find(|k| k.starts_with(&agent.to_lowercase()))?;
+    Some((agent.to_string(), prompt.to_string()))
+}
+
 /// Does this query produce a computed row rather than a search?
 ///
 /// Pattern-matching only — this runs on *every* keystroke, so it must not
@@ -400,6 +427,9 @@ pub fn is_special(q: &str) -> bool {
         return false;
     }
     if t.len() > 2 && (t.starts_with("f:") || t.starts_with("F:")) {
+        return true;
+    }
+    if session_query(t).is_some() || agent_query(t).is_some() {
         return true;
     }
     if translate_query(t).is_some() {
@@ -448,6 +478,19 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
                     .sub("no index yet — run:  prelude index"),
             ),
         }
+    }
+    if let Some(term) = session_query(q) {
+        rows.extend(crate::sources::sessions::search(term));
+    }
+    if let Some((agent, prompt)) = agent_query(q) {
+        let cwd = paths::cwd().map(|p| p.to_string_lossy().into_owned());
+        let cmd = crate::sources::sessions::start_cmd(&agent, cwd.as_deref(), Some(&prompt));
+        rows.push(
+            Item::new(cmd, Kind::Session)
+                .title(format!("{agent}: {prompt}"))
+                .fields([agent.clone(), "new session here".to_string()])
+                .put("agent", agent),
+        );
     }
     if let Some((lang, text)) = translate_query(q) {
         match translate(&text, &lang) {

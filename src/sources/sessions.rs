@@ -1,0 +1,283 @@
+//! Past agent conversations, so you can resume one without hunting for a
+//! uuid in your shell history.
+//!
+//! Each agent stores sessions in its own private format, none of them
+//! documented. Parsing is therefore best-effort and silently yields nothing
+//! when a format changes — the same contract as the docker source.
+//!
+//! Reading every file would be far too slow (hundreds of sessions), so only
+//! the first few lines of each are read, and the whole set is cached and
+//! refreshed in the background like $PATH.
+
+use crate::exec::shq;
+use crate::item::{Item, Kind};
+use crate::paths;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+pub struct Agent {
+    pub name: &'static str,
+    /// How to resume, given a session id.
+    pub resume: fn(&str) -> String,
+}
+
+const AGENTS: &[Agent] = &[
+    Agent { name: "claude", resume: |id| format!("claude --resume {id}") },
+    Agent { name: "codex", resume: |id| format!("codex resume {id}") },
+    Agent { name: "pi", resume: |id| format!("pi --session {id}") },
+];
+
+fn resume_cmd(agent: &str, id: &str) -> String {
+    AGENTS
+        .iter()
+        .find(|a| a.name == agent)
+        .map(|a| (a.resume)(id))
+        .unwrap_or_else(|| id.to_string())
+}
+
+struct Raw {
+    agent: &'static str,
+    id: String,
+    title: String,
+    cwd: String,
+    mtime: SystemTime,
+}
+
+/// Read only the head of a session file; these can be megabytes.
+fn head_lines(p: &Path, n: usize) -> Vec<String> {
+    use std::io::{BufRead, BufReader};
+    let Ok(f) = std::fs::File::open(p) else { return Vec::new() };
+    BufReader::new(f)
+        .lines()
+        .take(n)
+        .map_while(Result::ok)
+        .collect()
+}
+
+fn json_str(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// Claude Code: ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl
+///
+/// Worth the extra effort because it records an `ai-title` — a generated
+/// summary of the conversation, which beats truncating the first message.
+fn scan_claude(out: &mut Vec<Raw>) {
+    let root = paths::home().join(".claude/projects");
+    let Ok(projects) = std::fs::read_dir(&root) else { return };
+    for proj in projects.flatten() {
+        let Ok(files) = std::fs::read_dir(proj.path()) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(id) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let mtime = f.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let (mut title, mut cwd) = (String::new(), String::new());
+            let mut first_user = String::new();
+            for line in head_lines(&p, 400) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if cwd.is_empty() {
+                    cwd = json_str(&v, "cwd");
+                }
+                match json_str(&v, "type").as_str() {
+                    "ai-title" => {
+                        let t = ["aiTitle", "title", "text", "content"]
+                            .iter()
+                            .map(|k| json_str(&v, k))
+                            .find(|s| !s.is_empty())
+                            .unwrap_or_default();
+                        if !t.is_empty() {
+                            title = t;
+                        }
+                    }
+                    "user" if first_user.is_empty() => {
+                        first_user = user_text(&v);
+                    }
+                    _ => {}
+                }
+                if !title.is_empty() && !cwd.is_empty() {
+                    break;
+                }
+            }
+            if title.is_empty() {
+                title = first_user;
+            }
+            if title.is_empty() {
+                continue;
+            }
+            out.push(Raw { agent: "claude", id, title, cwd, mtime });
+        }
+    }
+}
+
+fn user_text(v: &serde_json::Value) -> String {
+    let Some(m) = v.get("message") else { return String::new() };
+    match m.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .map(|b| json_str(b, "text"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Codex: ~/.codex/sessions/rollout-<ts>-<uuid>.jsonl, first line is meta.
+fn scan_codex(out: &mut Vec<Raw>) {
+    for dir in ["sessions", "archived_sessions"] {
+        let root = paths::home().join(".codex").join(dir);
+        walk_jsonl(&root, &mut |p, mtime| {
+            let lines = head_lines(p, 12);
+            let mut id = String::new();
+            let mut cwd = String::new();
+            let mut title = String::new();
+            for l in &lines {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+                if let Some(pl) = v.get("payload") {
+                    if id.is_empty() {
+                        id = json_str(pl, "session_id");
+                    }
+                    if cwd.is_empty() {
+                        cwd = ["cwd", "workdir", "cd"].iter().map(|k| json_str(pl, k))
+                            .find(|s| !s.is_empty()).unwrap_or_default();
+                    }
+                }
+                if title.is_empty() && json_str(&v, "type").contains("user") {
+                    title = crate::width::flatten(&user_text(&v));
+                }
+            }
+            if id.is_empty() {
+                // fall back to the uuid embedded in the filename
+                id = p.file_stem().map(|s| s.to_string_lossy().into_owned())
+                    .and_then(|s| s.rsplit('-').take(5).collect::<Vec<_>>()
+                        .into_iter().rev().collect::<Vec<_>>().join("-").into())
+                    .unwrap_or_default();
+            }
+            if title.is_empty() {
+                title = folder_label(&cwd, p);
+            }
+            if !id.is_empty() {
+                out.push(Raw { agent: "codex", id, title, cwd, mtime });
+            }
+        });
+    }
+}
+
+/// pi: ~/.pi/agent/sessions/<ts>_<uuid>.jsonl, first line carries id and cwd.
+fn scan_pi(out: &mut Vec<Raw>) {
+    let root = paths::home().join(".pi/agent/sessions");
+    walk_jsonl(&root, &mut |p, mtime| {
+        let lines = head_lines(p, 12);
+        let mut id = String::new();
+        let mut cwd = String::new();
+        let mut title = String::new();
+        for l in &lines {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+            if id.is_empty() && json_str(&v, "type") == "session" {
+                id = json_str(&v, "id");
+                cwd = json_str(&v, "cwd");
+            }
+            if title.is_empty() && json_str(&v, "type").contains("user") {
+                title = crate::width::flatten(&user_text(&v));
+            }
+        }
+        if title.is_empty() {
+            title = folder_label(&cwd, p);
+        }
+        if !id.is_empty() {
+            out.push(Raw { agent: "pi", id, title, cwd, mtime });
+        }
+    });
+}
+
+fn folder_label(cwd: &str, p: &Path) -> String {
+    if !cwd.is_empty() {
+        return cwd.rsplit('/').next().unwrap_or(cwd).to_string();
+    }
+    p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+fn walk_jsonl(root: &Path, f: &mut dyn FnMut(&PathBuf, SystemTime)) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_jsonl(&p, f);
+        } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            f(&p, mtime);
+        }
+    }
+}
+
+/// All sessions, newest first. Expensive — always called behind the cache.
+pub fn all() -> Vec<Item> {
+    let mut raw = Vec::new();
+    scan_claude(&mut raw);
+    scan_codex(&mut raw);
+    scan_pi(&mut raw);
+    raw.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+
+    raw.into_iter()
+        .map(|r| {
+            let ts = r.mtime.duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64()).unwrap_or(0.0);
+            let where_ = if r.cwd.is_empty() {
+                String::new()
+            } else {
+                paths::tilde(&r.cwd)
+            };
+            Item::new(resume_cmd(r.agent, &r.id), Kind::Session)
+                .title(crate::width::flatten(&r.title))
+                .fields([r.agent.to_string(), where_, crate::sources::user::ago(ts)])
+                .put("agent", r.agent)
+                .put("id", r.id)
+                .put("cwd", r.cwd)
+        })
+        .collect()
+}
+
+/// Only the most recent handful go in the main list; `s:` searches them all.
+/// Without this the 500+ sessions here would swamp everything else.
+pub const IN_MAIN_LIST: usize = 15;
+
+pub fn recent() -> Vec<Item> {
+    let mut v = crate::cache::read_cached("sessions");
+    v.truncate(IN_MAIN_LIST);
+    v
+}
+
+/// `s:query` — search every session, not just the recent ones.
+pub fn search(term: &str) -> Vec<Item> {
+    let all = crate::cache::read_cached("sessions");
+    let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
+    all.into_iter()
+        .filter(|i| {
+            if needles.is_empty() {
+                return true;
+            }
+            let hay = format!("{} {} {}", i.title, i.get("agent"), i.get("cwd")).to_lowercase();
+            needles.iter().all(|n| hay.contains(n.as_str()))
+        })
+        .take(80)
+        .collect()
+}
+
+/// Start a fresh agent session in a directory, optionally invoking a skill.
+pub fn start_cmd(agent: &str, cwd: Option<&str>, prompt: Option<&str>) -> String {
+    let mut s = String::new();
+    if let Some(d) = cwd {
+        s.push_str(&format!("cd {} && ", shq(d)));
+    }
+    s.push_str(agent);
+    if let Some(p) = prompt {
+        s.push(' ');
+        s.push_str(&shq(p));
+    }
+    s
+}

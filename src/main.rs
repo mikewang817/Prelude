@@ -9,6 +9,7 @@ mod cache;
 mod calc;
 mod clipd;
 mod compute;
+mod defaults;
 mod doctor;
 mod exec;
 mod frecency;
@@ -54,6 +55,13 @@ fn main() -> ExitCode {
                 Ok(v) => { println!("{v}"); 0 }
                 Err(e) => { eprintln!("prelude: {e}"); 2 }
             }
+        }
+        // Non-interactive dump of the rendered list, for testing and for
+        // diffing behaviour without standing up a terminal.
+        ["_dump"] => {
+            let items = cache::gather();
+            println!("{}", render::render(&items, term_width(), None));
+            0
         }
         ["_refresh-path"] => { sources::user::scan_path(); 0 }
         ["_refresh", name] => if cache::refresh_named(name) { 0 } else { 1 },

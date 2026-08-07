@@ -10,13 +10,39 @@ use crate::ui;
 
 type Act = (&'static str, String, String);
 
+/// Action ids are &'static; the per-agent ones are built at runtime.
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
 fn a(id: &'static str, label: &str, sub: impl Into<String>) -> Act {
     (id, label.to_string(), sub.into())
 }
 
 pub fn actions_for(it: &Item) -> Vec<Act> {
+    actions_for_host(it, crate::defaults::Host::Shell)
+}
+
+pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let mut acts = match it.kind {
+        Kind::Session => {
+            let mut v = vec![
+                a("insert", "Resume this session", &it.cmd),
+                a("run", "Resume it now", it.get("agent")),
+            ];
+            if !it.get("cwd").is_empty() {
+                v.push(a("cdsession", "cd to where it ran", crate::paths::tilde(it.get("cwd"))));
+                v.push(a("newsession", "Start a fresh session there", it.get("agent")));
+            }
+            v.push(a("copy", "Copy the session id", it.get("id")));
+            v
+        }
+        Kind::Config => vec![
+            a("open", "Open in editor", it.get("path")),
+            a("reveal", "cd to its folder", parent_of(it.get("path"))),
+            a("copyabs", "Copy its path", it.get("path")),
+        ],
         Kind::Port => vec![
             a("insert", &format!("Insert: kill whatever is on :{}", it.get("port")), it.get("proc")),
             a("run", "Kill it now", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
@@ -36,12 +62,30 @@ pub fn actions_for(it: &Item) -> Vec<Act> {
             a("restart", "Restart it", format!("docker restart {}", it.get("name"))),
             a("copy", "Copy name", it.get("name")),
         ],
-        Kind::Skill | Kind::Mcp => {
-            let target = first_nonempty(it, &["file", "dir", "config"]);
-            let mut v = vec![a("insert", "Insert its name", &it.cmd)];
-            if it.kind == Kind::Skill && !it.get("desc").is_empty() {
+        Kind::Skill => {
+            let target = first_nonempty(it, &["file", "dir"]);
+            let mut v = Vec::new();
+            for agent in it.get("agent").split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "shared") {
+                v.push((leak(format!("run:{agent}")), format!("Run it with {agent}"), it.cmd.clone()));
+            }
+            let missing: Vec<&str> = it.get("missing").split(',').filter(|s| !s.is_empty()).collect();
+            for agent in &missing {
+                v.push((leak(format!("cp:{agent}")), format!("Copy it to {agent}"), String::new()));
+            }
+            if missing.len() > 1 {
+                v.push(a("cp:*", "Copy it to all missing agents", missing.join(", ")));
+            }
+            v.push(a("insert", "Insert its name", &it.cmd));
+            if !it.get("desc").is_empty() {
                 v.push(a("desc", "Show full description", ""));
             }
+            v.push(a("open", "Open in editor", &target));
+            v.push(a("reveal", "cd to its folder", parent_of(&target)));
+            v
+        }
+        Kind::Mcp => {
+            let target = first_nonempty(it, &["file", "dir", "config"]);
+            let mut v = vec![a("insert", "Insert its name", &it.cmd)];
             v.push(a("open", "Open in editor", &target));
             v.push(a("reveal", "cd to its folder", parent_of(&target)));
             v.push(a("copy", "Copy name", ""));
@@ -101,6 +145,9 @@ pub fn actions_for(it: &Item) -> Vec<Act> {
             a("copy", "Copy to clipboard", ""),
         ],
     };
+    // Say plainly what Enter does here, so the behaviour is never a mystery.
+    acts.insert(0, a("default", crate::defaults::describe(it.kind, host), "⏎"));
+    acts.push(a("ask", "Ask an agent about this", "hands it to claude"));
     if let Some(cwd) = &it.cwd {
         acts.push(a("cd", "Go to project folder", cwd.clone()));
     }
@@ -190,6 +237,40 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             }
         }
         "tr_src" => ui::copy(it.get("source")),
+        "default" => return ui::apply_default(it, paste),
+        "cdsession" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd"))), paste),
+        "newsession" => ui::emit("INSERT",
+            &crate::sources::sessions::start_cmd(it.get("agent"),
+                Some(it.get("cwd")).filter(|s| !s.is_empty()), None), paste),
+        "ask" => {
+            // Whatever is selected becomes the subject of a question.
+            let subject = if it.get("path").is_empty() { it.cmd.clone() } else { it.get("path").into() };
+            ui::emit("INSERT", &format!("claude {}", shq(&format!("about this: {subject}"))), paste);
+        }
+        _ if id.starts_with("run:") => {
+            let agent = &id[4..];
+            ui::emit("INSERT", &format!("{agent} {}", shq(&it.cmd)), paste);
+        }
+        _ if id.starts_with("cp:") => {
+            let want = &id[3..];
+            let targets: Vec<String> = if want == "*" {
+                it.get("missing").split(',').filter(|s| !s.is_empty()).map(str::to_string).collect()
+            } else {
+                vec![want.to_string()]
+            };
+            let name = it.get("name");
+            let dir = it.get("dir");
+            if dir.is_empty() || name.is_empty() {
+                eprintln!("prelude: nothing to copy from");
+                return 2;
+            }
+            for agent in targets {
+                match crate::sources::agents::copy_skill(dir, &agent, name) {
+                    Ok(p) => eprintln!("copied {name} -> {p}"),
+                    Err(e) => eprintln!("prelude: {e}"),
+                }
+            }
+        }
         _ => return 130,
     }
     0

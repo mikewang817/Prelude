@@ -69,9 +69,17 @@ pub fn skills() -> Vec<Item> {
         .into_iter()
         .map(|(name, rec)| {
             let agents = rec.agents.join(", ");
+            let missing = missing_agents(&agents);
+            let gap = if missing.is_empty() {
+                String::new()
+            } else {
+                format!("missing: {}", missing.join(", "))
+            };
             Item::new(format!("/{name}"), Kind::Skill)
                 .title(&name)
-                .fields([agents.clone(), rec.desc.clone()])
+                .fields([agents.clone(), gap, rec.desc.clone()])
+                .put("missing", missing.join(","))
+                .put("name", &name)
                 .put("agent", agents)
                 .put("dir", rec.dir)
                 .put("file", rec.file)
@@ -191,4 +199,82 @@ pub fn mcp() -> Vec<Item> {
         }
     }
     items
+}
+
+/// Which agents are *missing* a skill — the other half of "who has it".
+///
+/// Keeping `~/.claude/skills` and `~/.agents/skills` in sync is a real chore;
+/// knowing where a skill exists means the gaps are computable, and copying it
+/// across is a one-line action rather than a background sync daemon that
+/// resurrects things you deliberately deleted.
+pub fn missing_agents(have: &str) -> Vec<&'static str> {
+    let have: Vec<&str> = have.split(',').map(str::trim).collect();
+    skill_dirs()
+        .into_iter()
+        .filter(|(dir, agent)| dir.parent().is_some_and(|p| p.exists()) && !have.contains(agent))
+        .map(|(_, agent)| agent)
+        .collect()
+}
+
+pub fn skill_dir_for(agent: &str) -> Option<std::path::PathBuf> {
+    skill_dirs().into_iter().find(|(_, a)| *a == agent).map(|(d, _)| d)
+}
+
+/// Copy a skill directory into another agent. Never overwrites.
+pub fn copy_skill(from_dir: &str, agent: &str, name: &str) -> Result<String, String> {
+    let Some(dest_root) = skill_dir_for(agent) else {
+        return Err(format!("unknown agent {agent}"));
+    };
+    let dest = dest_root.join(name);
+    if dest.exists() {
+        return Err(format!("{agent} already has {name}"));
+    }
+    std::fs::create_dir_all(&dest_root).map_err(|e| e.to_string())?;
+    copy_tree(std::path::Path::new(from_dir), &dest).map_err(|e| e.to_string())?;
+    Ok(crate::paths::tilde(&dest.to_string_lossy()))
+}
+
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let to = dst.join(e.file_name());
+        if e.path().is_dir() {
+            copy_tree(&e.path(), &to)?;
+        } else {
+            std::fs::copy(e.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Agent configuration files worth jumping to directly.
+pub fn configs() -> Vec<Item> {
+    let h = crate::paths::home();
+    let mut v: Vec<(std::path::PathBuf, &str)> = vec![
+        (h.join(".claude/CLAUDE.md"), "claude · global instructions"),
+        (h.join(".claude/settings.json"), "claude · settings"),
+        (h.join(".claude.json"), "claude · mcp + projects"),
+        (h.join(".codex/config.toml"), "codex · config"),
+        (h.join(".codex/AGENTS.md"), "codex · instructions"),
+        (h.join(".pi/agent/settings.json"), "pi · settings"),
+        (h.join(".config/opencode/opencode.jsonc"), "opencode · config"),
+    ];
+    // whatever the project you're standing in defines
+    if let Some(root) = super::project::root() {
+        for name in ["CLAUDE.md", "AGENTS.md", ".mcp.json"] {
+            v.push((root.join(name), "this project"));
+        }
+    }
+    v.into_iter()
+        .filter(|(p, _)| p.exists())
+        .map(|(p, what)| {
+            let s = p.to_string_lossy().into_owned();
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            Item::new(format!("$EDITOR {}", shq(&s)), Kind::Config)
+                .title(name)
+                .fields([what.to_string(), crate::paths::tilde(&s)])
+                .put("path", s)
+        })
+        .collect()
 }

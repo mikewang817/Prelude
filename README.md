@@ -20,14 +20,28 @@ You press Enter to actually run it.
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
-## The one design rule
+## What Enter does
 
-**Enter inserts; it does not execute.**
+The list holds two different kinds of thing, and they deserve different
+defaults.
 
-You always see the command on your own prompt before anything happens. That
-is what makes it safe to bind to a key you press dozens of times a day — and
-what makes it safe to let a launcher suggest destructive things like killing
-whatever holds port 3000.
+**Commands** — history, scripts, `$PATH`, snippets, ports, processes — are
+**inserted onto your prompt, never executed.** You read them before they run.
+That is what makes it safe to bind this to a key you press dozens of times a
+day, and safe for the launcher to offer things like killing whatever holds
+port 3000.
+
+**Objects** — files, apps, links, sessions, results — you wanted to *use*.
+Enter opens the file, launches the app, follows the link, resumes the
+session. These are harmless and reversible in a way that running a shell
+command is not.
+
+The right answer also depends on where you are. Selecting a file at a shell
+prompt means "open it". Selecting the same file from the popup over an
+agent's input box means "here, look at this path" — so that is what you get.
+
+`^K` always states the current default as its first entry, and
+`PRELUDE_CLASSIC_ENTER=1` restores insert-everything.
 
 ## Install
 
@@ -74,7 +88,7 @@ it at all.
 | Key | Action |
 |---|---|
 | `^R` | Open the launcher |
-| `⏎` | **Insert** onto your prompt (does not run it) |
+| `⏎` | The obvious thing for what you selected — see below |
 | `^O` | Run it here, inside the launcher; the window stays open |
 | `^X` | Run it in the shell below |
 | `^Y` | Copy; the window stays open |
@@ -129,6 +143,34 @@ That is the difference between a command picker and a launcher: a port is not
 text to insert, it is something you kill or inspect.
 
 ## One surface for every agent
+
+**Resume a past conversation** without hunting for a uuid. Sessions from
+Claude Code, Codex and pi are merged, newest first, with Claude's
+AI-generated titles where available:
+
+```
+⌕ s:inkquest
+▸ Develop InkQuest math problem app     session · claude · ~/App/InkQuest · 2h ago
+  InkQuest                              session · pi     · ~/App/InkQuest · 1d ago
+```
+
+The most recent 15 appear in the main list; `s:` searches all of them.
+
+**Copy a skill to an agent that lacks it.** Prelude knows which agents have a
+skill, so it knows which do not:
+
+```
+▸ my-skill    skill · claude, shared · missing: codex, pi
+     ^K  →  Copy it to codex / Copy it to pi / Copy it to all missing
+```
+
+**Start a session from the launcher** with `@claude refactor this`, which
+opens an agent in the current directory with that prompt.
+
+**Jump to any agent config** — `CLAUDE.md`, `AGENTS.md`, `settings.json`,
+`config.toml`, `.mcp.json` — as a first-class row.
+
+
 
 Prelude reads skills and MCP servers from every agent CLI you have installed
 and merges them into one list. A skill present in several agents is shown

@@ -64,7 +64,11 @@ const FAST: &[(&str, fn() -> Vec<Item>)] = &[
 /// Too slow to ever block on: lsof costs ~65ms and cannot be made faster.
 /// Served from cache and refreshed detached. Safe because the kill command
 /// re-resolves the pid at run time rather than trusting the cached one.
-const SLOW: &[(&str, fn() -> Vec<Item>)] = &[("ports", crate::sources::machine::ports)];
+const SLOW: &[(&str, fn() -> Vec<Item>)] = &[
+    ("ports", crate::sources::machine::ports),
+    // Hundreds of session files, each needing its head parsed.
+    ("sessions", crate::sources::sessions::all),
+];
 
 pub fn refresh_named(name: &str) -> bool {
     for (n, f) in FAST.iter().chain(SLOW.iter()) {
@@ -96,7 +100,13 @@ pub fn gather() -> Vec<Item> {
 
     let mut items = Vec::with_capacity(2600);
     for (name, _) in SLOW {
-        items.extend(read_cached(name));
+        // Sessions are numerous enough to swamp the list; only the newest
+        // few go in, and `s:` searches the rest.
+        if *name == "sessions" {
+            items.extend(crate::sources::sessions::recent());
+        } else {
+            items.extend(read_cached(name));
+        }
         if stale(name) {
             spawn_self(&["_refresh", name]);
         }
@@ -114,6 +124,7 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::agents::mcp());
     items.extend(crate::sources::machine::apps());
     items.extend(crate::sources::machine::system());
+    items.extend(crate::sources::agents::configs());
 
     let deadline = std::time::Instant::now() + EXTERNAL_DEADLINE;
     for (name, h) in handles {
