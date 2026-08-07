@@ -529,6 +529,26 @@ pub fn prompt_line(label: &str) -> Option<String> {
     if line.is_empty() { None } else { Some(line) }
 }
 
+/// Ask before doing something that cannot be taken back with a keystroke.
+///
+/// Cancel is the *first* entry, so it is what the cursor starts on and what a
+/// stray Enter chooses. A confirmation whose default is "yes" only adds a
+/// keystroke to the accident it was supposed to prevent.
+///
+/// The question is the border label and the consequence is spelled out on the
+/// row rather than implied: "Delete claude's copy" is a decision, "Are you
+/// sure?" is a reflex.
+pub fn confirm(question: &str, go_ahead: &str, detail: &str) -> bool {
+    let tail = if detail.is_empty() { String::new() } else { format!("{DIM}· {detail}{RESET}") };
+    let feed = format!(
+        "{:<34}{SEP}no\n{:<34}{tail}{SEP}yes",
+        "Cancel", go_ahead
+    );
+    pick_raw(&feed, &format!(" {question} "), "? ", "Choose  Enter   ·   Cancel  Esc")
+        .as_deref()
+        == Some("yes")
+}
+
 /// Put the cursor in a running agent's pane, optionally zoomed.
 ///
 /// Inside tmux the client is simply pointed at it. From a terminal with no

@@ -465,7 +465,7 @@ en:你好            →  Hello               g rust async  →  opens Google
 | **port** | Insert kill · Kill now · Show what's using it · Copy pid |
 | **process** | Insert kill · Kill now · Show full command · Copy pid |
 | **container** | Shell into · Follow logs · Stop · Restart |
-| **skill / mcp** | Lend it to another agent for one run · Copy it there for good · Insert name · Show description · Open in editor |
+| **skill / mcp** | Lend it to another agent for one run · Copy it there for good · Insert name · Show description · Open in editor · Delete one agent's copy |
 | **file** | Insert path · Open in `$EDITOR` · Copy absolute path |
 | **snippet** | Insert and fill blanks · Edit snippets file |
 
@@ -528,6 +528,33 @@ out to have a flag for taking one it does not own, for a single run:
 
 Borrowing installs nothing and leaves nothing behind. You get the command,
 you press Enter, and the loan ends when that process does.
+
+**Delete one you are done with.** A skill merged across four agents is four
+directories behind one row, so `^K` offers them one at a time — "delete it"
+should not quietly mean something different depending on how many agents
+happen to have it:
+
+```
+▸ …
+  Delete claude's copy…            to the Trash, after confirming
+  Delete codex's copy…             to the Trash, after confirming
+```
+
+This is the only destructive thing Prelude does to your files, and it is
+built so that being wrong is survivable rather than so that it cannot happen:
+
+- **It goes to the Trash, never to `unlink`.** A skill is somebody's work,
+  often the only copy and often not in git. Drag it back out if you were
+  wrong. Nothing here is worth a permanent delete, and a name already in the
+  Trash is never overwritten — you get `my-skill 2`.
+- **The confirmation's default is Cancel**, and it names the agent and the
+  full path. A confirmation whose default is "yes" only adds a keystroke to
+  the accident it was meant to prevent.
+- **It refuses any path that is not a skill directory** — a direct child of
+  one of the five skill directories, compared after resolving symlinks and
+  `..`. The path arrives off a row that has been through JSON and a shell,
+  and a launcher that removes whatever it is handed is one malformed field
+  away from removing something else.
 
 | | MCP | skill |
 |---|---|---|

@@ -24,6 +24,19 @@ struct Skill {
     dir: String,
     file: String,
     desc: String,
+    /// Every copy, one per agent that has it.
+    ///
+    /// `dir` is only the first one found, which is all borrowing and copying
+    /// ever needed. Deleting needs the rest: the whole point of merging by
+    /// name is that one row can stand for four directories, and a "delete"
+    /// that silently took one of them would leave the row on screen and look
+    /// like it had failed.
+    copies: Vec<(&'static str, String)>,
+}
+
+/// Where each agent keeps its copy of a skill, off the row.
+pub fn copies_of(it: &Item) -> Vec<(String, String)> {
+    serde_json::from_str(it.get("copies")).unwrap_or_default()
 }
 
 /// What one invocation is worth.
@@ -89,6 +102,7 @@ pub fn skills() -> Vec<Item> {
             if rec.desc.is_empty() && !desc.is_empty() {
                 rec.desc = desc;
             }
+            rec.copies.push((agent, sub.to_string_lossy().into_owned()));
             if rec.file.is_empty() {
                 if let Some(p) = &md {
                     rec.file = p.to_string_lossy().into_owned();
@@ -124,9 +138,71 @@ pub fn skills() -> Vec<Item> {
                 .put("agent", agents)
                 .put("dir", rec.dir)
                 .put("file", rec.file)
+                .put("copies", serde_json::to_string(&rec.copies).unwrap_or_default())
                 .put("desc", rec.desc)
         })
         .collect()
+}
+
+/// Remove a skill, recoverably.
+///
+/// This is the only destructive thing Prelude does to a user's files, and it
+/// is built so that being wrong is survivable rather than so that it cannot
+/// happen. Three rules:
+///
+/// **It goes to the Trash, never to `unlink`.** A skill is somebody's work —
+/// often the only copy, often not in git. `rename` into `~/.Trash` costs the
+/// same as deleting and leaves the whole directory sitting there to be
+/// dragged back out. Nothing here is worth a permanent delete.
+///
+/// **The path must be a skill directory**, meaning a direct child of one of
+/// the five directories `skill_dirs` knows about. The path arrives off a row
+/// that has been through JSON and a shell, and a launcher that will remove
+/// whatever it is handed is one malformed field away from removing something
+/// else. This is the check that makes that impossible rather than unlikely.
+///
+/// **One copy at a time.** The caller names the agent, so deleting a skill
+/// shared by four of them is four decisions, not one.
+pub fn delete_skill(dir: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(dir);
+    if !is_skill_dir(path) {
+        return Err(format!("{dir} is not a skill directory — refusing"));
+    }
+    if !path.is_dir() {
+        return Err(format!("{dir} is not there any more"));
+    }
+    let name = path.file_name().ok_or_else(|| "no name".to_string())?;
+    let trash = paths::home().join(".Trash");
+    std::fs::create_dir_all(&trash).map_err(|e| format!("no Trash: {e}"))?;
+
+    // Two agents' copies of one skill share a name, and so does anything you
+    // deleted last week. Never overwrite what is already in there.
+    let mut dest = trash.join(name);
+    let mut n = 2;
+    while dest.exists() {
+        dest = trash.join(format!("{} {n}", name.to_string_lossy()));
+        n += 1;
+        if n > 999 {
+            return Err("too many copies of that name in the Trash".into());
+        }
+    }
+    std::fs::rename(path, &dest).map_err(|e| format!("could not move it to the Trash: {e}"))?;
+    Ok(dest)
+}
+
+/// Is this the directory of an installed skill, rather than some other path?
+///
+/// A direct child of a known skills directory, and nothing else — not the
+/// skills directory itself, not something nested deeper, not a sibling
+/// reached by `..`. Compared after `canonicalize`, so `~/.claude/skills/x/..`
+/// cannot masquerade as one.
+pub fn is_skill_dir(p: &std::path::Path) -> bool {
+    let Ok(real) = p.canonicalize() else { return false };
+    let Some(parent) = real.parent() else { return false };
+    skill_dirs()
+        .into_iter()
+        .filter_map(|(d, _)| d.canonicalize().ok())
+        .any(|d| d == parent)
 }
 
 /// Pull name/description out of a SKILL.md YAML header.

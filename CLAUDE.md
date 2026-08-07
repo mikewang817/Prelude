@@ -237,9 +237,22 @@ Each agent has its own invocation syntax. `opencode` needs a subcommand
 where the others take a prompt positionally; `codex exec` refuses to run
 outside a git repository. See `AGENTS` in `sources/sessions.rs`.
 
-Copying a skill between agents is the only place Prelude writes to a user's
-files. It stays behind an explicit action, never a default, and never
-overwrites.
+Copying and deleting a skill are the only places Prelude writes to a user's
+files. Both stay behind an explicit action, never a default, and never
+overwrite.
+
+Deleting is the only *destructive* one, and is built so that being wrong is
+survivable rather than so that it cannot happen. It moves the directory to
+`~/.Trash` — never `unlink`, never `remove_dir_all` — uniquifying the name
+rather than overwriting what is already in there. `ui::confirm` puts Cancel
+first so a stray Enter cancels. And `is_skill_dir` refuses anything that is
+not a direct child of one of the five `skill_dirs`, compared after
+`canonicalize` so `..` cannot dress a path up as a skill; a path that does
+not resolve is refused rather than guessed at. A test walks the container
+directory, `$HOME`, `/`, `/etc` and a traversal. The panel offers one entry
+per agent that has a copy (`copies_of`), because a skill merged across four
+agents is four directories behind one row — `dir` is only ever the first one
+found, which is all borrowing needed and not enough to delete with.
 
 **Borrowing is the lighter half of that, and the one to reach for first.**
 Every agent has a flag for taking a capability it does not own, for one run

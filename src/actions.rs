@@ -134,6 +134,18 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             }
             v.push(a("open", "Open in editor", &target));
             v.push(a("reveal", "cd to its folder", parent_of(&target)));
+            // Last, and one entry per agent that actually has a copy. A
+            // skill merged across four agents is four separate decisions —
+            // "delete it" would otherwise mean something different depending
+            // on a number the row only hints at.
+            let copies = crate::sources::agents::copies_of(it);
+            for (agent, _) in &copies {
+                v.push((
+                    leak(format!("rm:{agent}")),
+                    format!("Delete {agent}'s copy…"),
+                    "to the Trash, after confirming".into(),
+                ));
+            }
             v
         }
         Kind::Mcp => {
@@ -483,6 +495,35 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 _ => return 2,
             };
             ui::emit("INSERT", &cmd, paste);
+        }
+        // The only destructive thing here. It names the agent and the path
+        // before asking, moves the directory to the Trash rather than
+        // removing it, and says where it went — so the answer to "that was
+        // the wrong one" is Finder, not a backup.
+        _ if id.starts_with("rm:") => {
+            let agent = &id[3..];
+            let copies = crate::sources::agents::copies_of(it);
+            let Some((_, dir)) = copies.iter().find(|(a, _)| a == agent) else {
+                ui::note(&format!("{agent} has no copy of that"), paste);
+                return 2;
+            };
+            if !ui::confirm(
+                &format!("delete {} from {agent}?", it.get("name")),
+                &format!("Delete {}", crate::paths::tilde(dir)),
+                "recoverable from the Trash",
+            ) {
+                return 130;
+            }
+            match crate::sources::agents::delete_skill(dir) {
+                Ok(p) => ui::note(
+                    &format!("{} deleted — now in {}", it.get("name"), crate::paths::tilde(&p.to_string_lossy())),
+                    paste,
+                ),
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            }
         }
         _ if id.starts_with("cp:") => {
             let want = &id[3..];

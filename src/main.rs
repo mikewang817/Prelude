@@ -120,6 +120,13 @@ fn main() -> ExitCode {
                 Err(e) => { eprintln!("prelude: {e}"); 1 }
             }
         }
+        // Deleting, without a terminal — and without the confirmation, which
+        // is the launcher's job. This is how the guard that refuses anything
+        // that is not a skill directory gets tested.
+        ["_rm-skill", dir] => match sources::agents::delete_skill(dir) {
+            Ok(p) => { println!("moved to {}", p.display()); 0 }
+            Err(e) => { eprintln!("prelude: {e}"); 1 }
+        },
         // Borrowing, without a terminal: print the command the ^K action
         // would hand you, so what each agent is actually told can be diffed.
         ["_lend-skill", agent, dir, name] => {
@@ -834,6 +841,69 @@ mod tests {
         let (f, t) = split_flags(&["plain", "question"]);
         assert!(f.is_empty());
         assert_eq!(t, "plain question");
+    }
+
+    /// Deleting is the only destructive thing Prelude does to a user's
+    /// files, and the path it acts on has been through JSON, a row, and a
+    /// shell. A launcher that removes whatever it is handed is one malformed
+    /// field away from removing something else, so the guard is what makes
+    /// that impossible rather than unlikely — and it must refuse by default.
+    #[test]
+    fn deleting_refuses_anything_that_is_not_a_skill_directory() {
+        use crate::sources::agents::{delete_skill, is_skill_dir};
+        let home = crate::paths::home();
+        for bad in [
+            home.join(".claude/skills"),          // the container, not a skill
+            home.join(".claude"),                 // its parent
+            home.clone(),                         // home itself
+            std::path::PathBuf::from("/"),        // the root
+            std::path::PathBuf::from("/etc"),
+            home.join(".claude/skills/x/nested"), // deeper than a skill
+            home.join("Documents"),               // somewhere else entirely
+        ] {
+            assert!(!is_skill_dir(&bad), "{} must not read as a skill", bad.display());
+            assert!(
+                delete_skill(&bad.to_string_lossy()).is_err(),
+                "{} must be refused",
+                bad.display()
+            );
+        }
+        // A path that does not resolve at all is refused rather than guessed
+        // at — canonicalize fails, and failing closed is the point.
+        assert!(delete_skill("").is_err());
+        assert!(delete_skill("/nope/nothing/here").is_err());
+        // And traversal cannot dress something up as a skill.
+        assert!(!is_skill_dir(&home.join(".claude/skills/../../Documents")));
+    }
+
+    /// A skill merged across four agents is four directories behind one row.
+    /// Deleting has to name which, so the panel offers one entry per copy —
+    /// and the row has to carry them, since `dir` is only ever the first.
+    #[test]
+    fn every_agents_copy_is_reachable_from_the_row() {
+        use crate::item::{Item, Kind};
+        use crate::sources::agents::copies_of;
+        let it = Item::new("/demo", Kind::Skill)
+            .title("demo")
+            .put("name", "demo")
+            .put("agent", "claude, codex")
+            .put("dir", "/x/.claude/skills/demo")
+            .put(
+                "copies",
+                r#"[["claude","/x/.claude/skills/demo"],["codex","/x/.codex/skills/demo"]]"#,
+            );
+        let copies = copies_of(&it);
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies[1].0, "codex");
+        let ids: Vec<&str> = crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+        assert!(ids.contains(&"rm:claude") && ids.contains(&"rm:codex"), "{ids:?}");
+        // Destructive entries come last, never next to the default.
+        let first_rm = ids.iter().position(|i| i.starts_with("rm:")).unwrap();
+        assert!(first_rm > 2, "delete must not sit near the top: {ids:?}");
+        // A row with no copies recorded offers no delete at all.
+        let bare = Item::new("/demo", Kind::Skill).title("demo");
+        let ids: Vec<&str> = crate::actions::actions_for(&bare).iter().map(|(i, ..)| *i).collect();
+        assert!(!ids.iter().any(|i| i.starts_with("rm:")), "{ids:?}");
     }
 
     /// A source's own ordering has to survive the round trip to disk.
