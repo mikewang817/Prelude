@@ -602,29 +602,28 @@ mod tests {
             "claude.ai Gmail:\n  Scope: claude.ai config\n  Status: ✔ Connected").is_none());
     }
 
-    /// Removing the secondary's key is only defensible because the action
-    /// itself did not go anywhere. It leads the panel, and it is the one
-    /// entry that has to be there — everything else in the panel could in
-    /// principle be reached another way; this could not be reached at all.
+    /// The panel is the complete inventory of what is possible on a row, so
+    /// Enter's own action is in it — Raycast's convention, and for Raycast's
+    /// reason: the panel is searchable, and a primary that is not in the
+    /// list cannot be found by typing its name.
     ///
-    /// Enter, by contrast, is not an entry. Its behaviour is stated by the
-    /// list's footer as you move and by the panel's unselectable header, so
-    /// a row for it would duplicate the key rather than another row.
+    /// The secondary follows it and names no key, because it has none. That
+    /// is the whole reason its row exists.
     #[test]
-    fn the_panel_carries_the_secondary_and_not_the_default() {
+    fn the_panel_leads_with_enter_then_the_secondary() {
         use crate::defaults::{describe, describe_secondary, Host};
         use crate::item::{Item, Kind};
         let it = Item::new("/tmp/x.txt", Kind::File).title("x.txt").put("path", "/tmp/x.txt");
         let acts = crate::actions::actions_for(&it);
-        assert_eq!(acts[0].0, "secondary");
-        assert_eq!(acts[0].1, describe_secondary(&it, Host::Shell).unwrap());
+        assert_eq!(acts[0].0, "default");
+        assert_eq!(acts[0].1, describe(&it, Host::Shell));
+        assert_eq!(acts[0].2, "Enter", "the primary names the key that runs it");
+        assert_eq!(acts[1].0, "secondary");
+        assert_eq!(acts[1].1, describe_secondary(&it, Host::Shell).unwrap());
         // No sub-label: "the other one" was an internal name for this row
         // leaking onto the screen. To the reader it is simply an action.
-        assert_eq!(acts[0].2, "", "the secondary announces what it does, not what it is");
-        assert!(!acts.iter().any(|(id, ..)| *id == "default"), "{acts:?}");
-        // And what Enter does is still knowable — it is what the panel's
-        // header is built from.
-        assert!(!describe(&it, Host::Shell).is_empty());
+        assert_eq!(acts[1].2, "", "the secondary announces what it does, not what it is");
+        assert_ne!(acts[0].1, acts[1].1, "two rows saying the same thing is worse than one");
     }
 
     /// What the ^K panel actually offers, without standing up an fzf to
@@ -903,11 +902,9 @@ mod tests {
                     it.kind
                 );
             }
-            // The secondary leads, being the only action with no key of its
-            // own. Enter's behaviour is not a row at all — the footer says
-            // it, and the panel's header repeats it unselectably.
-            assert_eq!(ids[0], "secondary", "{:?}", it.kind);
-            assert!(!ids.contains(&"default".to_string()), "{:?}: {ids:?}", it.kind);
+            // Enter's action leads and names its key; the secondary follows
+            // and names none, because it has none.
+            assert_eq!(ids[0], "default", "{:?}", it.kind);
         }
     }
 
@@ -977,6 +974,46 @@ mod tests {
         }
     }
 
+    /// Raycast's two measures for actions that bite, and the line between
+    /// them: red for anything destructive, a confirmation only for what
+    /// cannot be reverted. `docker stop` is red but not confirmed, because
+    /// `docker start` exists; killing a process is both, because nothing
+    /// brings it back.
+    #[test]
+    fn destructive_is_red_and_the_irreversible_asks_first() {
+        use crate::actions::{is_destructive, needs_confirming};
+        use crate::item::Kind;
+        for (kind, id) in [
+            (Kind::Run, "killrun"),
+            (Kind::Container, "stop"),
+            (Kind::Skill, "rm:claude"),
+            (Kind::Skill, "menu:rm"),
+            (Kind::Port, "run"),
+            (Kind::Proc, "run"),
+        ] {
+            assert!(is_destructive(kind, id), "{kind:?}/{id} must read as destructive");
+        }
+        // Things that merely start something are not.
+        for (kind, id) in [
+            (Kind::Container, "restart"),
+            (Kind::Skill, "menu:cp"),
+            (Kind::App, "run"),
+            (Kind::Session, "run"),
+        ] {
+            assert!(!is_destructive(kind, id), "{kind:?}/{id} is not destructive");
+        }
+        // Confirming is the stronger measure, reserved for no-way-back.
+        assert!(needs_confirming(Kind::Run, "killrun").is_some());
+        assert!(needs_confirming(Kind::Port, "run").is_some());
+        assert!(needs_confirming(Kind::Proc, "run").is_some());
+        assert!(needs_confirming(Kind::Container, "stop").is_none(), "a container starts again");
+        // `rm:` asks its own question, naming the agent and the path, so it
+        // must not be double-prompted.
+        assert!(needs_confirming(Kind::Skill, "rm:claude").is_none());
+        // And every confirmed action is destructive, never the other way.
+        assert!(needs_confirming(Kind::App, "run").is_none());
+    }
+
     /// Deleting is the only destructive thing Prelude does to a user's
     /// files, and the path it acts on has been through JSON, a row, and a
     /// shell. A launcher that removes whatever it is handed is one malformed
@@ -1029,15 +1066,35 @@ mod tests {
         let copies = copies_of(&it);
         assert_eq!(copies.len(), 2);
         assert_eq!(copies[1].0, "codex");
+        // Two copies is a choice, so the panel carries one row and the agent
+        // is picked after — seven rows of `Copy it to <agent>` and
+        // `Delete <agent>'s copy` were three verbs and a parameter.
         let ids: Vec<&str> = crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
-        assert!(ids.contains(&"rm:claude") && ids.contains(&"rm:codex"), "{ids:?}");
+        assert!(ids.contains(&"menu:rm"), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.starts_with("rm:")), "not enumerated: {ids:?}");
+        // …and every copy is still reachable through it.
+        let opts: Vec<String> =
+            crate::actions::agent_options(&it, "rm").into_iter().map(|(id, _)| id).collect();
+        assert_eq!(opts, vec!["rm:claude", "rm:codex"], "{opts:?}");
+
         // Destructive entries come last, never next to the default.
-        let first_rm = ids.iter().position(|i| i.starts_with("rm:")).unwrap();
+        let first_rm = ids.iter().position(|i| i.starts_with("menu:rm")).unwrap();
         assert!(first_rm > 2, "delete must not sit near the top: {ids:?}");
+
+        // One copy is not a choice: a submenu over a single option asks a
+        // question with one answer.
+        let solo = Item::new("/demo", Kind::Skill)
+            .title("demo")
+            .put("name", "demo")
+            .put("copies", r#"[["claude","/x/.claude/skills/demo"]]"#);
+        let ids: Vec<&str> = crate::actions::actions_for(&solo).iter().map(|(i, ..)| *i).collect();
+        assert!(ids.contains(&"rm:claude"), "{ids:?}");
+        assert!(!ids.contains(&"menu:rm"), "{ids:?}");
+
         // A row with no copies recorded offers no delete at all.
         let bare = Item::new("/demo", Kind::Skill).title("demo");
         let ids: Vec<&str> = crate::actions::actions_for(&bare).iter().map(|(i, ..)| *i).collect();
-        assert!(!ids.iter().any(|i| i.starts_with("rm:")), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.starts_with("rm:") || i.starts_with("menu:rm")), "{ids:?}");
     }
 
     /// A source's own ordering has to survive the round trip to disk.

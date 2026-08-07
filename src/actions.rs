@@ -23,6 +23,74 @@ pub fn actions_for(it: &Item) -> Vec<Act> {
     actions_for_host(it, crate::defaults::Host::Shell)
 }
 
+/// The agents a per-agent verb can be pointed at, as the ids `apply` takes.
+///
+/// One row can stand for several things — a skill merged across four agents
+/// is four directories — and the panel used to enumerate them: `Copy it to
+/// codex`, `Copy it to pi`, `Copy it to opencode`, `Copy it to all missing`,
+/// plus a `Delete …` each. Seven rows that are really three verbs and a
+/// choice of agent. Raycast's answer is a submenu, and it is the right one:
+/// the verb is the decision, the agent is a parameter of it.
+pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String)> {
+    let missing: Vec<&str> = it.get("missing").split(',').filter(|s| !s.is_empty()).collect();
+    let has: Vec<&str> = it
+        .get("agent")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "shared")
+        .collect();
+    match verb {
+        "run" => has.iter().map(|n| (format!("run:{n}"), (*n).to_string())).collect(),
+        "lend" => match it.kind {
+            // A skill can only be borrowed by an agent that lacks it.
+            Kind::Skill => missing
+                .iter()
+                .filter(|n| **n != "shared" && crate::lend::can_borrow_skill(n))
+                .filter(|n| crate::sources::sessions::installed().contains(*n))
+                .map(|n| (format!("lend:{n}"), (*n).to_string()))
+                .collect(),
+            // An MCP server can go to any other agent that has a flag for it.
+            _ => crate::sources::sessions::installed()
+                .into_iter()
+                .filter(|n| *n != it.get("agent") && crate::lend::can_borrow_mcp(n))
+                .map(|n| (format!("lend:{n}"), n.to_string()))
+                .collect(),
+        },
+        "cp" => {
+            let mut v: Vec<(String, String)> =
+                missing.iter().map(|n| (format!("cp:{n}"), (*n).to_string())).collect();
+            if v.len() > 1 {
+                v.push(("cp:*".into(), format!("all {} of them", v.len())));
+            }
+            v
+        }
+        // Only agents that actually have a copy to delete.
+        "rm" => crate::sources::agents::copies_of(it)
+            .into_iter()
+            .map(|(agent, dir)| (format!("rm:{agent}"), format!("{agent} · {}", crate::paths::tilde(&dir))))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Add a verb to the panel: as one row when there is a choice to make, or as
+/// the choice itself when there is only one.
+///
+/// A submenu over a single option is a keystroke that asks a question with
+/// one answer.
+fn with_options(v: &mut Vec<Act>, it: &Item, verb: &'static str, one: &str, many: &str, sub: &str) {
+    let opts = agent_options(it, verb);
+    match opts.len() {
+        0 => {}
+        1 => v.push((leak(opts[0].0.clone()), one.replace("{}", &opts[0].1), sub.to_string())),
+        n => v.push((
+            leak(format!("menu:{verb}")),
+            many.to_string(),
+            if sub.is_empty() { format!("{n} agents") } else { sub.to_string() },
+        )),
+    }
+}
+
 pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let mut acts = match it.kind {
@@ -115,32 +183,14 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         Kind::Skill => {
             let target = first_nonempty(it, &["file", "dir"]);
             let mut v = Vec::new();
-            for agent in it.get("agent").split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "shared") {
-                v.push((leak(format!("run:{agent}")), format!("Run it with {agent}"), it.cmd.clone()));
-            }
-            let missing: Vec<&str> = it.get("missing").split(',').filter(|s| !s.is_empty()).collect();
+            with_options(&mut v, it, "run", "Run it with {}", "Run it with…", "");
             // Borrowing comes before copying: it is the lighter of the two,
             // and the one that is nearly always what was meant. Copying puts
             // a second copy of the skill on disk, to be maintained forever;
             // borrowing lasts exactly one run and leaves nothing behind.
-            for agent in &missing {
-                if *agent != "shared"
-                    && crate::lend::can_borrow_skill(agent)
-                    && crate::sources::sessions::installed().contains(agent)
-                {
-                    v.push((
-                        leak(format!("lend:{agent}")),
-                        format!("Use it in {agent}, just this run"),
-                        "nothing is installed".into(),
-                    ));
-                }
-            }
-            for agent in &missing {
-                v.push((leak(format!("cp:{agent}")), format!("Copy it to {agent}"), String::new()));
-            }
-            if missing.len() > 1 {
-                v.push(a("cp:*", "Copy it to all missing agents", missing.join(", ")));
-            }
+            with_options(&mut v, it, "lend", "Use it in {}, just this run",
+                         "Use it in…, just this run", "nothing is installed");
+            with_options(&mut v, it, "cp", "Copy it to {}", "Copy it to…", "");
             if !it.get("desc").is_empty() {
                 v.push(a("desc", "Show full description", ""));
             }
@@ -150,14 +200,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // skill merged across four agents is four separate decisions —
             // "delete it" would otherwise mean something different depending
             // on a number the row only hints at.
-            let copies = crate::sources::agents::copies_of(it);
-            for (agent, _) in &copies {
-                v.push((
-                    leak(format!("rm:{agent}")),
-                    format!("Delete {agent}'s copy…"),
-                    "to the Trash, after confirming".into(),
-                ));
-            }
+            with_options(&mut v, it, "rm", "Delete {}'s copy…", "Delete a copy…",
+                         "to the Trash, after confirming");
             v
         }
         Kind::Mcp => {
@@ -169,15 +213,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // particular server can be lent at all takes a subprocess to
             // find out, so that answer arrives when the action runs rather
             // than being guessed at here.
-            for agent in crate::sources::sessions::installed() {
-                if agent != owner && crate::lend::can_borrow_mcp(agent) {
-                    v.push((
-                        leak(format!("lend:{agent}")),
-                        format!("Lend it to {agent} for one run"),
-                        format!("from {owner}"),
-                    ));
-                }
-            }
+            with_options(&mut v, it, "lend", "Lend it to {} for one run",
+                         "Lend it for one run…", &format!("from {owner}"));
             v.push(a("insert", "Insert the lookup command", &it.cmd));
             v.push(a("open", "Open in editor", &target));
             v.push(a("reveal", "cd to its folder", parent_of(&target)));
@@ -232,18 +269,19 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // third row repeats its first is teaching you not to read it.
         _ => vec![],
     };
-    // Enter's own behaviour is not a row here. The list's footer already
-    // states it on every row as you move, so an entry would duplicate the
-    // *key* rather than another entry — and it could only ever be reached by
-    // someone who chose not to press that key. It goes in the panel's
-    // header, which cannot be selected. See `docs/ACTIONS.md`, section 1.
+    // Enter's action leads, and names its key — Raycast's convention, and
+    // for Raycast's reason: the panel is searchable, fuzzy matching flattens
+    // it into one list, and a primary that is not in the list cannot be
+    // found by typing its name. The panel has to be the complete inventory
+    // of what is possible here, not the inventory-minus-one.
     //
-    // The secondary is the opposite case: it has no key at all, so this row
-    // is the whole of it. It leads, being the most likely alternative, and
-    // says what it does rather than announcing itself as "the other one" —
-    // an internal word for it that was leaking onto the screen.
+    // The secondary follows, and names no key because it has none — that is
+    // the whole reason this row exists. It says what it does rather than
+    // announcing itself as "the other one", which was an internal word for
+    // it leaking onto the screen.
+    acts.insert(0, a("default", crate::defaults::describe(it, host), "Enter"));
     if let Some(label) = crate::defaults::describe_secondary(it, host) {
-        acts.insert(0, a("secondary", label, ""));
+        acts.insert(1, a("secondary", label, ""));
     }
     // Everything the removed shortcuts used to do stays reachable here — but
     // only where it means anything. Offering to run a translation, or to
@@ -302,6 +340,28 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     acts
 }
 
+/// Is this entry one you cannot take back with another keystroke?
+///
+/// Two consequences, both Raycast's: it is drawn in red, and — where the
+/// thing genuinely cannot be reverted — it asks first. Stopping a container
+/// is red but not confirmed, because `docker start` exists; killing a
+/// process is both, because nothing brings it back.
+pub fn is_destructive(kind: Kind, id: &str) -> bool {
+    group(kind, id) == 5
+}
+
+/// …and of those, the ones with no way back at all.
+pub fn needs_confirming(kind: Kind, id: &str) -> Option<(&'static str, &'static str)> {
+    match id {
+        "killrun" => Some(("End it", "the conversation in it is lost")),
+        "run" if matches!(kind, Kind::Port | Kind::Proc) => {
+            Some(("Kill it", "the process does not come back"))
+        }
+        // `rm:` asks its own question, naming the agent and the path.
+        _ => None,
+    }
+}
+
 /// Which of the five questions in `docs/ACTIONS.md` an entry answers.
 ///
 /// Kept as one function over ids rather than as structure in each kind's
@@ -320,7 +380,7 @@ fn group(kind: Kind, id: &str) -> u8 {
         "secondary" => 1,
         // Irreversible, so last however the kind happened to list it.
         "killrun" | "stop" => DESTROY,
-        _ if id.starts_with("rm:") => DESTROY,
+        _ if id.starts_with("rm:") || id == "menu:rm" => DESTROY,
         "run" if matches!(kind, Kind::Port | Kind::Proc) => DESTROY,
         // Text out of the row.
         "insert" | "copy" | "copyabs" | "here" | "desc" | "inspect" | "tr_src" => TAKE,
@@ -387,23 +447,29 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
         .iter()
         .map(|(id, label, sub)| {
             let tail = if sub.is_empty() { String::new() } else { format!("{DIM}· {sub}{RESET}") };
-            format!("{:<28}{tail}{SEP}{id}\n", label)
+            // Red is the whole of what Raycast's "Danger zone" section title
+            // achieves that we can have: fzf has no unselectable separator
+            // row, but it does render colour, and the point of the title was
+            // never the word — it was that these rows look different from
+            // the ones above them.
+            let label = if is_destructive(it.kind, id) {
+                format!("{RED}{label:<28}{RESET}")
+            } else {
+                format!("{label:<28}")
+            };
+            format!("{label}{tail}{SEP}{id}\n")
         })
         .collect();
 
     let short = crate::width::dtrunc(&crate::width::flatten(&it.cmd), 56);
     // The panel's payload is a bare action id, not JSON, so take the raw
     // selection rather than trying to parse an Item out of it.
-    let header = format!(
-        "Enter, back in the list:  {}",
-        crate::defaults::describe(it, host)
-    );
     match ui::pick_raw(
         feed.trim_end(),
         &format!(" {short} "),
         "⌘ ",
         "Run  Enter   ·   Back  Esc",
-        &header,
+        "",
     ) {
         Some(id) => apply(&id, it, &paste_target),
         None => 130,
@@ -411,6 +477,33 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
 }
 
 pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
+    // A verb that needed an agent: ask which, then carry on as if that row
+    // had been chosen directly.
+    if let Some(verb) = id.strip_prefix("menu:") {
+        let opts = agent_options(it, verb);
+        let feed: String = opts
+            .iter()
+            .map(|(oid, label)| format!("{:<28}{SEP}{oid}\n", label))
+            .collect();
+        let Some(chosen) = ui::pick_raw(
+            feed.trim_end(),
+            &format!(" {} ", it.get("name")),
+            "⌘ ",
+            "Choose  Enter   ·   Back  Esc",
+            "",
+        ) else {
+            return 130;
+        };
+        return apply(&chosen, it, paste);
+    }
+    // Anything with no way back says so before it happens, naming what is
+    // lost. Cancel is the default, so a stray Enter cancels.
+    if let Some((verb, loss)) = needs_confirming(it.kind, id) {
+        let what = crate::width::dtrunc(&crate::width::flatten(&it.title), 40);
+        if !ui::confirm(&format!("{} {what}?", verb.to_lowercase()), verb, loss) {
+            return 130;
+        }
+    }
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let target = first_nonempty(it, &["file", "dir", "config", "path"]);
     match id {

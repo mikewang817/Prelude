@@ -3,127 +3,86 @@
 What `Ctrl+K` offers on each row, and why each entry is there — or was
 removed. `Enter` is decided in `defaults.rs`; this is everything else.
 
-> **Status: sections 1–2 are proposals awaiting agreement. Not implemented.**
-> Everything from "Every kind" onwards describes the code as it stands.
+> **Status: agreed and implemented.** Sections 1–3 record decisions taken
+> after reading Raycast's Action Panel; the rest describes the code.
 
 ## The test every entry has to pass
 
 > Would a person, having selected *this kind of row*, reach for this?
-> **And is it something they cannot already do without opening this panel?**
+> **And is it something they cannot already do from another entry?**
 
-The second half is the whole of it, and it has two halves of its own. The
-easy one is *no entry may repeat another entry* — a dozen kinds were
-relisting their own default under better wording, and that is fixed.
+A dozen kinds were relisting their own default or secondary under better
+wording — `calc` had four rows and two actions; `app`'s "Launch it now" and
+`link`'s "Open in browser" were Enter, the latter word for word. Checking
+ids never catches that; the duplication is in the behaviour.
 
-The hard one is **no entry may repeat a key**. That one is still broken.
+**A panel whose third row repeats its first is teaching you not to read it.**
 
-## 1. The `Enter` row should go
+## 1. Enter's action stays in the panel
 
-On an agent row the panel opens with:
+It was removed for a turn — the list's footer already states it on every row
+as you move, so the entry looked like a duplicate of the *key*. Reading
+Raycast settled it the other way:
+
+> *"The primary action appears both in the Action Panel and as the default
+> triggered by ↵."* — and the panel opens with **"Search for actions…"**,
+> whose fuzzy matching **collapses every section into one flat list**.
+
+That is the argument. **A primary that is not in the list cannot be found by
+typing its name**, and the panel stops being the complete inventory of what
+is possible on a row. Our panel is an fzf and is searchable in exactly the
+same way, so the same reasoning applies. It leads, and names its key.
+
+The secondary follows it and names **no** key, because it has none — that is
+the entire reason its row exists. It says what it does rather than
+announcing itself as "the other one", which was an internal word for it
+leaking onto the screen.
+
+## 2. Destructive actions, Raycast's two measures
+
+Raycast draws a **Danger zone** section and styles destructive actions red
+(`Action.Style.Destructive`), and its rule for the stronger measure is
+precise:
+
+> *"Use the confirmation Alert if the action is doing something that user
+> cannot revert."*
+
+Both adopted, and the line between them matters:
+
+| | red | confirms |
+|---|---|---|
+| Delete *claude*'s copy | ✅ | ✅ names the agent and the path |
+| End it (a live agent) | ✅ | ✅ *the conversation in it is lost* |
+| Kill it now (port / process) | ✅ | ✅ *the process does not come back* |
+| Stop it (container) | ✅ | — `docker start` exists |
+| Restart it | — | — |
+
+fzf has no unselectable separator row, so a titled *Danger zone* is not
+available — but the title's real job was never the word, it was that these
+rows **look different from the ones above them**. Colour does that.
+
+Confirmations put Cancel first, so a stray Enter cancels.
+
+## 3. Submenus instead of enumeration
+
+Raycast uses a submenu when *"an action needs to select from a range of
+options"*. Ours enumerated: a skill offered `Copy it to codex`, `Copy it to
+pi`, `Copy it to opencode`, `Copy it to all missing agents`, `Use it in pi,
+just this run`, and one `Delete …` per agent — **seven rows that are three
+verbs and a choice of agent**.
+
+Now the verb is the row and the agent is picked after:
 
 ```
-Insert into prompt              · Enter
+Run it with…            2 agents
+Use it in pi, just this run
+Copy it to…             4 agents
+Delete a copy…          to the Trash, after confirming
 ```
 
-But the main list's footer, while you were standing on that row, already
-said:
-
-```
-Insert into prompt  Enter   ·   Actions  Ctrl+K
-```
-
-So the first row of the panel tells you what the screen you just left was
-already telling you, and offers to do what the key you did not press would
-have done. It is not redundant with another row — it is redundant with
-`Enter` itself. The rule that put it there (*"Enter's behaviour is always
-stated, and always first"*) was written before the footer existed, and the
-footer does that job better: it states it **without being asked**, on every
-row, as you move.
-
-**Proposed:** drop the row. Keep the information by putting it in the
-panel's own header, which is currently empty and unselectable — so it costs
-no entry and cannot be chosen by accident:
-
-```
-╭─ pi ──────────────────────────────────────────────╮
-│ ⌘                                            4/4  │
-│ Enter, back in the list, inserts it into your prompt
-│ ▸ Run it in the shell                             │
-│   Resume its most recent session   Prelude · 8h ago│
-│   Ask pi something                                │
-│   Open its settings                ~/.pi/agent/…  │
-╰───────────────────────────────────────────────────╯
-```
-
-Four rows, four things you cannot do any other way.
-
-## 2. "the other one" should go
-
-The second row is the *secondary action*, which is real and has no key of
-its own — so unlike the Enter row it genuinely belongs here. But it is
-labelled:
-
-```
-Run it in the shell             · the other one
-```
-
-"the other one" is an internal concept leaking out. To the person reading
-it, this is simply the most likely alternative, and it should read as an
-action like every other row.
-
-**Proposed:** keep the row, drop the sub-label. `on_secondary` stays as the
-mechanism by which a kind names its most likely alternative; it just stops
-announcing itself.
-
-## 2a. What Raycast actually does
-
-Prelude takes its shape from Raycast, so its Action Panel is worth reading
-rather than remembering. Four things it does, and what each means here.
-
-**It keeps the primary action inside the panel.** *"The primary action
-appears both in the Action Panel and as the default triggered by ↵."* The
-bottom action bar names it as well — so Raycast has exactly the duplication
-section 1 proposes to remove, and keeps it on purpose. The reason is
-searchability: the panel opens with *"Search for actions…"* and fuzzy
-matching **collapses every section into one flat list**. A primary that is
-not in the list cannot be found by typing its name, and the panel stops
-being the complete inventory of what is possible.
-
-Our panel is an fzf, so it is searchable in exactly the same way. This is a
-real argument against section 1, and it is Raycast's, not mine.
-
-**It draws named sections.** Not just an order — visible groups with titles:
-*Favorites*, *Configure*, *Deeplink*, *Manage*, and a **Danger zone** for
-destructive actions. Our five groups are enforced and invisible. fzf has no
-non-selectable row, so titled sections are not directly available — but the
-thing the *Danger zone* title is really doing is available another way.
-
-**It styles destructive actions red**, via `Action.Style.Destructive`, and
-its rule for the stronger measure is precise: *"Use the confirmation Alert if
-the action is doing something that user cannot revert."* By that rule Prelude
-is inconsistent — deleting a skill confirms, but **End it** on a live agent
-and **Kill it now** on a process do not, and neither can be undone.
-
-**It uses submenus when an action needs to pick from a range.** Ours
-enumerate instead: a skill offers `Copy it to codex`, `Copy it to pi`,
-`Copy it to opencode`, `Copy it to all missing agents`, `Use it in pi, just
-this run`, `Delete claude's copy…`, `Delete codex's copy…` — seven rows that
-are three verbs and a choice of agent.
-
-## 3. Open questions for you
-
-- **Should the panel be able to run the default at all?** Dropping the row
-  means the answer is no — you press Esc and Enter. That is one extra
-  keystroke in the case where you opened the panel and changed your mind.
-- **Is the header the right home for it**, or should the border label carry
-  it (`─ pi · Enter inserts it ─`)? The header is a full line and can hold a
-  sentence; the border label is tighter but competes with the row's name.
-- **Do the counts stay?** With both rows gone, `calc` has a **one-line**
-  panel (`Copy the original` is `translate` only) — arguably it should not
-  open a panel at all, and `^K` on a calc row could say so rather than show
-  a list of one.
-
----
+**A submenu over a single option is a keystroke that asks a question with one
+answer**, so a verb with exactly one target is still a direct row — which is
+why `Use it in pi` is spelled out above while the others are not.
 
 ## Order
 
@@ -397,15 +356,12 @@ lending, copying and deleting.
 - Sessions and MCP servers cannot be deleted (above).
 - Nothing can be renamed. Probably correct: renaming a skill breaks every
   `/name` in every past conversation.
-- On a port or a process the secondary and `Show what's using it` are the
-  same action. R5 says one should go, but the secondary row is a *statement*
-  of what Enter's counterpart does, and removing the kind's own entry would
-  make the panel's contents depend on the secondary in a way nothing else
-  does. Left deliberately; noted so it is not rediscovered as a bug.
-- The secondary's sub-label is "the other one". Honest — it has no key — but
-  it reads as a placeholder.
-- Group boundaries are enforced but not drawn. fzf has no non-selectable
-  separator row, and a fake one that could be selected is worse than none.
+- Group boundaries are enforced but not drawn, except that the destructive
+  group is red. fzf has no non-selectable separator row, and a fake one that
+  could be selected is worse than none.
+- Submenus are a second fzf rather than a nested list, so Esc from one
+  returns to the shell rather than to the panel. Raycast's returns to the
+  panel; ours would need the panel to become a loop.
 
 ## Where this lives
 
