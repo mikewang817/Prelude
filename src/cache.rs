@@ -28,11 +28,20 @@ fn cache_file(name: &str) -> std::path::PathBuf {
     paths::cache().join(format!("{name}.json"))
 }
 
+/// `score` is `#[serde(skip)]`, so anything read back from disk arrives at
+/// zero and sorts below all two thousand live rows — which is why an MCP
+/// server with priority 985 was never once seen near the top. The band is
+/// restored from the kind, and a source that ranked its own items says so
+/// in `rank`.
 pub fn read_cached(name: &str) -> Vec<Item> {
-    std::fs::read_to_string(cache_file(name))
+    let mut items: Vec<Item> = std::fs::read_to_string(cache_file(name))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for it in &mut items {
+        it.score = it.kind.priority() as f64 + it.get("rank").parse::<f64>().unwrap_or(0.0);
+    }
+    items
 }
 
 pub fn write_cached(name: &str, items: &[Item]) {
@@ -43,7 +52,7 @@ pub fn write_cached(name: &str, items: &[Item]) {
 
 const REFRESH_TTL: u64 = 5;
 
-fn stale(name: &str) -> bool {
+pub fn stale(name: &str) -> bool {
     cache_file(name)
         .metadata()
         .ok()
@@ -53,8 +62,11 @@ fn stale(name: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// A named source: what to call it in the cache, and how to gather it.
+type Source = (&'static str, fn() -> Vec<Item>);
+
 /// Sources that shell out but are fast enough to wait for.
-const FAST: &[(&str, fn() -> Vec<Item>)] = &[
+const FAST: &[Source] = &[
     ("dirs", crate::sources::user::dirs),
     ("containers", crate::sources::machine::containers),
     ("files", crate::sources::project::files),
@@ -64,12 +76,15 @@ const FAST: &[(&str, fn() -> Vec<Item>)] = &[
 /// Too slow to ever block on: lsof costs ~65ms and cannot be made faster.
 /// Served from cache and refreshed detached. Safe because the kill command
 /// re-resolves the pid at run time rather than trusting the cached one.
-const SLOW: &[(&str, fn() -> Vec<Item>)] = &[
+const SLOW: &[Source] = &[
     ("ports", crate::sources::machine::ports),
     // Hundreds of session files, each needing its head parsed.
     ("sessions", crate::sources::sessions::all),
     // `claude mcp list` runs a network health check on every server.
     ("mcp", crate::sources::agents::mcp),
+    // ps with full command lines plus a bulk lsof for their working
+    // directories: ~95ms, and worth having only for completeness.
+    ("fleet", crate::sources::running::fleet),
 ];
 
 pub fn refresh_named(name: &str) -> bool {
@@ -124,6 +139,15 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::user::clips());
     items.extend(crate::sources::agents::skills());
 
+    // Questions agents are blocked on. A directory read of a handful of small
+    // files, and the most urgent thing the launcher can show.
+    items.extend(crate::bus::items());
+
+    // Identities come from the cache; what each one is *doing* is decided
+    // here and now, out of syscalls. A fleet view that is a minute stale is
+    // worse than none — it tells you an agent is stuck that has since moved
+    // on, and vice versa.
+    items.extend(crate::sources::running::live());
     items.extend(crate::sources::machine::apps());
     items.extend(crate::sources::machine::system());
     items.extend(crate::sources::agents::configs());

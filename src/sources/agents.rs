@@ -248,6 +248,15 @@ fn mcp_codex(out: &mut Vec<Item>) {
         if let Some(r) = s.get("disabled_reason").and_then(|v| v.as_str()) {
             it = it.put("reason", r);
         }
+        // Keep the definition itself, not just how it looks. It is the one
+        // thing needed to lend the server to another agent, and it is free
+        // here — the alternative is a second `mcp get` per server at the
+        // moment someone asks, on a path that has to feel instant.
+        if let Some(def) = tr.and_then(|t| crate::lend::Mcp::from_codex(name, t)) {
+            if let Ok(j) = serde_json::to_string(&def) {
+                it = it.put("def", j);
+            }
+        }
         out.push(it);
     }
 }

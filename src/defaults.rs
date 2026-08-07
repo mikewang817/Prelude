@@ -42,17 +42,66 @@ pub enum Text {
     AbsolutePath,
     Name,
     Result,
+    /// Where a skill's instructions live, phrased as something to do.
+    ///
+    /// The one form of borrowing that needs no flag, no restart and no
+    /// cooperation from the agent's CLI: a skill is a file of instructions,
+    /// and every agent can read a file. It is the only way in for codex and
+    /// opencode, which have no way to load a skill they do not own.
+    SkillFile,
+}
+
+/// Which agent's input box we are typing into, when tmux can say.
+///
+/// Ambient rather than an argument, for the same reason the column widths
+/// are: the per-keystroke footer helper is a separate process, so this
+/// arrives on its argv and is set once. Threading it through thirty-odd
+/// call sites of `Host` would buy nothing.
+static HOST_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn set_host_agent(a: Option<String>) {
+    let _ = HOST_AGENT.set(a);
+}
+
+pub fn host_agent() -> Option<&'static str> {
+    HOST_AGENT.get().and_then(|o| o.as_deref())
+}
+
+/// Does the agent we are typing into already have this skill?
+///
+/// `/name` is a slash command only to an agent that has it. To any other it
+/// is a line of prose that means nothing — and it fails silently, which is
+/// the worst way for it to fail.
+///
+/// An unknown host is treated as owning it: that keeps the slash command for
+/// everyone who opened the launcher from the agent that has the skill, and
+/// the file pointer stays one key away on the secondary either way.
+/// `shared` is a directory rather than an agent, so it is not ownership.
+fn host_owns(it: &Item) -> bool {
+    match host_agent() {
+        None => true,
+        Some(h) => it.get("agent").split(',').map(str::trim).any(|a| a == h),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verb {
-    OpenInEditor,
+    /// Hand the file to whichever application owns it — the user's choice
+    /// if they have made one, macOS's otherwise. See `openwith`.
+    Open,
     Launch,
     OpenUrl,
     CopyResult,
     OpenConfig,
     RunSkill,
     ResumeSession,
+    /// Start an agent CLI in a pane beside the conversation you are in —
+    /// same window, so both are on screen at once.
+    SplitPane,
+    /// Put the cursor in the pane a running agent lives in.
+    JumpTo,
+    /// Type an answer to a question an agent is blocked on.
+    Answer,
     /// Run it right here in the launcher and show the output.
     RunHere,
     RunInShell,
@@ -75,12 +124,20 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         return Act(Verb::RunHere);
     }
     match (item.kind, host) {
+        // A question someone is blocked on. There is exactly one thing to do
+        // with it, and it is the same wherever you are standing.
+        (Msg, _) => Act(Verb::Answer),
+
         // Commands: unchanged in both hosts. Destructive ones especially.
         (History | Script | Path | Snippet | Ssh | Container | Git, _) => Insert,
         (Port | Proc | Sys, _) => Insert,
 
         // Objects: act at a shell, hand over the text to an agent.
-        (File | Find, Host::Shell) => Act(Verb::OpenInEditor),
+        // Opening means "give it to an application", not "give it to $EDITOR"
+        // — you pick a file out of a launcher for every reason, and only
+        // sometimes to edit it in this terminal. ^K is where you say which
+        // application, once or from now on.
+        (File | Find, Host::Shell) => Act(Verb::Open),
         (File | Find, Host::Agent) => InsertText(Text::AbsolutePath),
 
         (App, Host::Shell) => Act(Verb::Launch),
@@ -98,13 +155,36 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         // A skill name is meaningless at a shell prompt but is exactly what
         // an agent wants to hear.
         (Skill, Host::Shell) => Act(Verb::RunSkill),
-        (Skill, Host::Agent) => InsertText(Text::Name),
+        // Mid-conversation, the useful answer depends on who you are talking
+        // to. Its owner takes the slash command; anyone else is handed the
+        // file, which needs no restart and works even for the agents that
+        // cannot load a borrowed skill at all.
+        (Skill, Host::Agent) if host_owns(item) => InsertText(Text::Name),
+        (Skill, Host::Agent) => InsertText(Text::SkillFile),
+
+        // A running agent: go to it. At three of them this is a
+        // convenience; at eighty it is the only way to use the machine at
+        // all. A stray has no address to jump to, so the useful thing left
+        // is its directory, on the prompt.
+        (Run, Host::Shell) if !item.get("pane").is_empty() => Act(Verb::JumpTo),
+        (Run, Host::Shell) => Act(Verb::CdThere),
+        (Run, Host::Agent) => InsertText(Text::AbsolutePath),
 
         (Session, _) => Act(Verb::ResumeSession),
-        // Starting an agent is the obvious thing to do with one.
+        // At a shell this is a command line like any other, and the reason
+        // to hand it over rather than run it is not safety — `claude` is
+        // harmless — but that it is so often the *start* of a command.
+        // `--resume`, a model, an opening prompt: one keystroke buys the
+        // chance to add them, and costs nothing when you do not.
         (Agent, Host::Shell) => Insert,
-        (Agent, Host::Agent) => InsertText(Text::Name),
-        (Config, Host::Shell) => Act(Verb::OpenInEditor),
+        // In a conversation there is no prompt to paste onto. Typing
+        // `codex` into claude's input box sends claude the word "codex".
+        // The only reading of "start it" that means anything here is a
+        // second agent beside the first — in the same window, because the
+        // point of starting one while talking to another is watching both.
+        // tmux is already underneath us; that popup is how we got here.
+        (Agent, Host::Agent) => Act(Verb::SplitPane),
+        (Config, Host::Shell) => Act(Verb::Open),
         (Config, Host::Agent) => InsertText(Text::AbsolutePath),
 
         // cd has to happen in *your* shell, so it stays an inserted command.
@@ -115,7 +195,8 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
     }
 }
 
-/// The secondary action, reached with Option+Enter.
+/// The secondary action — Enter's opposite, and the second entry of the
+/// ^K panel.
 ///
 /// Raycast's manual defines ⌘↵ as "execute the secondary action", so it is
 /// per-item like the primary one rather than a fixed verb. The pattern
@@ -123,16 +204,26 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
 /// something, the secondary hands you the text, and where the primary hands
 /// you text, the secondary does the thing.
 ///
-/// Option+Enter, not Cmd+Enter: terminals never receive Cmd at all, and fzf
-/// supports neither ctrl-enter nor shift-enter.
+/// It has no key of its own. fzf rejects `ctrl-enter` and `shift-enter`
+/// outright, a terminal never receives Cmd, and Option is spent on composing
+/// characters unless the terminal is told otherwise — so every candidate was
+/// either impossible or silently dead on someone's machine. Naming it in the
+/// panel costs one keystroke and needs no explaining.
 pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
     use Default_::*;
     use Kind::*;
     let alt = match item.kind {
+        // Primary answers it from here; the secondary takes you to the
+        // conversation, for when the question needs more context than a line.
+        Msg => Act(Verb::JumpTo),
         // Primary inserts a command, so the secondary runs it.
-        History | Script | Path | Snippet | Ssh | Container | Git | Sys | Agent => {
+        History | Script | Path | Snippet | Ssh | Container | Git | Sys => {
             Act(Verb::RunInShell)
         }
+        // Primary hands you the command; the secondary runs it unedited.
+        Agent => Act(Verb::RunInShell),
+        // Primary goes there; the secondary tells you where "there" is.
+        Run => InsertText(Text::AbsolutePath),
         // Primary kills or acts; the secondary shows you what you would hit.
         Port | Proc => Act(Verb::Inspect),
         // Primary does something to the object, so the secondary yields text.
@@ -146,10 +237,27 @@ pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
         Session => Act(Verb::CdThere),
         Dir => InsertText(Text::AbsolutePath),
     };
-    // In an agent's input box the primary is already "hand over the text",
-    // so an inserting secondary would be the same keystroke twice.
-    if host == Host::Agent && matches!(alt, InsertText(_) | Insert) {
-        return None;
+    if host == Host::Agent {
+        // A skill is the one row with two genuinely different texts to hand
+        // over, so the slot that would otherwise go unused carries the other
+        // one — whichever of the two Enter did not give you.
+        // Enter opens a window; the other one gives the conversation the
+        // name as text, for "run codex on this for me".
+        if item.kind == Agent {
+            return Some(InsertText(Text::Name));
+        }
+        if item.kind == Skill {
+            return Some(if host_owns(item) {
+                InsertText(Text::SkillFile)
+            } else {
+                InsertText(Text::Name)
+            });
+        }
+        // Otherwise the primary is already "hand over the text", so an
+        // inserting secondary would be the same keystroke twice.
+        if matches!(alt, InsertText(_) | Insert) {
+            return None;
+        }
     }
     Some(alt)
 }
@@ -170,12 +278,16 @@ fn describe_action(d: Default_) -> &'static str {
         Default_::InsertText(Text::AbsolutePath) => "Insert the full path",
         Default_::InsertText(Text::Name) => "Insert its name",
         Default_::InsertText(Text::Result) => "Insert the result",
-        Default_::Act(Verb::OpenInEditor) => "Open in editor",
+        Default_::InsertText(Text::SkillFile) => "Point the agent at its file",
+        Default_::Act(Verb::Open) => "Open it",
+        Default_::Act(Verb::SplitPane) => "Start it in a pane beside this one",
+        Default_::Act(Verb::JumpTo) => "Go to it",
+        Default_::Act(Verb::Answer) => "Answer it",
         Default_::Act(Verb::Launch) => "Launch it",
         Default_::Act(Verb::OpenUrl) => "Open in browser",
         Default_::Act(Verb::CopyResult) => "Copy the result",
         Default_::Act(Verb::OpenConfig) => "Open its config",
-        Default_::Act(Verb::RunSkill) => "Run it with an agent",
+        Default_::Act(Verb::RunSkill) => "Hand it to an agent",
         Default_::Act(Verb::ResumeSession) => "Resume this session",
         Default_::Act(Verb::RunHere) => "Run it here and show the output",
         Default_::Act(Verb::RunInShell) => "Run it in the shell",
@@ -202,6 +314,14 @@ pub fn text_for(it: &Item, what: Text) -> String {
             Kind::Mcp => it.get("name").to_string(),
             _ => it.cmd.clone(),
         },
+        // An instruction rather than a bare path: the point is for the
+        // agent to follow the skill, and a path on its own invites it to
+        // summarise the file instead.
+        Text::SkillFile => {
+            let p = it.get("file");
+            let p = if p.is_empty() { it.get("dir") } else { p };
+            if p.is_empty() { it.cmd.clone() } else { format!("Read {p} and follow it.") }
+        }
         Text::Result => it.cmd.clone(),
     }
 }

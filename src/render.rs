@@ -12,7 +12,6 @@
 use crate::ansi::*;
 use crate::item::{Item, Kind};
 use crate::width::{dtrunc, dwidth, flatten, pad_to};
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Unit separator: splits visible text from hidden payload.
@@ -129,9 +128,8 @@ pub fn render_with(
     widths: Option<&[usize]>,
     tw_override: Option<usize>,
 ) -> String {
-
-    // Leave room for fzf's border, pointer and scrollbar, or lines wrap.
-    let usable = width.max(48) - 8;
+    // The 8 columns fzf takes for border, pointer and scrollbar are already
+    // subtracted inside title_width and middle_budget.
     let tw = tw_override.unwrap_or_else(|| title_width(items, width));
     let lw = label_width();
     let budget = middle_budget(width, tw);

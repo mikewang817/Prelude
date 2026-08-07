@@ -435,6 +435,18 @@ pub fn agent_overview(term: &str) -> Vec<Item> {
         .collect()
 }
 
+/// `r:` — only what is running, so eighty of them are not eighty rows down
+/// a list of two thousand. `r:waiting` narrows to the ones holding you up.
+pub fn running_query(q: &str) -> Option<&str> {
+    let t = q.trim();
+    for p in ["r:", "R:"] {
+        if let Some(rest) = t.strip_prefix(p) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 pub fn agent_query_prefix(q: &str) -> Option<&str> {
     let t = q.trim();
     for p in ["a:", "A:"] {
@@ -477,7 +489,10 @@ pub fn is_special(q: &str) -> bool {
     if session_query(t).is_some() || agent_query(t).is_some() {
         return true;
     }
-    if agent_query_prefix(t).is_some() || (t.starts_with('/') && skill_query(t).is_some()) {
+    if agent_query_prefix(t).is_some() || running_query(t).is_some() {
+        return true;
+    }
+    if t.starts_with('/') && skill_query(t).is_some() {
         return true;
     }
     if translate_query(t).is_some() {
@@ -548,6 +563,13 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
                 .put("prompt", prompt)
                 .put("mode", "start"),
         );
+    }
+    if let Some(term) = running_query(q) {
+        let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
+        rows.extend(crate::sources::running::live().into_iter().filter(|it| {
+            let hay = format!("{} {} {}", it.title, it.fields.join(" "), it.get("cwd")).to_lowercase();
+            needles.iter().all(|n| hay.contains(n.as_str()))
+        }));
     }
     if let Some(term) = session_query(q) {
         rows.extend(crate::sources::sessions::search(term));

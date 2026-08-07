@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
+    /// A question an agent has put to you and is blocked on.
+    Msg,
     Agent,
+    /// An agent process alive right now, as opposed to a session file.
+    Run,
     Session,
     Config,
     Translate,
@@ -38,11 +42,20 @@ impl Kind {
     pub fn priority(self) -> i64 {
         use Kind::*;
         match self {
+            // Above even the agents, and by more than the learned ranking
+            // can ever make up: frecency adds up to 60, so a band ten points
+            // clear was not clear at all — a claude you pick every day sat
+            // above a question blocked on you. Nothing on this machine
+            // outranks something that has stopped and asked.
+            Msg => 1100,
             // Agents occupy their own band, far enough above everything
             // else that learned ranking cannot lift another kind past them.
             // They are what this launcher is for; everything else is one
             // keystroke away through search.
             Agent => 1000,
+            // Above skills and past sessions: something running and stuck
+            // is more urgent than anything you might start.
+            Run => 995,
             Skill => 990,
             Mcp => 985,
             Session => 980,
@@ -75,7 +88,9 @@ impl Kind {
         use crate::ansi::*;
         use Kind::*;
         match self {
+            Msg => (RED, "asking you"),
             Agent => (GREEN, "agent"),
+            Run => (GREEN, "running"),
             Session => (MAGENTA, "session"),
             Config => (YELLOW, "config"),
             Translate => (CYAN, "translate"),
@@ -104,8 +119,8 @@ impl Kind {
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
-            Agent, Session, Config, Translate, Calc, Port, Proc, Link, Find, Container, Snippet, Clip,
-            Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
+            Msg, Agent, Session, Config, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
+            Clip, Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }
 }

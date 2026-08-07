@@ -19,6 +19,13 @@ _prelude_widget() {
       BUFFER="$payload"
       zle accept-line
       ;;
+    MSG)
+      # Something was refused, or failed, and said why. `zle -M` prints
+      # below the prompt without disturbing what you have typed, and clears
+      # itself on the next keystroke — so an explanation costs nothing and
+      # a silent no-op never happens.
+      zle -M "prelude: $payload"
+      ;;
   esac
   zle reset-prompt
 }
@@ -56,4 +63,82 @@ bind r display-popup -E -w 92% -h 92% -d '#{pane_current_path}' \
 # Optional: one-key access with no prefix. Uncomment if Alt-R is free for you.
 # bind -n M-r display-popup -E -w 92% -h 92% -d '#{pane_current_path}' \
 #   "PRELUDE_IN_POPUP=1 prelude paste"
+
+# Optional: agents and their questions in the status bar. "2 waiting · 3 working" when there is
+# a fleet, nothing at all when there is not. Costs no subprocesses per
+# refresh beyond prelude itself — identities come from its cache.
+# set -g status-interval 15
+# set -g status-right '#(prelude fleet --status) · %H:%M '
+"#;
+
+/// What an agent needs to know, in the form an agent actually reads.
+///
+/// Append it to `CLAUDE.md` or `AGENTS.md` and the agent has the whole
+/// interface: four verbs, what each returns, and — the part that matters
+/// most — *when to reach for them*. A capability an agent has to be told
+/// about every time is not a capability it has.
+///
+/// The wording is deliberate on two points. It says `prelude ask` blocks and
+/// returns the answer on stdout, because an agent that does not know it will
+/// get a reply will not wait for one. And it says to ask instead of guessing,
+/// because the failure this exists to prevent is the confident wrong choice
+/// made at 2am rather than the question left unasked.
+pub const AGENT: &str = r#"## Reaching the human, and the other agents
+
+`prelude` is on this machine. It is how you talk to the person who started
+you, and to the other agents running alongside you. Everything below is a
+plain shell command.
+
+**Ask the human a question and wait for the answer.** They are notified
+wherever they are — they do not have to be looking at your window — and the
+answer arrives on stdout. Use this whenever you would otherwise guess at
+something you cannot undo:
+
+```sh
+answer=$(prelude ask "The migration drops the legacy_users table. Proceed?")
+```
+
+Exit code 0 means they answered, 3 means nobody did within the timeout
+(default 600s; pass `--timeout=120` to fit inside your own tool deadline).
+On 3, do the conservative thing and say that you did.
+
+**Tell them something, without waiting.** For the end of long work, or
+anything they would want to know but need not act on:
+
+```sh
+prelude tell "migration finished — 41k rows, no errors"
+```
+
+**See the other agents on this machine, and talk to them.** `--json` gives
+you their project, state, working directory and pane address:
+
+```sh
+prelude fleet --json
+prelude say api-gateway "I changed the auth schema — you will need to rebase"
+```
+
+`say` types the line straight into that agent's conversation, attributed so
+it knows the message came from a peer rather than from the human. Address it
+by project, by agent name, or by pane. If more than one thing matches it will
+refuse and list them rather than deliver to the wrong one.
+
+**Collect what was left for you**, when an agent could not be typed into
+directly:
+
+```sh
+prelude inbox --json && prelude drain
+```
+
+### When to use which
+
+- About to do something irreversible, ambiguous, or outside what you were
+  asked → `prelude ask`. Waiting for a person is cheaper than being wrong.
+- Finished something long, or hit a problem they should know about but that
+  does not block you → `prelude tell`.
+- Your change breaks an assumption another agent is working under →
+  `prelude say <their project>`.
+- Wondering whether someone else is already on it → `prelude fleet --json`.
+
+Do not use these for ordinary progress chatter. A notification that arrives
+for nothing teaches the person to ignore the next one.
 "#;

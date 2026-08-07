@@ -81,6 +81,9 @@ fn resume_cmd(agent: &str, id: &str) -> String {
 struct Raw {
     agent: &'static str,
     id: String,
+    /// The file itself. Its mtime is the only universal way to tell whether
+    /// a running agent is working or waiting — see `running.rs`.
+    path: PathBuf,
     title: String,
     /// The opening message verbatim. The displayed title may be an
     /// AI-generated summary, which loses the `/skill-name` that started it.
@@ -156,7 +159,7 @@ fn scan_claude(out: &mut Vec<Raw>) {
             if title.is_empty() {
                 continue;
             }
-            out.push(Raw { agent: "claude", id, title, opening, cwd, mtime });
+            out.push(Raw { agent: "claude", id, path: p.clone(), title, opening, cwd, mtime });
         }
     }
 }
@@ -210,7 +213,7 @@ fn scan_codex(out: &mut Vec<Raw>) {
             }
             if !id.is_empty() {
                 let opening = title.clone();
-                out.push(Raw { agent: "codex", id, title, opening, cwd, mtime });
+                out.push(Raw { agent: "codex", id, path: p.clone(), title, opening, cwd, mtime });
             }
         });
     }
@@ -239,7 +242,7 @@ fn scan_pi(out: &mut Vec<Raw>) {
         }
         if !id.is_empty() {
             let opening = title.clone();
-            out.push(Raw { agent: "pi", id, title, opening, cwd, mtime });
+            out.push(Raw { agent: "pi", id, path: p.clone(), title, opening, cwd, mtime });
         }
     });
 }
@@ -270,7 +273,7 @@ pub fn all() -> Vec<Item> {
     scan_claude(&mut raw);
     scan_codex(&mut raw);
     scan_pi(&mut raw);
-    raw.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    raw.sort_by_key(|r| std::cmp::Reverse(r.mtime));
 
     raw.into_iter()
         .map(|r| {
@@ -288,6 +291,7 @@ pub fn all() -> Vec<Item> {
                 .put("id", r.id)
                 .put("cwd", r.cwd)
                 .put("ts", format!("{ts:.0}"))
+                .put("file", r.path.to_string_lossy().into_owned())
                 .put("opening", crate::width::flatten(&r.opening))
         })
         .collect()

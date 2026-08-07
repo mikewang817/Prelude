@@ -20,6 +20,67 @@ pub fn show(it: &Item) {
     }
 
     match it.kind {
+        // A question, in full, plus the conversation it came out of. The row
+        // has to fit the question on one line; this does not, and a decision
+        // you are being asked to make deserves the whole sentence and the
+        // few exchanges that led to it.
+        Kind::Msg => {
+            kv(&mut out, "from", it.get("agent"));
+            kv(&mut out, "project", &tilde(it.get("cwd")));
+            kv(&mut out, "at", it.get("pane"));
+            out.push(String::new());
+            out.extend(it.get("text").lines().map(str::to_string));
+            let pane = it.get("pane");
+            if !pane.is_empty() {
+                let screen = crate::exec::run(
+                    &["tmux", "capture-pane", "-p", "-t", pane, "-S", "-30"],
+                    std::time::Duration::from_secs(2),
+                );
+                let screen = screen.trim_end();
+                if !screen.is_empty() {
+                    out.push(String::new());
+                    out.push(format!("{DIM}what it was doing{RESET}"));
+                    out.extend(screen.lines().map(str::to_string));
+                }
+            }
+        }
+        // The one preview that answers the question you actually had. A row
+        // saying "waiting 12m" tells you something is stuck; only its screen
+        // tells you what it asked. One capture for the selected pane, not
+        // for all eighty of them.
+        Kind::Run => {
+            kv(&mut out, "agent", it.get("agent"));
+            kv(&mut out, "project", &tilde(it.get("cwd")));
+            kv(&mut out, "at", it.get("addr"));
+            kv(&mut out, "state", it.get("state"));
+            kv(&mut out, "pid", it.get("pid"));
+            // What it last said, from its conversation file — which exists
+            // whether or not it is in a terminal Prelude can see into. The
+            // pane's screen is better when there is one, since it shows the
+            // half-finished line too.
+            let pane = it.get("pane");
+            let screen = if pane.is_empty() {
+                String::new()
+            } else {
+                crate::exec::run(
+                    &["tmux", "capture-pane", "-p", "-t", pane, "-S", "-40"],
+                    std::time::Duration::from_secs(2),
+                )
+            };
+            let screen = screen.trim_end();
+            if !screen.is_empty() {
+                out.push(String::new());
+                out.push(format!("{DIM}its screen{RESET}"));
+                out.extend(screen.lines().map(str::to_string));
+            } else {
+                let tail = crate::sources::running::transcript_tail(it.get("session"), 8);
+                if !tail.is_empty() {
+                    out.push(String::new());
+                    out.push(format!("{DIM}what it last said{RESET}"));
+                    out.extend(tail);
+                }
+            }
+        }
         Kind::Skill => {
             kv(&mut out, "agents", it.get("agent"));
             kv(&mut out, "file", &tilde(it.get("file")));
@@ -124,7 +185,7 @@ fn group(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
