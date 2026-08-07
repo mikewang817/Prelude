@@ -12,14 +12,19 @@ You press Enter to actually run it.
 ```
 ╭─ Prelude ────────────────────────────────────────────────────────────╮
 │ ⌕ dev                                                        4/2280  │
-│ ▸ pnpm dev                    script    · package.json · vite --host │
-│   npm run dev                 history                                │
-│   :3000 node                  port      · node      · pid 4821       │
+│ ▸ pnpm dev        · package.json · vite --host --port 3000    script │
+│   npm run dev                                                history │
+│   :3000 node      · node · pid 4821                             port │
 │ ──────────────────────────────────────────────────────────────────── │
 │  Insert into prompt  Enter  ·  Run it in the shell  Option+Enter  ·  │
 │  Actions  Option+K                                                   │
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
+
+Search on top, results in the middle, a footer naming the actions and their
+keys — the same three parts as Raycast. The footer changes as you move,
+because every one of those keys does something different depending on what
+is selected.
 
 Search on top, results in the middle, and a footer that names the actions
 and the keys that run them — the same three parts as Raycast. The footer

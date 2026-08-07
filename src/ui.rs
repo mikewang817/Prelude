@@ -30,6 +30,9 @@ pub fn footer_for(primary: &str, secondary: Option<&str>) -> String {
 }
 
 // alt-k is the advertised one; ctrl-k stays for anyone who learned it.
+/// Share of the width the list keeps when the detail pane is showing.
+const PREVIEW_LIST_PCT: usize = 55;
+
 const EXPECT: &str = "ctrl-x,ctrl-k,alt-k,alt-enter";
 
 pub struct FzfOut {
@@ -84,9 +87,11 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
         modes.push(vec![]);
     } else {
         if std::env::var_os("TMUX").is_some() && !env_flag("PRELUDE_NO_POPUP") {
-            modes.push(vec!["--tmux".into(), "center,80%,80%".into()]);
+            modes.push(vec!["--tmux".into(), "center,92%,92%".into()]);
         }
-        let h = std::env::var("PRELUDE_HEIGHT").unwrap_or_else(|_| "60%".into());
+        // Most of the terminal, not half of it: a launcher that shows twelve
+        // rows out of two thousand is making you scroll for no reason.
+        let h = std::env::var("PRELUDE_HEIGHT").unwrap_or_else(|_| "90%".into());
         modes.push(vec![format!("--height={h}")]);
     }
     let _ = cols;
@@ -134,8 +139,21 @@ pub fn search(paste_target: Option<String>) -> i32 {
         eprintln!("prelude: nothing to search yet — run some commands first");
         return 2;
     }
-    let cols = crate::term_width();
-    let feed = render::render(&items, cols, None);
+    let term = crate::term_width();
+    // Only on terminals wide enough that the list doesn't get cramped.
+    let preview_min: usize = std::env::var("PRELUDE_PREVIEW_MIN").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(150);
+    let preview = term >= preview_min && !env_flag("PRELUDE_NO_PREVIEW");
+    // Lay out against the *list* width, not the terminal's. With a detail
+    // pane taking 45%, measuring the whole terminal overflows every row.
+    let cols = if preview { term * PREVIEW_LIST_PCT / 100 } else { term };
+
+    // Compute the layout once and hand it to the per-keystroke helper. Both
+    // sides must agree; if each measured its own, computed rows would land
+    // in a different column from the static ones.
+    let widths = render::field_widths(&items);
+    let tw = render::title_width(&items, cols);
+    let feed = render::render_with(&items, cols, Some(&widths), Some(tw));
 
     // Park the static list on disk so the per-keystroke reload only has to
     // cat it, rather than re-gathering every source.
@@ -148,7 +166,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
     args.push(format!("--expect={EXPECT}"));
     args.push("--bind".into());
     args.push(format!(
-        "change:transform:{} _bind {{q}} {} {cols}",
+        "change:transform:{} _bind {{q}} {} {cols} {tw}",
         shq(&me),
         shq(&static_path.to_string_lossy())
     ));
@@ -169,14 +187,11 @@ pub fn search(paste_target: Option<String>) -> i32 {
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
     args.push(format!("ctrl-y:execute-silent({} _copy {{2}})", shq(&me)));
-    // Only on terminals wide enough that the list doesn't get cramped.
-    let min: usize = std::env::var("PRELUDE_PREVIEW_MIN").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(150);
-    if cols >= min && !env_flag("PRELUDE_NO_PREVIEW") {
+    if preview {
         args.push("--preview".into());
         args.push(format!("{} _preview {{2}}", shq(&me)));
         args.push("--preview-window".into());
-        args.push("right,45%,wrap,border-left".into());
+        args.push(format!("right,{}%,wrap,border-left", 100 - PREVIEW_LIST_PCT));
         args.push("--bind".into());
         args.push("ctrl-p:toggle-preview".into());
     }
@@ -380,9 +395,9 @@ pub fn pick_raw(feed: &str, label: &str, prompt: &str, header: &str) -> Option<S
         modes.push(vec![]);
     } else {
         if std::env::var_os("TMUX").is_some() && !env_flag("PRELUDE_NO_POPUP") {
-            modes.push(vec!["--tmux".into(), "center,80%,80%".into()]);
+            modes.push(vec!["--tmux".into(), "center,92%,92%".into()]);
         }
-        modes.push(vec!["--height=60%".into()]);
+        modes.push(vec!["--height=90%".into()]);
     }
     for mode in modes {
         let mut cmd = Command::new("fzf");

@@ -50,10 +50,10 @@ pub const TMUX: &str = r#"# Prelude — tmux integration
 # into the pane underneath. It never presses Enter for you.
 
 # prefix + r  (i.e. Ctrl-b then r)
-bind r display-popup -E -w 85% -h 85% -d '#{pane_current_path}' \
+bind r display-popup -E -w 92% -h 92% -d '#{pane_current_path}' \
   "PRELUDE_IN_POPUP=1 prelude paste"
 
 # Optional: one-key access with no prefix. Uncomment if Alt-R is free for you.
-# bind -n M-r display-popup -E -w 85% -h 85% -d '#{pane_current_path}' \
+# bind -n M-r display-popup -E -w 92% -h 92% -d '#{pane_current_path}' \
 #   "PRELUDE_IN_POPUP=1 prelude paste"
 "#;

@@ -72,10 +72,18 @@ fn main() -> ExitCode {
         }
         ["_refresh-path"] => { sources::user::scan_path(); 0 }
         ["_refresh", name] => if cache::refresh_named(name) { 0 } else { 1 },
-        ["_bind", q, path, cols] => bind(q, path, cols),
-        ["_dynamic", q] => dynamic(q, "", term_width()),
-        ["_dynamic", q, path] => dynamic(q, path, term_width()),
-        ["_dynamic", q, path, cols] => dynamic(q, path, cols.parse().unwrap_or_else(|_| term_width())),
+        ["_bind", q, path, cols, tw] => bind(q, path, cols, tw),
+        ["_dynamic", q] => dynamic(q, "", term_width(), None),
+        ["_dynamic", q, path] => dynamic(q, path, term_width(), None),
+        ["_dynamic", q, path, cols] => {
+            dynamic(q, path, cols.parse().unwrap_or_else(|_| term_width()), None)
+        }
+        ["_dynamic", q, path, cols, tw] => dynamic(
+            q,
+            path,
+            cols.parse().unwrap_or_else(|_| term_width()),
+            tw.parse().ok(),
+        ),
         ["_ask", line] => match render::parse_line(line) {
             Some(i) => ui::ask(&i),
             None => 1,
@@ -142,12 +150,12 @@ prelude — a Raycast-style launcher for the terminal
 /// `en:...` and watch your own answer get filtered out. For those queries we
 /// turn fzf's own filtering off and let our row stand at the top; for
 /// ordinary queries we leave fuzzy search exactly as it was.
-fn bind(q: &str, path: &str, cols: &str) -> i32 {
+fn bind(q: &str, path: &str, cols: &str, tw: &str) -> i32 {
     let me = std::env::current_exe().unwrap_or_default();
     let me = exec::shq(&me.to_string_lossy());
     let search = if compute::is_special(q) { "disable-search" } else { "enable-search" };
-    println!("{search}+reload({me} _dynamic {} {} {})",
-             exec::shq(q), exec::shq(path), exec::shq(cols));
+    println!("{search}+reload({me} _dynamic {} {} {} {})",
+             exec::shq(q), exec::shq(path), exec::shq(cols), exec::shq(tw));
     0
 }
 
@@ -156,10 +164,10 @@ fn bind(q: &str, path: &str, cols: &str) -> i32 {
 /// `cols` is passed in rather than measured: fzf runs this with stdout on a
 /// pipe, so a measurement would fall back to a default and the computed rows
 /// would drift ten columns out of step with the static ones.
-fn dynamic(q: &str, path: &str, cols: usize) -> i32 {
+fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
     let rows = compute::dynamic_rows(q);
     if !rows.is_empty() {
-        println!("{}", render::render(&rows, cols, None));
+        println!("{}", render::render_with(&rows, cols, None, tw));
     }
     // Once the query has clearly declared an intent — a sum, a translation,
     // an agent to start — the 2000-odd unrelated rows underneath are noise.

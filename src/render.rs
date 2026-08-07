@@ -49,7 +49,40 @@ pub fn field_widths(items: &[Item]) -> HashMap<Kind, Vec<usize>> {
     w
 }
 
+/// Title column, sized to the titles themselves.
+///
+/// Not a fixed fraction, and not "whatever the tail leaves over" either. The
+/// tail is dominated by one kind — a skill's description runs for hundreds of
+/// columns — so sizing against it squeezed titles while most rows still left
+/// the right-hand third blank. Sizing against the titles keeps them intact
+/// and hands the slack to the middle column, which is the part with
+/// something to say.
+pub fn title_width(items: &[Item], width: usize) -> usize {
+    let usable = width.max(48) - 8;
+    let mut w: Vec<usize> = items
+        .iter()
+        .map(|i| dwidth(&flatten(&i.title)))
+        .collect();
+    if w.is_empty() {
+        return usable / 3;
+    }
+    w.sort_unstable();
+    // Cover most titles rather than the longest: a handful of very long
+    // history entries should not set the column for two thousand rows.
+    let p85 = w[w.len() * 85 / 100];
+    p85.clamp(18, usable * 45 / 100)
+}
+
 pub fn render(items: &[Item], width: usize, widths: Option<&HashMap<Kind, Vec<usize>>>) -> String {
+    render_with(items, width, widths, None)
+}
+
+pub fn render_with(
+    items: &[Item],
+    width: usize,
+    widths: Option<&HashMap<Kind, Vec<usize>>>,
+    tw_override: Option<usize>,
+) -> String {
     let owned;
     let widths = match widths {
         Some(w) => w,
@@ -60,7 +93,7 @@ pub fn render(items: &[Item], width: usize, widths: Option<&HashMap<Kind, Vec<us
     };
     // Leave room for fzf's border, pointer and scrollbar, or lines wrap.
     let usable = width.max(48) - 8;
-    let tw = (usable / 2).clamp(20, 56);
+    let tw = tw_override.unwrap_or_else(|| title_width(items, width));
     let lw = label_width();
 
     let mut out = String::with_capacity(items.len() * 96);
@@ -68,13 +101,12 @@ pub fn render(items: &[Item], width: usize, widths: Option<&HashMap<Kind, Vec<us
         let (color, label) = it.kind.style();
         let title = dtrunc(&flatten(&it.title), tw);
         let pad = " ".repeat((tw + 2).saturating_sub(dwidth(&title)).max(1));
-        out.push_str(&title);
-        out.push_str(&pad);
-        out.push_str(color);
-        out.push_str(&pad_to(label, lw, false));
-        out.push_str(RESET);
 
+        // The kind label is pinned to the right edge, as Raycast pins its
+        // result type. That gives it a single column on every row for free,
+        // and lets the middle stretch to fill everything in between.
         let budget = usable.saturating_sub(tw + 2 + lw + 3);
+        let mut middle = String::new();
         if budget >= 8 {
             let tail = if !it.fields.is_empty() {
                 let w = widths.get(&it.kind);
@@ -98,10 +130,25 @@ pub fn render(items: &[Item], width: usize, widths: Option<&HashMap<Kind, Vec<us
             };
             if let Some(t) = tail {
                 if !t.is_empty() {
-                    out.push_str(&format!(" {DIM}· {}{RESET}", dtrunc(&t, budget)));
+                    middle = dtrunc(&t, budget);
                 }
             }
         }
+
+        out.push_str(&title);
+        out.push_str(&pad);
+        if middle.is_empty() {
+            out.push_str(&" ".repeat(budget + 3));
+        } else {
+            // "· " + budget + one space = budget + 3, matching the empty
+            // branch exactly so every row ends in the same column.
+            out.push_str(&format!("{DIM}· {}{RESET} ", pad_to(&middle, budget, false)));
+        }
+        // Right-aligned within a constant width, so the labels share an
+        // edge and every row ends in the same column.
+        out.push_str(color);
+        out.push_str(&pad_to(label, lw, true));
+        out.push_str(RESET);
 
         out.push(SEP);
         out.push_str(&serde_json::to_string(it).unwrap_or_default());
