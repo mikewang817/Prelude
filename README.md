@@ -238,6 +238,11 @@ fuzzy-match the query that produced it — you would type `en:…` and watch you
 own answer get filtered out. Prelude uses a `change:transform` binding to
 disable fzf's filtering for computed queries and re-enable it otherwise.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports with a screenshot of
+the list rendering wrong are the most useful thing you can send.
+
 ## License
 
-MIT
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
