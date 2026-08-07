@@ -586,9 +586,18 @@ old use.
 
 **Within its kind, and never across.** Sorting asks two questions in order:
 *what kind of thing is this*, then *how much do you use this one*. So a skill
-you ran twice this morning leads the other skills, and still sits below the
-agents; a question an agent is blocked on leads everything, whatever you have
-been picking all week.
+you invoke often leads the other skills and still sits below the agents; a
+question an agent is blocked on leads everything, whatever you have been
+picking all week.
+
+**Skills are ordered by the number the row already shows you.** `used 8× ·
+1d ago` is mined from your past conversations, and it decides — not clicks in
+the launcher, which usually mean reading a description or lending the skill
+somewhere. Recency separates skills you reach for equally often but can never
+lift one over a skill you have used more: eight invocations across a month is
+*yours*, and should not fall behind one from yesterday. Sessions are the
+mirror image, since for a conversation recency **is** the question — you
+resume what you were just doing.
 
 That order used to be one number — kind priority plus a bonus — and the
 arithmetic could not hold it. The agent cluster spans 25 points while the

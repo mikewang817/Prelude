@@ -836,6 +836,52 @@ mod tests {
         assert_eq!(t, "plain question");
     }
 
+    /// A source's own ordering has to survive the round trip to disk.
+    ///
+    /// `read_cached` rebuilds the score from kind plus `rank`, so a rank that
+    /// is applied but not recorded is a rank that exists only until the
+    /// cache is next read — and sessions, the kind that most depends on it,
+    /// are always read back from the cache.
+    #[test]
+    fn a_sources_own_ordering_survives_the_cache() {
+        use crate::item::{Item, Kind};
+        let it = Item::new("claude --resume abc", Kind::Session).rank(199.6);
+        assert_eq!(it.score, Kind::Session.priority() as f64 + 199.6);
+        // What `read_cached` does on the way back off disk.
+        let restored =
+            Kind::Session.priority() as f64 + it.get("rank").parse::<f64>().unwrap_or(0.0);
+        assert_eq!(restored, it.score, "rank must be recorded, not just applied");
+    }
+
+    /// The skill column said "used 8× · 1d ago" and the ordering ignored it,
+    /// so a skill invoked eight times sorted below four never touched — on
+    /// the strength of its first letter, because everything tied at zero and
+    /// the merge map is alphabetical. A number shown that prominently has to
+    /// mean something.
+    #[test]
+    fn skills_are_ordered_by_how_often_you_actually_invoke_them() {
+        use crate::frecency::{now, MAX_BONUS};
+        use crate::sources::agents::usage_rank;
+        let day = 86_400.0;
+
+        // Count decides, and by more than the launcher's own frecency can
+        // ever add. Clicking a skill row is usually reading its description
+        // or lending it somewhere — only invoking it says you use it.
+        assert!(
+            usage_rank(1, now() - 30.0 * day) > MAX_BONUS,
+            "one real invocation must outrank any number of launcher picks"
+        );
+        // More uses always wins, however long ago they were. A skill used
+        // eight times over a month is yours; one used once yesterday is not.
+        assert!(usage_rank(8, now() - 90.0 * day) > usage_rank(1, now()));
+        assert!(usage_rank(2, now() - 365.0 * day) > usage_rank(1, now()));
+        // Recency only separates skills you reach for equally often.
+        assert!(usage_rank(3, now()) > usage_rank(3, now() - 10.0 * day));
+        // Never invoked scores nothing, so frecency and then the name decide
+        // among the ones you have not used.
+        assert_eq!(usage_rank(0, 0.0), 0.0);
+    }
+
     /// Kind decides the band; how much you use something only orders it
     /// *inside* that band. Nothing you pick often can climb out.
     ///

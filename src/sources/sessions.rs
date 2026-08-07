@@ -267,6 +267,27 @@ fn walk_jsonl(root: &Path, f: &mut dyn FnMut(&PathBuf, SystemTime)) {
     }
 }
 
+/// How much being the newest session is worth.
+///
+/// Larger than a use record can be (`frecency::MAX_BONUS`, 60) because for a
+/// conversation recency *is* the question — you resume what you were just
+/// doing. A favourite still climbs: at ten hours old this is worth 18, so a
+/// session you keep coming back to passes one from two hours ago that you
+/// have never picked. Nothing passes one touched a minute ago.
+const RECENCY_WEIGHT: f64 = 200.0;
+
+/// Newest first, said out loud.
+///
+/// This used to be a property of the *order rows were generated in* — `all`
+/// sorts by mtime and a stable sort preserved it — which held only while
+/// every session scored the same. The moment one picked up a frecency bonus
+/// the recency order broke, and a six-hour-old session sat above one from a
+/// minute ago with nothing on screen to explain why.
+fn recency_rank(ts: f64) -> f64 {
+    let hours = (crate::frecency::now() - ts).max(0.0) / 3600.0;
+    RECENCY_WEIGHT / (1.0 + hours)
+}
+
 /// All sessions, newest first. Expensive — always called behind the cache.
 pub fn all() -> Vec<Item> {
     let mut raw = Vec::new();
@@ -285,6 +306,7 @@ pub fn all() -> Vec<Item> {
                 paths::tilde(&r.cwd)
             };
             Item::new(resume_cmd(r.agent, &r.id), Kind::Session)
+                .rank(recency_rank(ts))
                 .title(crate::width::flatten(&r.title))
                 .fields([r.agent.to_string(), where_, crate::sources::user::ago(ts)])
                 .put("agent", r.agent)

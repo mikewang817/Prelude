@@ -28,6 +28,25 @@ pub fn load() -> Freq {
     out
 }
 
+/// The most a record of use is worth in the ordering.
+///
+/// It cannot cross a kind — `cache::by_rank` settles the band first — so the
+/// ceiling is no longer there to stop it vaulting. It is there so that past
+/// a point, what the source itself knows (this session is the newest, this
+/// run is the one that is stuck) still counts for something against one more
+/// use.
+pub const MAX_BONUS: f64 = 60.0;
+
+/// What a record of `n` uses, last at `last`, is worth in the ordering.
+///
+/// One definition, used for both kinds of evidence there are: the times you
+/// picked a row in the launcher, and the times a skill was actually invoked
+/// in a conversation. Eight of one should weigh the same as eight of the
+/// other, and they only do if the arithmetic lives in one place.
+pub fn bonus(n: u64, last: f64) -> f64 {
+    (score(n, last) * 12.0).min(MAX_BONUS)
+}
+
 /// zoxide-style decay: recent use is worth much more than old use.
 pub fn score(n: u64, last: f64) -> f64 {
     let hours = (now() - last).max(0.0) / 3600.0;

@@ -187,6 +187,29 @@ impl Item {
         self.cwd = Some(c.into());
         self
     }
+    /// Where this sits *within* its kind, according to the source.
+    ///
+    /// A source knows things the launcher cannot: which skill you actually
+    /// invoke, which session is the newest, which run is the stuck one. That
+    /// belonged in the ordering and had nowhere to go, so it was either
+    /// thrown away — a skill used eight times sorted below four you had
+    /// never touched, purely on the first letter — or smuggled in as the
+    /// order rows happened to be generated in, which the first item to gain
+    /// a frecency bonus then broke.
+    ///
+    /// Recorded *and* applied: `read_cached` rebuilds the score from kind
+    /// plus this on the way back off disk, and setting it here means sources
+    /// that never go through the cache behave identically.
+    ///
+    /// It cannot reach outside the kind — `cache::by_rank` settles the band
+    /// first — so the number is free to be on whatever scale suits the
+    /// source.
+    pub fn rank(mut self, r: f64) -> Self {
+        self.data.insert("rank".to_string(), format!("{r:.3}"));
+        self.score = self.kind.priority() as f64 + r;
+        self
+    }
+
     pub fn put(mut self, k: &str, v: impl Into<String>) -> Self {
         self.data.insert(k.to_string(), v.into());
         self

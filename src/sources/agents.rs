@@ -26,7 +26,38 @@ struct Skill {
     desc: String,
 }
 
-/// Skills across every agent, merged by name.
+/// What one invocation is worth.
+///
+/// Wide enough that a single one clears anything the launcher's own frecency
+/// can add (`MAX_BONUS`, 60), because the two are not the same evidence.
+/// Selecting a skill row in Prelude is usually reading its description,
+/// inserting its name, or lending it somewhere — the row has nine actions
+/// and only one of them runs the thing. Actually invoking it in a
+/// conversation is the only unambiguous statement that this is a skill you
+/// use, so it decides, and clicks only separate skills you use equally.
+const PER_USE: f64 = 100.0;
+
+/// How much recency can move a skill *without* crossing a count.
+const RECENCY: f64 = 60.0;
+
+/// A skill's place among skills: how often you actually invoke it.
+///
+/// Count first and by a wide margin — the column has said `used 8× · 1d ago`
+/// all along, and sorting by anything else makes that number decorative.
+/// Recency then separates skills you reach for equally often, but is bounded
+/// below `PER_USE` so it can never lift a skill over one you have used more.
+/// That ordering is stable in a way a decayed count is not: a skill used
+/// eight times over a month is *yours*, and should not fall behind one used
+/// once yesterday.
+pub fn usage_rank(times: u32, last: f64) -> f64 {
+    if times == 0 {
+        return 0.0;
+    }
+    let days = (crate::frecency::now() - last).max(0.0) / 86_400.0;
+    times as f64 * PER_USE + RECENCY / (1.0 + days)
+}
+
+/// Skills across every agent, merged by name and ordered by use.
 ///
 /// The same skill commonly lives in several agents' directories. Listing it
 /// once and naming the agents that have it is more useful than either three
@@ -85,6 +116,7 @@ pub fn skills() -> Vec<Item> {
                 format!("missing: {}", missing.join(", "))
             };
             Item::new(format!("/{name}"), Kind::Skill)
+                .rank(usage_rank(times, last))
                 .title(&name)
                 .fields([agents.clone(), used, gap, rec.desc.clone()])
                 .put("missing", missing.join(","))

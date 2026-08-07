@@ -127,6 +127,19 @@ fix it by tuning the cap — the cap can only move the threshold, and any later
 edit to a priority silently re-opens the hole. A test walks every pair of
 kinds with the lower band given an absurd score.
 
+**A source ranks its own kind, through `Item::rank`.** The launcher's
+frecency cannot know which skill you actually invoke or which session is the
+newest; the source can, and had nowhere to say so. Skills were the visible
+case: the row printed `used 8×` and sorted alphabetically, so a skill invoked
+eight times sat below four never touched. Skills now rank by invocation count
+(`PER_USE` 100, wide enough that one real use clears the 60-point frecency
+cap, because clicking a skill row usually means reading its description);
+sessions rank by recency (`RECENCY_WEIGHT` 200, because for a conversation
+recency *is* the question). `rank` must be written into `data`, not only
+added to `score` — `read_cached` rebuilds the score from kind plus rank, so a
+rank that is applied but not recorded vanishes the next time the cache is
+read, and sessions are always read back from it.
+
 **Column widths are shared across all kinds and taken at a percentile.**
 Per-kind widths only align within a kind, so the dots scatter. And one
 outlier — a session in a deep iCloud path, 127 columns — will set the column

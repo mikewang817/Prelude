@@ -236,11 +236,9 @@ pub fn finish(items: Vec<Item>) -> Vec<Item> {
             continue;
         }
         if let Some((n, last)) = freq.get(&it.cmd) {
-            // Still capped, but for a different reason now that it cannot
-            // cross a band: past a point, what the source itself knows —
-            // that this session is the most recent, that this run is the
-            // one that is stuck — is better than one more use.
-            it.score += (crate::frecency::score(*n, *last) * 12.0).min(60.0);
+            // Adds to whatever the source already said about where this
+            // belongs inside its kind, on the same scale — see `Item::rank`.
+            it.score += crate::frecency::bonus(*n, *last);
         }
         out.push(it);
     }
