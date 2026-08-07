@@ -31,7 +31,7 @@ pub fn actions_for(it: &Item) -> Vec<Act> {
 /// plus a `Delete …` each. Seven rows that are really three verbs and a
 /// choice of agent. Raycast's answer is a submenu, and it is the right one:
 /// the verb is the decision, the agent is a parameter of it.
-pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String)> {
+pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
     let missing: Vec<&str> = it.get("missing").split(',').filter(|s| !s.is_empty()).collect();
     let has: Vec<&str> = it
         .get("agent")
@@ -40,34 +40,36 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String)> {
         .filter(|s| !s.is_empty() && *s != "shared")
         .collect();
     match verb {
-        "run" => has.iter().map(|n| (format!("run:{n}"), (*n).to_string())).collect(),
+        "run" => has.iter().map(|n| (format!("run:{n}"), (*n).to_string(), String::new())).collect(),
         "lend" => match it.kind {
             // A skill can only be borrowed by an agent that lacks it.
             Kind::Skill => missing
                 .iter()
                 .filter(|n| **n != "shared" && crate::lend::can_borrow_skill(n))
                 .filter(|n| crate::sources::sessions::installed().contains(*n))
-                .map(|n| (format!("lend:{n}"), (*n).to_string()))
+                .map(|n| (format!("lend:{n}"), (*n).to_string(), String::new()))
                 .collect(),
             // An MCP server can go to any other agent that has a flag for it.
             _ => crate::sources::sessions::installed()
                 .into_iter()
                 .filter(|n| *n != it.get("agent") && crate::lend::can_borrow_mcp(n))
-                .map(|n| (format!("lend:{n}"), n.to_string()))
+                .map(|n| (format!("lend:{n}"), n.to_string(), String::new()))
                 .collect(),
         },
         "cp" => {
-            let mut v: Vec<(String, String)> =
-                missing.iter().map(|n| (format!("cp:{n}"), (*n).to_string())).collect();
+            let mut v: Vec<(String, String, String)> = missing
+                .iter()
+                .map(|n| (format!("cp:{n}"), (*n).to_string(), String::new()))
+                .collect();
             if v.len() > 1 {
-                v.push(("cp:*".into(), format!("all {} of them", v.len())));
+                v.push(("cp:*".into(), "all of them".into(), format!("{} agents", v.len())));
             }
             v
         }
         // Only agents that actually have a copy to delete.
         "rm" => crate::sources::agents::copies_of(it)
             .into_iter()
-            .map(|(agent, dir)| (format!("rm:{agent}"), format!("{agent} · {}", crate::paths::tilde(&dir))))
+            .map(|(agent, dir)| (format!("rm:{agent}"), agent, crate::paths::tilde(&dir)))
             .collect(),
         _ => Vec::new(),
     }
@@ -82,6 +84,9 @@ fn with_options(v: &mut Vec<Act>, it: &Item, verb: &'static str, one: &str, many
     let opts = agent_options(it, verb);
     match opts.len() {
         0 => {}
+        // The name substitutes into the sentence; the detail belongs to the
+        // submenu row, where there is a column for it. Splicing a path into
+        // "Delete {}'s copy" produced "Delete claude · /tmp/a's copy".
         1 => v.push((leak(opts[0].0.clone()), one.replace("{}", &opts[0].1), sub.to_string())),
         n => v.push((
             leak(format!("menu:{verb}")),
@@ -483,7 +488,10 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         let opts = agent_options(it, verb);
         let feed: String = opts
             .iter()
-            .map(|(oid, label)| format!("{:<28}{SEP}{oid}\n", label))
+            .map(|(oid, name, detail)| {
+                let tail = if detail.is_empty() { String::new() } else { format!("{DIM}· {detail}{RESET}") };
+                format!("{name:<28}{tail}{SEP}{oid}\n")
+            })
             .collect();
         let Some(chosen) = ui::pick_raw(
             feed.trim_end(),

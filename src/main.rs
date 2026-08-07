@@ -1074,7 +1074,7 @@ mod tests {
         assert!(!ids.iter().any(|i| i.starts_with("rm:")), "not enumerated: {ids:?}");
         // …and every copy is still reachable through it.
         let opts: Vec<String> =
-            crate::actions::agent_options(&it, "rm").into_iter().map(|(id, _)| id).collect();
+            crate::actions::agent_options(&it, "rm").into_iter().map(|(id, ..)| id).collect();
         assert_eq!(opts, vec!["rm:claude", "rm:codex"], "{opts:?}");
 
         // Destructive entries come last, never next to the default.

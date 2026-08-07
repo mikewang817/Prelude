@@ -18,6 +18,59 @@ ids never catches that; the duplication is in the behaviour.
 
 **A panel whose third row repeats its first is teaching you not to read it.**
 
+## 0. How the contents of a panel are decided
+
+This was the weakest part of the design for a long time, and it showed. The
+method was *subtractive*: look at what is there, remove what repeats or makes
+no sense. That cleans a panel but it can never tell you what is **missing** —
+`Resume its most recent session` on an agent row was found by someone
+pointing at a screenshot, not by the process.
+
+So the method is a checklist, walked per kind. It is generative: it asks nine
+questions about the *thing*, and each one either has an answer for this kind
+or is refused **in writing**. The refusals matter as much as the entries —
+they are what stops the next person re-deriving the same conclusion, and what
+makes an omission visible as an omission rather than as an absence.
+
+| | Slot | The question | e.g. |
+|---|---|---|---|
+| 1 | **Use** | do the thing it exists for | Open it · Run it with claude |
+| 2 | **Use otherwise** | the same, but not like that | Open with… · Lend it for one run |
+| 3 | **Understand** | what is it, what state is it in — without committing to anything | Show full description · Show what's using it |
+| 4 | **Extract** | give me text about it | Copy the pid · Insert the path |
+| 5 | **Locate** | take me where it lives | Reveal in Finder · cd to its folder |
+| 6 | **Edit** | change the thing itself | Open in editor |
+| 7 | **Propagate** | change who *else* has it | Copy it to codex |
+| 8 | **Configure** | change what happens **next** time | Always open .json files with… |
+| 9 | **Destroy** | end it | Delete a copy… · Kill it now |
+
+Two notes on using it.
+
+**Slot 1 is usually Enter and slot 2 is usually the secondary**, which is why
+those two are the ones with keys: they are what the checklist produces first
+for nearly every kind.
+
+**A slot with no answer is a finding, not a blank.** Applied to the four kinds
+this document was asked about, it immediately produced these, none of which
+the subtractive pass had found:
+
+| Kind | Slot | What is missing |
+|---|---|---|
+| **file** | 9 Destroy | **No way to move a file to the Trash.** A skill can be deleted; the file the launcher spends most of its rows on cannot. Raycast ships `Action.Trash` as a built-in for exactly this. |
+| **app** | 5 Locate | **No Reveal in Finder**, though a file has one. The same slot, answered for one kind and not its neighbour. |
+| **mcp** | 3 Understand | **No way to see the tools it exposes** — which is the entire reason an MCP server exists. The row says `✔ connected`; it cannot say *connected to what*. |
+| **mcp** | 3 Understand | A row can say `⚠ not logged in` and offer **no way to log in**, and no way to see the error behind `✘ failed`. |
+| **mcp** | 7 Propagate | **Lend, but never copy.** A skill can be installed into another agent for good; a server can only be borrowed for one run. |
+| **mcp** | 8 Configure | **No enable / disable**, though the status column reports `⏸ disabled`. |
+| **mcp** | 9 Destroy | **No remove.** Already recorded below as a gap; the checklist says which slot it is. |
+| **skill** | 3 Understand | The row says `used 8× · 1d ago` and there is no way to see *which* conversations. Weak — recorded, not proposed. |
+
+`mcp` is the striking one: five of the nine slots are empty, and it is the
+only kind whose *primary* action is not "use it" — Enter opens its config,
+because there is nothing else an MCP row can do. That is the finding the
+subtractive method could never have produced, because nothing there was
+wrong; there was simply almost nothing there.
+
 ## 1. Enter's action stays in the panel
 
 It was removed for a turn — the list's footer already states it on every row
