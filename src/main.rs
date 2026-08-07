@@ -93,6 +93,17 @@ fn main() -> ExitCode {
             }
             0
         }
+        ["_header", rest @ ..] => {
+            let agent = rest.contains(&"--agent");
+            let host = if agent { defaults::Host::Agent } else { defaults::Host::Shell };
+            let label = rest
+                .first()
+                .and_then(|l| render::parse_line(l))
+                .map(|i| defaults::describe(&i, host))
+                .unwrap_or("select");
+            println!("{}", ui::header_for(&label.to_lowercase()));
+            0
+        }
         ["_preview", line] => { if let Some(i) = render::parse_line(line) { preview::show(&i); } 0 }
         ["_copy", line] => copy_line(line),
         ["_runhere", line] => match render::parse_line(line) {

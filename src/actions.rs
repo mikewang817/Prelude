@@ -156,6 +156,16 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     };
     // Say plainly what Enter does here, so the behaviour is never a mystery.
     acts.insert(0, a("default", crate::defaults::describe(it, host), "⏎"));
+    // Everything the removed shortcuts used to do stays reachable here.
+    if !acts.iter().any(|(id, ..)| *id == "runhere") {
+        acts.push(a("runhere", "Run here, inside this window", "^O"));
+    }
+    if !acts.iter().any(|(id, ..)| *id == "run") {
+        acts.push(a("run", "Run in the shell below", "^X"));
+    }
+    if !acts.iter().any(|(id, ..)| *id == "copy") {
+        acts.push(a("copy", "Copy to clipboard", "^Y"));
+    }
     acts.push(a("ask", "Ask an agent about this", "hands it to claude"));
     if let Some(cwd) = &it.cwd {
         acts.push(a("cd", "Go to project folder", cwd.clone()));

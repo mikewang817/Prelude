@@ -85,16 +85,25 @@ it at all.
 
 ## Keys
 
+Three keys, and the header always says what the first one will do:
+
 | Key | Action |
 |---|---|
-| `^R` | Open the launcher |
-| `⏎` | The obvious thing for what you selected — see below |
-| `^O` | Run it here, inside the launcher; the window stays open |
-| `^X` | Run it in the shell below |
-| `^Y` | Copy; the window stays open |
-| `^K` | Action panel — the verbs for the selected item |
-| `^P` | Toggle the detail pane |
+| `⏎` | The obvious thing for what you selected |
+| `^K` | Everything else, for this particular item |
 | `esc` | Close |
+
+```
+⏎ open in editor        ^K actions   esc close     ← on a file
+⏎ run it with an agent  ^K actions   esc close     ← on a skill
+```
+
+A launcher whose header is a row of shortcuts has already failed to have an
+obvious default. `^O` (run here), `^X` (run in the shell), `^Y` (copy) and
+`^P` (detail pane) still work if you learned them; they are simply no longer
+advertised, and all of them are in `^K`.
+
+Open the launcher itself with `^R`.
 
 ## What it searches
 

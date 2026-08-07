@@ -8,11 +8,13 @@ use crate::render::{self, SEP};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-pub fn header() -> String {
-    format!(
-        "{DIM}⏎ insert   ^O run here (stays open)   ^X run in shell   \
-         ^Y copy   ^K actions   ^P preview   esc close{RESET}"
-    )
+/// Three keys, deliberately. Enter does the obvious thing, ^K reaches
+/// everything else, esc leaves. The old ^O/^X/^Y/^P still work for anyone
+/// who learned them, they are simply no longer advertised — a launcher whose
+/// header is a row of shortcuts has already failed to have an obvious
+/// default.
+pub fn header_for(label: &str) -> String {
+    format!("{DIM}⏎ {label}   ^K actions   esc close{RESET}")
 }
 
 const EXPECT: &str = "ctrl-x,ctrl-k,alt-enter";
@@ -128,7 +130,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
     let me = std::env::current_exe().unwrap_or_default();
     let me = me.to_string_lossy().into_owned();
 
-    let mut args = base_args("⌕ ", " Prelude ", Some(&header()));
+    let mut args = base_args("⌕ ", " Prelude ", Some(&header_for("select")));
     args.push(format!("--expect={EXPECT}"));
     args.push("--bind".into());
     args.push(format!(
@@ -141,6 +143,14 @@ pub fn search(paste_target: Option<String>) -> i32 {
     // doesn't even repaint. This is what lets you do several things per open.
     args.push("--bind".into());
     args.push(format!("enter:transform:{} _enter {{2}}", shq(&me)));
+    // Say what Enter will do to *this* row, since the answer depends on what
+    // kind of thing it is and on where the launcher was opened from.
+    args.push("--bind".into());
+    args.push(format!(
+        "focus:transform-header:{} _header {{2}}{}",
+        shq(&me),
+        if paste_target.is_some() { " --agent" } else { "" }
+    ));
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
