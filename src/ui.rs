@@ -13,11 +13,24 @@ use std::process::{Command, Stdio};
 /// who learned them, they are simply no longer advertised — a launcher whose
 /// header is a row of shortcuts has already failed to have an obvious
 /// default.
-pub fn header_for(label: &str) -> String {
-    format!("{DIM}⏎ {label}   ^K actions   esc close{RESET}")
+/// The footer, in Raycast's shape: what the action is, then the key that
+/// runs it, along the bottom of the panel.
+///
+/// Keys are spelled out rather than drawn as glyphs — a row of symbols is
+/// only legible to someone who already knows what they mean. And since every
+/// one of these does something different per item, the row has to say which.
+pub fn footer_for(primary: &str, secondary: Option<&str>) -> String {
+    let sep = format!("{DIM}   ·   {RESET}");
+    let mut parts = vec![format!("{primary}{DIM}  Enter{RESET}")];
+    if let Some(sec) = secondary {
+        parts.push(format!("{sec}{DIM}  Option+Enter{RESET}"));
+    }
+    parts.push(format!("Actions{DIM}  Option+K{RESET}"));
+    parts.join(&sep)
 }
 
-const EXPECT: &str = "ctrl-x,ctrl-k,alt-enter";
+// alt-k is the advertised one; ctrl-k stays for anyone who learned it.
+const EXPECT: &str = "ctrl-x,ctrl-k,alt-k,alt-enter";
 
 pub struct FzfOut {
     pub key: String,
@@ -26,7 +39,7 @@ pub struct FzfOut {
     pub stderr: String,
 }
 
-fn base_args(prompt: &str, label: &str, header: Option<&str>) -> Vec<String> {
+fn base_args(prompt: &str, label: &str, footer: Option<&str>) -> Vec<String> {
     let mut a: Vec<String> = [
         "--ansi", "--layout=reverse", "--info=inline-right", "--border=rounded",
         "--border-label-pos=3", "--pointer=▸", "--marker=✓", "--with-nth=1",
@@ -46,9 +59,10 @@ fn base_args(prompt: &str, label: &str, header: Option<&str>) -> Vec<String> {
     a.push(format!("--border-label={label}"));
     a.push(format!("--prompt={prompt}"));
     a.push(format!("--delimiter={SEP}"));
-    if let Some(h) = header {
-        a.push("--header".into());
-        a.push(h.into());
+    if let Some(f) = footer {
+        a.push("--footer".into());
+        a.push(f.into());
+        a.push("--footer-border=line".into());
     }
     a
 }
@@ -130,7 +144,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
     let me = std::env::current_exe().unwrap_or_default();
     let me = me.to_string_lossy().into_owned();
 
-    let mut args = base_args("⌕ ", " Prelude ", Some(&header_for("select")));
+    let mut args = base_args("⌕ ", " Prelude ", Some(&footer_for("Select", None)));
     args.push(format!("--expect={EXPECT}"));
     args.push("--bind".into());
     args.push(format!(
@@ -147,7 +161,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
     // kind of thing it is and on where the launcher was opened from.
     args.push("--bind".into());
     args.push(format!(
-        "focus:transform-header:{} _header {{2}}{}",
+        "focus:transform-footer:{} _footer {{2}}{}",
         shq(&me),
         if paste_target.is_some() { " --agent" } else { "" }
     ));
@@ -176,7 +190,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
     let Some(item) = out.item else { return 130 };
 
     match out.key.as_str() {
-        "ctrl-k" => crate::actions::panel(&item, paste_target),
+        "alt-k" | "ctrl-k" => crate::actions::panel(&item, paste_target),
         "alt-enter" => {
             let host = if paste_target.is_some() { crate::defaults::Host::Agent }
                        else { crate::defaults::Host::Shell };

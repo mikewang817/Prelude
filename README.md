@@ -12,13 +12,19 @@ You press Enter to actually run it.
 ```
 ╭─ Prelude ────────────────────────────────────────────────────────────╮
 │ ⌕ dev                                                        4/2280  │
-│ ──────────────────────────────────────────────────────────────────── │
-│   ⏎ insert   ^O run here   ^X run in shell   ^Y copy   ^K actions    │
 │ ▸ pnpm dev                    script    · package.json · vite --host │
 │   npm run dev                 history                                │
 │   :3000 node                  port      · node      · pid 4821       │
+│ ──────────────────────────────────────────────────────────────────── │
+│  Insert into prompt  Enter  ·  Run it in the shell  Option+Enter  ·  │
+│  Actions  Option+K                                                   │
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
+
+Search on top, results in the middle, and a footer that names the actions
+and the keys that run them — the same three parts as Raycast. The footer
+changes as you move, because every one of those keys does something
+different depending on what is selected.
 
 ## What Enter does
 
@@ -90,16 +96,16 @@ action*, *execute the secondary action*, and *open the action panel*:
 
 | Key | Raycast | Prelude |
 |---|---|---|
-| `⏎` | primary action | The obvious thing for what you selected |
-| `⌥⏎` | secondary action (`⌘⏎` there) | Its opposite — see below |
-| `^K` | action panel (`⌘K` there) | Everything else for this item |
-| `esc` | close | Close |
+| `Enter` | primary action | The obvious thing for what you selected |
+| `Option+Enter` | secondary action (`Cmd+Enter` there) | Its opposite — see below |
+| `Option+K` | action panel (`Cmd+K` there) | Everything else for this item |
+| `Esc` | close | Close |
 
 Neither action is a fixed verb. The two are opposites: where the primary
 *does* something, the secondary hands you the text; where the primary hands
 you text, the secondary does the thing.
 
-| | `⏎` | `⌥⏎` |
+| | `Enter` | `Option+Enter` |
 |---|---|---|
 | a command | insert it | run it |
 | a file | open it | insert its path |
@@ -108,9 +114,12 @@ you text, the secondary does the thing.
 | a result | copy it | insert it |
 | a session | resume it | cd to where it ran |
 
-`⌥⏎` rather than `⌘⏎`: terminals never receive Cmd — the terminal app keeps
-it — and fzf supports neither `ctrl-enter` nor `shift-enter`. Option+Enter is
-the only variant available.
+Option rather than Cmd: terminals never receive Cmd — the terminal app keeps
+it — and fzf supports neither `ctrl-enter` nor `shift-enter`. Option is the
+only modifier that reaches the program.
+
+Keys are spelled out rather than drawn as glyphs. A row of symbols is only
+legible to someone who already knows what they mean.
 
 ```
 ⏎ open in editor        ^K actions   esc close     ← on a file

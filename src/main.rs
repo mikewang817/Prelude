@@ -93,15 +93,20 @@ fn main() -> ExitCode {
             }
             0
         }
-        ["_header", rest @ ..] => {
+        ["_footer", rest @ ..] => {
             let agent = rest.contains(&"--agent");
             let host = if agent { defaults::Host::Agent } else { defaults::Host::Shell };
-            let label = rest
-                .first()
-                .and_then(|l| render::parse_line(l))
-                .map(|i| defaults::describe(&i, host))
-                .unwrap_or("select");
-            println!("{}", ui::header_for(&label.to_lowercase()));
+            let item = rest.first().and_then(|l| render::parse_line(l));
+            let primary = item
+                .as_ref()
+                .map(|i| defaults::describe(i, host))
+                .unwrap_or("Select")
+                .to_string();
+            let secondary = item
+                .as_ref()
+                .and_then(|i| defaults::describe_secondary(i, host))
+                .map(str::to_string);
+            println!("{}", ui::footer_for(&primary, secondary.as_deref()));
             0
         }
         ["_preview", line] => { if let Some(i) = render::parse_line(line) { preview::show(&i); } 0 }

@@ -149,25 +149,25 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         ],
         _ => vec![
             a("insert", "Insert into prompt", "you press Enter to run it"),
-            a("runhere", "Run here, inside this window", "^O"),
+            a("runhere", "Run here, inside this window", ""),
             a("run", "Run in the shell below", "execute immediately"),
             a("copy", "Copy to clipboard", ""),
         ],
     };
     // Say plainly what Enter does here, so the behaviour is never a mystery.
-    acts.insert(0, a("default", crate::defaults::describe(it, host), "⏎"));
+    acts.insert(0, a("default", crate::defaults::describe(it, host), "Enter"));
     if let Some(label) = crate::defaults::describe_secondary(it, host) {
-        acts.insert(1, a("secondary", label, "⌥⏎"));
+        acts.insert(1, a("secondary", label, "Option+Enter"));
     }
     // Everything the removed shortcuts used to do stays reachable here.
     if !acts.iter().any(|(id, ..)| *id == "runhere") {
-        acts.push(a("runhere", "Run here, inside this window", "^O"));
+        acts.push(a("runhere", "Run here, inside this window", ""));
     }
     if !acts.iter().any(|(id, ..)| *id == "run") {
-        acts.push(a("run", "Run in the shell below", "^X"));
+        acts.push(a("run", "Run in the shell below", ""));
     }
     if !acts.iter().any(|(id, ..)| *id == "copy") {
-        acts.push(a("copy", "Copy to clipboard", "^Y"));
+        acts.push(a("copy", "Copy to clipboard", ""));
     }
     acts.push(a("ask", "Ask an agent about this", "hands it to claude"));
     if let Some(cwd) = &it.cwd {
@@ -204,7 +204,7 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
     let short = crate::width::dtrunc(&crate::width::flatten(&it.cmd), 56);
     // The panel's payload is a bare action id, not JSON, so take the raw
     // selection rather than trying to parse an Item out of it.
-    match ui::pick_raw(feed.trim_end(), &format!(" {short} "), "⌘ ", "actions") {
+    match ui::pick_raw(feed.trim_end(), &format!(" {short} "), "⌘ ", "Run  Enter   ·   Back  Esc") {
         Some(id) => apply(&id, it, &paste_target),
         None => 130,
     }
