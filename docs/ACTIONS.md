@@ -1,186 +1,313 @@
-# The action panel
+# The action panel, kind by kind
 
-What `Ctrl+K` is for, what belongs in it, and in what order.
+What `Ctrl+K` offers on each row, and why each entry is there — or was
+removed. `Enter` is decided in `defaults.rs`; this is everything else.
 
-`Enter` answers one question — *the obvious thing for this row* — and
-`defaults.rs` is where that is decided. This document is about everything
-else. It exists because the panel was assembled one kind at a time, and a
-list of twenty-five independent decisions is not a design: it produced
-`Run in the shell below` on a calculator result, `Run here` on a full-screen
-agent TUI, and a delete buried in the middle of a list.
+## The test every entry has to pass
 
-## What the panel is
+> Would a person, having selected *this kind of row*, reach for this?
+> And is it something they cannot already do from the two rows above?
 
-**Not a menu of everything possible.** A panel with nineteen entries has the
-same problem as a launcher with no default: you have to read it. Every entry
-has to earn its place by being something a person would actually reach for
-*on this kind of row*.
+That second half is where the panel had rotted. `Enter` and the secondary are
+listed at the top as *statements* of what those two keys do. Every kind then
+listed its own verbs — and a dozen of them re-listed the same two actions
+under better wording. On an agent row you got `Run it in the shell` at row
+two and `Run in the shell below` at row four: one six-line panel, one action,
+twice. Checking ids never catches that; the duplication is in the behaviour.
 
-**Not a second list of keyboard shortcuts.** Prelude has two keys on purpose
-(see `CLAUDE.md`). The panel is where actions are *spelled out* instead of
-remembered, which is why the secondary action lives here rather than on a
-key of its own.
+**A panel whose third row repeats its first is teaching you not to read it.**
 
-**It is the surface where you say "not that".** You pressed the hotkey,
-looked at a row, and Enter was not quite it. The panel is the answer to that
-sentence — including the version of it that means *not that, and not next
-time either*.
+## Order
 
-## The five questions
+Five groups, in the order the questions get asked. `actions.rs::group`
+enforces it; the sort is stable, so each kind's own sequencing survives.
 
-Everything in the panel answers one of five questions. They are in the order
-a person asks them, and that is the order the panel is in.
-
-| | Group | The question | Examples |
-|---|---|---|---|
-| 0 | **Default** | What does Enter do here? | states it, always first |
-| 1 | **Secondary** | And its opposite? | Enter's counterpart, always second |
-| 2 | **Act** | Do something else to it | Kill it now · Follow its logs · Open with… · Lend it to codex · Answer "no" |
-| 3 | **Take** | Give me something from it | Insert its name · Copy the pid · Show full description |
-| 4 | **Go** | Take me where it lives | cd to its folder · Reveal in Finder · Go to it, zoomed |
-| 5 | **Destroy** | Get rid of it | End it · Stop it · Delete claude's copy |
-
-The ordering rule is **likelihood first, irreversibility last**. Nothing that
-cannot be undone with another keystroke may sit near the top, where a
-mis-aimed Enter lands.
-
-### Why "change the default" is an Act
-
-`Open with…` and `Always open .json files with…` sit in group 2, adjacent,
-because they are one idea in two tenses: *not like that — like this*, and
-*…and from now on*. Splitting them into "actions" and "settings" would put
-the second one at the bottom, away from the moment you want it.
-
-This is the one place Prelude has a settings surface at all, and it is
-deliberately not a settings *screen*: you change the rule where you noticed
-it was wrong, on the row that was wrong.
-
-## The rules
-
-**R1 — Enter's behaviour is always stated, and always first.** A launcher
-whose default is a mystery has failed. The first entry is not an action you
-would look for; it is the panel telling you what already happens.
-
-**R2 — The secondary is always second, and is always Enter's opposite.**
-Where Enter *does* something, the secondary hands you text; where Enter hands
-you text, the secondary does the thing. A test asserts the two never
-coincide, because two rows saying the same thing is worse than one.
-
-**R3 — A generic verb is offered only where it means something.** `Run in the
-shell` and `Run here` used to be appended to every kind that had not already
-claimed them. That is not a fallback, it is a bug with a fallback's manners:
-
-- `calc` — the row is `424.81`. There is nothing to run.
-- `translate` — the row is the translation.
-- `skill` — the row is `/cnipa-ooa`, a slash command. A shell will say
-  "no such file".
-- `session`, `agent` — the command starts a full-screen TUI. In the shell
-  that is right and is offered explicitly; *inside the launcher's own pane*
-  it is a TUI painting into a preview window.
-
-So two predicates decide, on `Kind`:
-
-| | means | gates |
+| | Group | Question |
 |---|---|---|
-| `is_command_line()` | `cmd` is something a shell could run | `Run in the shell` |
-| `is_interactive()` | it takes over the terminal | suppresses `Run here` |
+| 0 | Default | What does Enter do here? |
+| 1 | Secondary | And its opposite? |
+| 2 | Act | Do something else to it |
+| 3 | Take | Give me something from it |
+| 4 | Go | Take me where it lives |
+| 5 | Destroy | Get rid of it |
 
-**R4 — Destructive actions come last, and say so.** Not "near the end" —
-last, after the generic tail. `Delete claude's copy…` followed by
-`Copy to clipboard` is an accident waiting for a fast scroll. Anything
-irreversible also confirms, with Cancel as the default (`ui::confirm`).
+**Likelihood first, irreversibility last.** Nothing that cannot be undone
+with another keystroke sits near the top, where a mis-aimed Enter lands.
 
-**R5 — Nothing appears twice under different words.** A kind that defines its
-own `run` (`Kill it now`, `Launch it now`, `Resume it now`) does not also get
-`Run in the shell below`. Two rows that do the same thing is how a panel
-stops being readable — and, twice here, how it stopped being safe:
+---
 
-- A port's and a process's command line *is* the kill. `Run here, inside this
-  window` therefore ran it: a destructive action, with an innocuous label, in
-  the third row — arriving there precisely because R4 had just moved the
-  honest one (`Kill it now`) to the bottom. Both kinds now offer the kill
-  once, named, last.
-- On a file, `copy` and `copyabs` both copy the path. `copy` is suppressed.
+## Every kind
 
-The first is the general lesson: a safety rule that only moves the *labelled*
-danger leaves the unlabelled one where it was.
+### `msg` — a question an agent is blocked on
 
-**R6 — One row can stand for several things, and then the panel enumerates
-them.** A skill merged across four agents is four directories. `Delete it`
-would mean something different depending on a number the row only hints at,
-so there is one entry per agent. The same applies to lending and copying.
+Enter answers it. Everything else is about *deciding faster*.
 
-## What each kind offers
+| | why |
+|---|---|
+| Answer "no" / "go ahead" | At bottom, everything an agent stops to ask is *may I*. At ten questions, being able to say yes or no without typing is the difference between clearing them and putting it off. |
+| Copy the question | To paste into a conversation with someone else. |
+| Go to it, zoomed | When the question needs more context than a line — the full screen it came from. |
+| cd to its project | To look at the code before answering. |
 
-Groups are marked `A`ct `T`ake `G`o `D`estroy. Every kind also has the
-default and secondary above these, and `Ask an agent about this` at the end
-of the generic tail.
+Rejected: **Run in the shell** — the row is an English sentence. **Ask an
+agent about this** — the row *is* an agent asking; the request is for *your*
+answer.
 
-| Kind | A | T | G | D |
-|---|---|---|---|---|
-| **msg** | Answer "go ahead" · Answer "no" | Copy the question | Go to it, zoomed | — |
-| **agent** | Ask it something · Run in the shell | Copy its name | — | — |
-| **run** | Send it a line · Run here | Copy its address | Go to it, zoomed · cd to its project | End it |
-| **session** | Resume it now · Start a fresh session there | Insert · Copy the session id | cd to where it ran | — |
-| **skill** | Run it with claude · Lend it to pi · Copy it to codex | Insert its name · Show full description | Open in editor · cd to its folder | Delete each agent's copy |
-| **mcp** | Lend it to claude · Run in the shell | Insert its name | Open in editor · cd to its folder | — |
-| **file / find / config** | Open with… · Always open .json with… · Open in $EDITOR | Copy absolute path · Insert the path | Reveal in Finder · cd to its folder | — |
-| **port** | — | Insert the kill · Show what's using it · Copy the pid | — | Kill it now |
-| **proc** | — | Insert the kill · Show its full command · Copy the pid | — | Kill it now |
-| | *no `Run here`: their command line is the kill — see R5* | | | |
-| **container** | Follow its logs · Restart it · Shell into it | Copy name | — | Stop it |
-| **clip** | Translate to English · Translate to Chinese · Run here · Run in the shell | Paste it · Copy it again | — | — |
-| **snippet** | Run here · Run in the shell | Insert and fill blanks · Copy raw | Edit snippets file | — |
-| **translate** | — | Insert the translation · Copy it · Copy the original | — | — |
-| **calc** | — | Copy the result · Insert the result | — | — |
-| **ssh** | Connect | Copy host | Edit ~/.ssh/config | — |
-| **app** | Launch it now · Run here | Insert the open command · Copy its path | cd to its folder | — |
-| **link** | Open in browser · Run here | Insert the open command · Copy the URL | — | — |
-| **sys / script / history / path / git / dir** | Run here · Run in the shell | Insert · Copy | cd (dir: insert path without cd) | — |
+### `agent` — an agent CLI you have installed
 
-`app` and `link` keep `Run here` even though their own launch verb is already
-above it, because the alternative is an exception list. `is_command_line()
-&& !is_interactive()` is a rule two people can apply the same way a year from
-now; "these fourteen kinds, except the two where the launch is explicit" is
-not. One redundant entry near the bottom of a panel is a smaller cost than a
-rule nobody can restate.
+Enter puts its name on the prompt, because that is where you add `--resume`,
+a model, or an opening question. So the panel is the things you would
+otherwise have to look up.
+
+| | why |
+|---|---|
+| Resume its most recent session | The commonest thing anyone does with an agent they have used before. Doing it by hand means `s:`, reading dates, and copying a uuid — and the row already says there are 121 sessions. |
+| Ask *pi* something | A one-off question answered in the panel, without a full-screen TUI taking over the terminal. |
+| Open its settings | Where you go when it is behaving oddly. `CLAUDE.md` is prose you wrote and is its own row; this is `settings.json`. |
+
+Rejected: **Copy its name** — `pi` is two letters, typed faster than this
+panel opens. **Ask an agent about this** — it would hand claude the word
+"pi". **Run in the shell below** — the secondary already is exactly that.
+
+Considered and deliberately left out: **Show its skills / its MCP servers**.
+The row advertises the counts, but those are rows of their own in the main
+list, one keystroke away through search. The launcher's own rule is that
+everything else is reachable by searching; a panel that mirrors the list is
+a second list.
+
+### `run` — an agent alive right now
+
+Enter goes to it. At eighty of them, the panel is the difference between a
+fleet and a mess.
+
+| | why |
+|---|---|
+| Send it a line, without going there | Answering a stuck agent is the single most common act at scale, and switching to it to type one line is most of the cost. |
+| Go to it, zoomed full-screen | Enter goes there; this goes there and gives it the window. |
+| cd to its project | Look at what it is doing to. |
+| Copy its address | For a `tmux` command of your own. |
+| **End it** | Destructive, last. Kills the pane rather than the pid when there is one — killing the process leaves a dead pane, which is the mess this exists to clear. |
+
+### `session` — a past conversation
+
+Enter puts the resume command on the prompt, so you can add a flag.
+
+| | why |
+|---|---|
+| Resume it now | Skip the prompt when you have nothing to add. |
+| Start a fresh session there | The other reason you looked it up: not that conversation, that *directory*. |
+| Copy the session id | For `--resume` in a script or another tool. |
+| cd to where it ran | Without starting anything. |
+
+Rejected: **Resume this session** — it was there, with the same label as the
+default and doing the same thing.
+
+Gap: **sessions cannot be deleted.** There are 490 codex sessions on the
+machine this was written on. The skill-deletion shape (recoverable,
+confirmed, path-guarded) would apply.
+
+### `skill` — a skill, merged across the agents that have it
+
+| | why |
+|---|---|
+| Run it with *claude* | One per agent that has it. |
+| Use it in *pi*, just this run | Borrowing: nothing installed, nothing left behind, ends with the process. Offered before copying because it is nearly always what was meant. |
+| Copy it to *codex* | When you want it for good. One per agent that lacks it. |
+| Show full description | Descriptions run to paragraphs; the row shows one line. |
+| Open in editor · cd to its folder | It is a file you wrote. |
+| **Delete *claude*'s copy…** | Destructive, last, one per copy — see below. |
+
+Rejected: **Insert its name** — that is the secondary, two rows above.
+
+A skill merged across four agents is four directories. `Delete it` would
+mean something different depending on a number the row only hints at, so
+there is one entry per agent. Deletion moves to `~/.Trash`, confirms with
+Cancel as the default, and refuses any path that is not a direct child of a
+known skills directory.
+
+### `mcp` — an MCP server, with the status its agent reports
+
+| | why |
+|---|---|
+| Lend it to *claude* for one run | The whole point of seeing every agent's servers in one list. |
+| Insert the lookup command | `codex mcp get node_repl`, to inspect it yourself. |
+| Run here | Same, with the answer in the panel. |
+| Open in editor · cd to its folder | Its config. |
+
+The label used to say **Insert its name** while inserting the whole lookup
+command. Renamed rather than removed: the command is a third useful thing,
+distinct from the name the secondary gives you.
+
+Gap: **MCP servers cannot be removed or disabled.** That means editing the
+*contents* of `~/.claude.json` or `~/.codex/config.toml`, not moving a
+directory — a different risk surface, needing its own design.
+
+### `file` / `find` / `config` — something on disk
+
+Enter opens it in the application that owns it. This is the one place
+Prelude has a settings surface, and it is deliberately not a settings
+*screen*: you change the rule on the row where you noticed it was wrong.
+
+| | why |
+|---|---|
+| Open with… | Not that application — this one, once. |
+| Always open .json files with… | …and from now on. Adjacent, because they are one idea in two tenses. |
+| Open in `$EDITOR` | The specific case of "not the owning app, my editor". |
+| Copy absolute path | Distinct from the secondary, which *inserts* it. |
+| Reveal in Finder · cd to its folder | The two meanings of "where is it". |
+
+Rejected: **Insert the path** — the secondary, verbatim. **Copy to
+clipboard** — for a file that copies the path, which `Copy absolute path`
+already does.
+
+### `port` / `proc` — something listening, or something heavy
+
+Enter inserts the kill command so you can read it before running it.
+
+| | why |
+|---|---|
+| Show what's using it | Before you kill the wrong thing. |
+| Copy the pid | For a command of your own. |
+| Ask an agent about this | "What is this process?" is a real question. |
+| **Kill it now** | Destructive, last. |
+
+Rejected: **Insert: kill whatever is on :3000** — that is Enter. **Run here,
+inside this window** — and this is the important one. A port's command line
+*is* its kill, so "Run here" ran it: a destructive action wearing an
+innocuous label, in row three, arriving there precisely because the honest
+one had just been moved to the bottom for safety.
+
+**A safety rule that only moves the labelled danger leaves the unlabelled one
+where it was.**
+
+### `container` — a running container
+
+| | why |
+|---|---|
+| Follow its logs · Restart it | The two things you do without stopping it. |
+| Copy name | For a `docker` command of your own. |
+| **Stop it** | Destructive, last. |
+
+Enter already inserts `docker exec -it … sh`, so "Shell into it" was a second
+name for it.
+
+### `clip` — something you copied
+
+Enter pastes it, the secondary puts it back on the clipboard. What is left is
+the one thing you cannot get any other way:
+
+| | why |
+|---|---|
+| Translate to English / Chinese | Offline, on-device. You copied something you cannot read. |
+
+### `snippet`
+
+| | why |
+|---|---|
+| Run here | Snippets are commands; seeing the output without leaving is the point. |
+| Edit snippets file | Where you noticed it needed changing. |
+| Copy raw | With `{{placeholders}}` intact. |
+
+Enter already fills the blanks.
+
+### `translate` / `calc` — a computed answer
+
+Enter copies the result, the secondary inserts it. That is genuinely all
+there is to do with a number.
+
+`calc` therefore has a **two-line panel**, and that is the honest answer
+rather than a failure. It used to have four lines and two actions: `Copy the
+result` and `Insert the result` listed under the two rows that already were
+both of those.
+
+`translate` adds one: **Copy the original**, which nothing above provides.
+
+### `ssh` / `app` / `link` / `dir` — objects with a command-shaped `cmd`
+
+Their `cmd` reads like a command — `ssh host`, `open -a Zed`,
+`open https://…`, `cd /tmp` — but the row denotes a host, an application, a
+URL, a folder. Enter already launches the first three, so `Run in the shell
+below` was the same action under a worse name; and `cd` in a subshell that
+exits immediately does nothing at all. So `App`, `Link` and `Dir` are not
+`is_command_line()`, and none of them gets a generic runner.
+
+| | why |
+|---|---|
+| ssh: Edit `~/.ssh/config` | Where you noticed the host was wrong. |
+| app / link: Insert the open command | Distinct from the secondary's bare name or URL. |
+| app: cd to its folder | Into the `.app` bundle. |
+| dir: Copy to clipboard | The path. |
+
+`dir` has a three-line panel. Enter inserts `cd …`, the secondary inserts the
+bare path — there is nothing else a folder is.
+
+### `history` / `script` / `path` / `git` — a command line
+
+Enter inserts it, the secondary runs it. Both stated at the top, so the arm
+itself adds nothing:
+
+| | why |
+|---|---|
+| Run here, inside this window | Run it *and see the output* without leaving. The one thing the two keys do not cover. |
+| Ask an agent about this | "What does this command do?" — the reason this entry exists at all. |
+| Copy to clipboard | |
+
+### `sys` — a system command Prelude knows
+
+Same as above. `Insert the command` and `Run it now` were the default and the
+secondary, relisted.
+
+---
+
+## The rules, extracted
+
+**R1** Enter's behaviour is always stated, and always first.
+
+**R2** The secondary is always second, and is always Enter's opposite.
+
+**R3** A generic verb is offered only where it means something.
+`is_command_line()` gates `Run in the shell`; `is_interactive()` suppresses
+`Run here` for anything that paints a full screen; `worth_asking_about()`
+gates `Ask an agent about this`, because `about this: pi` is not a question.
+
+**R4** Destructive entries come last — after the generic tail, not merely
+near the end — and confirm if irreversible, with Cancel as the default.
+
+**R5** Nothing appears twice, *including under a different label*. If the
+primary or secondary already runs the command, launches it, opens the URL or
+copies the result, the generic version is suppressed; and no kind may relist
+its own default.
+
+**R6** One row standing for several things enumerates them — per agent for
+lending, copying and deleting.
 
 ## Known gaps
 
-Recorded rather than quietly left out.
-
-- **MCP servers cannot be removed or disabled.** Deleting one means editing
-  the *contents* of `~/.claude.json` or `~/.codex/config.toml`, not moving a
-  directory — a different risk surface from deleting a skill, and it needs
-  its own design. Today the panel can lend and inspect only.
-- **Sessions cannot be deleted.** There are 490 codex sessions on the machine
-  this was written on. The same "recoverable, confirmed, path-guarded" shape
-  as skill deletion would apply.
-- **Nothing can be renamed.** Probably correct: renaming a skill breaks every
+- Sessions and MCP servers cannot be deleted (above).
+- Nothing can be renamed. Probably correct: renaming a skill breaks every
   `/name` in every past conversation.
-- **The secondary's sub-label is "the other one".** Honest — it has no key —
-  but it reads as a placeholder.
-- **On a port or a process, the secondary and `inspect` are the same
-  action.** The secondary is `Show what is using it`; the kind also lists
-  `Show what's using it`. R5 says one of them should go, but the secondary
-  row is a *statement of what Enter's counterpart does* and removing the
-  kind's own entry would make the panel's contents depend on the secondary
-  in a way nothing else does. Left as is, deliberately, and noted here so it
-  is not rediscovered as a bug.
-- **No grouping is drawn.** The order is enforced but invisible; fzf has no
-  non-selectable separator rows, and a fake one that could be selected is
-  worse than none.
+- On a port or a process the secondary and `Show what's using it` are the
+  same action. R5 says one should go, but the secondary row is a *statement*
+  of what Enter's counterpart does, and removing the kind's own entry would
+  make the panel's contents depend on the secondary in a way nothing else
+  does. Left deliberately; noted so it is not rediscovered as a bug.
+- The secondary's sub-label is "the other one". Honest — it has no key — but
+  it reads as a placeholder.
+- Group boundaries are enforced but not drawn. fzf has no non-selectable
+  separator row, and a fake one that could be selected is worse than none.
 
-## Where this lives in the code
+## Where this lives
 
 | | |
 |---|---|
-| `defaults.rs` | what Enter and the secondary do — groups 0 and 1 |
+| `defaults.rs` | groups 0 and 1 |
 | `actions.rs::actions_for_host` | the per-kind lists |
-| `actions.rs::group` | which of the five questions an entry answers |
-| `actions.rs::apply` | carrying one out |
-| `item.rs::is_command_line` / `is_interactive` | R3 |
+| `actions.rs::group` | which question an entry answers |
+| `item.rs` | `is_command_line` · `is_interactive` · `worth_asking_about` |
 | `ui.rs::confirm` | R4's confirmation, Cancel first |
 
-`prelude _actions '<row json>'` prints a panel without a terminal; that is
-how the tables above were checked and how the invariants are tested.
+`prelude _actions '<row json>'` prints a panel without a terminal. Every
+table above was generated from it, and four invariants are tested across
+every kind: destructive entries form a suffix, the two defaults lead,
+running is offered only where there is something to run, and no id or action
+appears twice.

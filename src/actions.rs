@@ -27,10 +27,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let mut acts = match it.kind {
         Kind::Session => {
-            let mut v = vec![
-                a("insert", "Resume this session", &it.cmd),
-                a("run", "Resume it now", it.get("agent")),
-            ];
+            // No "Resume this session": that is Enter, word for word.
+            let mut v = vec![a("run", "Resume it now", it.get("agent"))];
             if !it.get("cwd").is_empty() {
                 v.push(a("cdsession", "cd to where it ran", crate::paths::tilde(it.get("cwd"))));
                 v.push(a("newsession", "Start a fresh session there", it.get("agent")));
@@ -38,15 +36,35 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             v.push(a("copy", "Copy the session id", it.get("id")));
             v
         }
+        // An agent CLI. Enter puts its name on the prompt, because that is
+        // where you add `--resume`, a model, or an opening question. So the
+        // panel is the three of those you reach for by name rather than by
+        // typing — and nothing else. "Copy its name" is two letters you can
+        // type faster than you can open this panel, and "Ask an agent about
+        // this" would hand claude the word "pi".
         Kind::Agent => {
             let n = it.get("agent").to_string();
-            // Enter already starts it, so this is the "not quite like that"
-            // list: put the command on the prompt so a flag or a model or an
-            // opening prompt can be added before it runs.
-            vec![
-                (leak(format!("askagent:{n}")), format!("Ask {n} something"), String::new()),
-                a("copy", "Copy its name", &n),
-            ]
+            let mut v = Vec::new();
+            // The single most common thing anyone does with an agent they
+            // have used before, and the row already says how many sessions
+            // there are. Finding the newest by hand means `s:`, reading
+            // dates, and copying a uuid.
+            if let Some(s) = crate::sources::sessions::latest_for(&n) {
+                v.push((
+                    leak(format!("resume:{n}")),
+                    "Resume its most recent session".to_string(),
+                    format!("{} · {}", crate::width::dtrunc(&s.title, 40), s.fields.get(2).cloned().unwrap_or_default()),
+                ));
+            }
+            v.push((leak(format!("askagent:{n}")), format!("Ask {n} something"), "without leaving here".into()));
+            if let Some(p) = crate::sources::agents::config_for(&n) {
+                v.push((
+                    leak(format!("agentcfg:{n}")),
+                    "Open its settings".to_string(),
+                    crate::paths::tilde(&p),
+                ));
+            }
+            v
         }
         // A running agent. At eighty of them the panel is the difference
         // between a fleet and a mess: go to it, answer it without leaving
@@ -81,19 +99,16 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         }
         Kind::Config => open_actions(it.get("path"), &editor),
         Kind::Port => vec![
-            a("insert", &format!("Insert: kill whatever is on :{}", it.get("port")), it.get("proc")),
             a("run", "Kill it now", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
             a("inspect", "Show what's using it", format!("lsof -nP -iTCP:{}", it.get("port"))),
             a("copy", "Copy the pid", it.get("pid")),
         ],
         Kind::Proc => vec![
-            a("insert", &format!("Insert: kill {}", it.get("name")), format!("pid {}", it.get("pid"))),
             a("run", "Kill it now", format!("{} · {}% CPU", it.get("name"), it.get("cpu"))),
             a("inspect", "Show its full command", it.get("cmd").chars().take(50).collect::<String>()),
             a("copy", "Copy the pid", it.get("pid")),
         ],
         Kind::Container => vec![
-            a("insert", "Shell into it", format!("docker exec -it {} sh", it.get("name"))),
             a("logs", "Follow its logs", format!("docker logs -f {}", it.get("name"))),
             a("stop", "Stop it", format!("docker stop {}", it.get("name"))),
             a("restart", "Restart it", format!("docker restart {}", it.get("name"))),
@@ -128,7 +143,6 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             if missing.len() > 1 {
                 v.push(a("cp:*", "Copy it to all missing agents", missing.join(", ")));
             }
-            v.push(a("insert", "Insert its name", &it.cmd));
             if !it.get("desc").is_empty() {
                 v.push(a("desc", "Show full description", ""));
             }
@@ -166,60 +180,59 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
                     ));
                 }
             }
-            v.push(a("insert", "Insert its name", &it.cmd));
+            v.push(a("insert", "Insert the lookup command", &it.cmd));
             v.push(a("open", "Open in editor", &target));
             v.push(a("reveal", "cd to its folder", parent_of(&target)));
             v.push(a("copy", "Copy name", ""));
             v
         }
         Kind::File | Kind::Find => open_actions(it.get("path"), &editor),
+        // Enter pastes it and the secondary puts it back on the clipboard,
+        // both stated above. What is left is the thing you cannot get any
+        // other way: reading it in a language you have.
         Kind::Clip => vec![
-            a("insert", "Paste it", ""),
-            a("copy", "Copy it again", ""),
             a("tr_en", "Translate to English", ""),
             a("tr_zh", "Translate to Chinese", ""),
         ],
         Kind::Snippet => vec![
-            a("insert", "Insert and fill in the blanks", ""),
             a("editsnips", "Edit snippets file", crate::paths::config().join("snippets.toml").to_string_lossy()),
             a("copy", "Copy raw", ""),
         ],
-        Kind::Translate => vec![
-            a("insert", "Insert the translation", ""),
-            a("copy", "Copy the translation", ""),
-            a("tr_src", "Copy the original", it.get("source")),
-        ],
-        Kind::Calc => vec![
-            a("copy", "Copy the result", &it.cmd),
-            a("insert", "Insert the result", ""),
-        ],
+        // Enter copies the translation and the secondary inserts it, so
+        // only the third row is new.
+        Kind::Translate => vec![a("tr_src", "Copy the original", it.get("source"))],
+        // There are exactly two things to do with a number, and Enter and
+        // its counterpart already are both of them. The panel listed them
+        // again underneath: four rows, two actions.
+        Kind::Calc => vec![],
         Kind::Ssh => vec![
-            a("insert", "Connect", &it.cmd),
             a("editssh", "Edit ~/.ssh/config", ""),
             a("copy", "Copy host", it.get("host")),
         ],
+        // No "Launch it now": Enter is that, and the panel states it above.
         Kind::App => vec![
             a("insert", "Insert the open command", &it.cmd),
-            a("run", "Launch it now", ""),
             a("reveal", "cd to its folder", it.get("path")),
             a("copy", "Copy its path", it.get("path")),
         ],
         Kind::Sys => vec![
-            a("insert", "Insert the command", &it.cmd),
-            a("run", "Run it now", "⚠ no review step"),
             a("copy", "Copy the command", ""),
         ],
+        // No "Open in browser": that is Enter, stated above. The insert is
+        // the `open …` command, which the secondary's bare URL is not.
         Kind::Link => vec![
-            a("run", "Open in browser", it.get("url")),
             a("insert", "Insert the open command", &it.cmd),
             a("copy", "Copy the URL", it.get("url")),
         ],
-        _ => vec![
-            a("insert", "Insert into prompt", "you press Enter to run it"),
-            a("runhere", "Run here, inside this window", ""),
-            a("run", "Run in the shell below", "execute immediately"),
-            a("copy", "Copy to clipboard", ""),
-        ],
+        // History, scripts, $PATH, branches, folders. Enter inserts them and
+        // the secondary runs them, which is the whole of what they are — so
+        // this arm adds nothing and the generic tail below fills in `run`,
+        // `runhere` and `copy` where each still means something.
+        //
+        // It used to open with `Insert into prompt`, which is what Enter
+        // already does and was even labelled identically. A panel whose
+        // third row repeats its first is teaching you not to read it.
+        _ => vec![],
     };
     // Say plainly what Enter does here, so the behaviour is never a mystery.
     acts.insert(0, a("default", crate::defaults::describe(it, host), "Enter"));
@@ -238,32 +251,48 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     // window" is a second route to the same kill wearing a harmless label —
     // in the third row, where the destructive one was moved out of.
     let generic_run_would_kill = matches!(it.kind, Kind::Port | Kind::Proc);
+    // …and it must not repeat what the first two rows already offer. On an
+    // agent the secondary *is* "Run it in the shell", so the tail added
+    // "Run in the shell below" underneath it: the same action, twice, in one
+    // six-line panel. Checking ids could never catch that — the duplicate is
+    // in the behaviour, not the name.
+    use crate::defaults::{Default_, Verb};
+    let already = |v: Verb| {
+        crate::defaults::on_enter(it, host) == Default_::Act(v)
+            || crate::defaults::on_secondary(it, host) == Some(Default_::Act(v))
+    };
+    // Three verbs all end in `emit("RUN", cmd)`, so any of them above means
+    // the generic runner is the same keystroke with a duller label.
+    let runs_it = already(Verb::RunInShell) || already(Verb::Launch) || already(Verb::OpenUrl);
     if it.kind.is_command_line()
         && !it.kind.is_interactive()
         && !generic_run_would_kill
+        && !already(Verb::RunHere)
         && !acts.iter().any(|(id, ..)| *id == "runhere")
     {
         acts.push(a("runhere", "Run here, inside this window", ""));
     }
-    if it.kind.is_command_line() && !acts.iter().any(|(id, ..)| *id == "run") {
+    if it.kind.is_command_line() && !runs_it && !acts.iter().any(|(id, ..)| *id == "run") {
         acts.push(a("run", "Run in the shell below", ""));
     }
     // `copyabs` already copies the path, and for a file that is exactly what
-    // `copy` copies too — the same action twice, worded differently.
-    if !acts.iter().any(|(id, ..)| *id == "copy" || *id == "copyabs") {
+    // `copy` copies too — the same action twice, worded differently. Nor is
+    // there anything to copy off an agent row: `pi` is two letters you can
+    // type faster than you can open this panel.
+    if it.kind != Kind::Agent
+        && !already(Verb::CopyResult)
+        && !acts.iter().any(|(id, ..)| *id == "copy" || *id == "copyabs")
+    {
         acts.push(a("copy", "Copy to clipboard", ""));
     }
-    // "Ask an agent about this" makes no sense for a question an agent has
-    // already asked you — the whole row is a request for *your* answer.
-    if it.kind != Kind::Msg {
+    if it.kind.worth_asking_about() {
         acts.push(a("ask", "Ask an agent about this", "hands it to claude"));
     }
     if let Some(cwd) = &it.cwd {
         acts.push(a("cd", "Go to project folder", cwd.clone()));
     }
-    if it.kind == Kind::Dir {
-        acts.push(a("here", "Insert path without cd", ""));
-    }
+    // No "Insert path without cd" for a folder: that is precisely what the
+    // secondary hands you, and it is stated two rows above.
     // The order is the five questions, in the order a person asks them.
     // Stable, so each kind's own sequencing survives inside its group.
     acts.sort_by_key(|(id, ..)| group(it.kind, id));
@@ -320,7 +349,6 @@ fn open_actions(path: &str, editor: &str) -> Vec<Act> {
         a("reveal-finder", "Reveal in Finder", parent_of(path)),
         a("open", "Open in $EDITOR", editor),
         a("copyabs", "Copy absolute path", path),
-        a("insert", "Insert the path", path),
         a("reveal", "cd to its folder", parent_of(path)),
     ]
 }
@@ -436,6 +464,18 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         }
         _ if id.starts_with("askagent:") => {
             ui::emit("INSERT", &format!("@{} ", &id[9..]), paste);
+        }
+        _ if id.starts_with("resume:") => {
+            match crate::sources::sessions::latest_for(&id[7..]) {
+                Some(s) => ui::emit("INSERT", &s.cmd, paste),
+                None => ui::note("no sessions recorded for that agent yet", paste),
+            }
+        }
+        _ if id.starts_with("agentcfg:") => {
+            match crate::sources::agents::config_for(&id[9..]) {
+                Some(p) => ui::emit("RUN", &crate::openwith::open_default(&p), paste),
+                None => ui::note("that agent has no settings file here", paste),
+            }
         }
         _ if id.starts_with("run:") => {
             let agent = &id[4..];

@@ -417,6 +417,23 @@ pub fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resul
 }
 
 /// Agent configuration files worth jumping to directly.
+/// The file this agent is configured by, if it has one here.
+///
+/// Its *settings*, not its instructions: `CLAUDE.md` is prose you write for
+/// it and is a row of its own in the main list, while this is the thing you
+/// go looking for when the agent is behaving oddly.
+pub fn config_for(agent: &str) -> Option<String> {
+    let h = crate::paths::home();
+    let p = match agent {
+        "claude" => h.join(".claude/settings.json"),
+        "codex" => h.join(".codex/config.toml"),
+        "pi" => h.join(".pi/agent/settings.json"),
+        "opencode" => h.join(".config/opencode/opencode.jsonc"),
+        _ => return None,
+    };
+    p.exists().then(|| p.to_string_lossy().into_owned())
+}
+
 pub fn configs() -> Vec<Item> {
     let h = crate::paths::home();
     let mut v: Vec<(std::path::PathBuf, &str)> = vec![

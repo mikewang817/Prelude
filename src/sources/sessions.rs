@@ -329,6 +329,18 @@ pub fn recent() -> Vec<Item> {
     v
 }
 
+/// The newest conversation this agent had, if there is one.
+///
+/// The cache is written newest-first, so this is the first match. It is what
+/// "resume" means on an agent row: you almost never want a *particular* old
+/// session from the panel — you want the one you were just in, and anything
+/// else you would search for with `s:`.
+pub fn latest_for(agent: &str) -> Option<Item> {
+    crate::cache::read_cached("sessions")
+        .into_iter()
+        .find(|s| s.get("agent") == agent)
+}
+
 /// `s:query` — search every session, not just the recent ones.
 pub fn search(term: &str) -> Vec<Item> {
     let all = crate::cache::read_cached("sessions");

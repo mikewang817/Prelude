@@ -129,12 +129,34 @@ impl Kind {
     /// fallback's manners: a calculator row is `424.81`, a translation row
     /// is the translation, and a skill row is `/cnipa-ooa`, which a shell
     /// answers with "no such file". See `docs/ACTIONS.md`, R3.
+    /// `App`, `Link` and `Dir` are deliberately absent. Their `cmd` reads
+    /// like a command — `open -a Zed`, `open https://…`, `cd /tmp` — but the
+    /// row denotes an application, a URL and a folder. Enter already launches
+    /// the first two, so "Run in the shell below" was the same action under a
+    /// worse name; and `cd` in a subshell that exits immediately does
+    /// nothing at all.
     pub fn is_command_line(self) -> bool {
         use Kind::*;
         matches!(
             self,
             History | Script | Path | Snippet | Ssh | Container | Git | Port | Proc | Sys | Clip
-                | Agent | Dir | App | Link | Session | Mcp
+                | Agent | Session | Mcp
+        )
+    }
+
+    /// Is "ask an agent about this" a sentence that means anything?
+    ///
+    /// It hands over `about this: <the row>`, which is a real question for a
+    /// command you did not write, a port you did not open, or a file you do
+    /// not recognise. It is not one for a row that *is* an agent, a skill, a
+    /// sum, or a translation: `about this: pi` asks claude about the word
+    /// "pi", and the panel offered exactly that.
+    pub fn worth_asking_about(self) -> bool {
+        use Kind::*;
+        matches!(
+            self,
+            History | Script | Path | Sys | Port | Proc | Container | File | Find | Config | Git
+                | Ssh | Snippet | Clip
         )
     }
 
