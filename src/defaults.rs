@@ -98,6 +98,9 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         (Skill, Host::Agent) => InsertText(Text::Name),
 
         (Session, _) => Act(Verb::ResumeSession),
+        // Starting an agent is the obvious thing to do with one.
+        (Agent, Host::Shell) => Insert,
+        (Agent, Host::Agent) => InsertText(Text::Name),
         (Config, Host::Shell) => Act(Verb::OpenInEditor),
         (Config, Host::Agent) => InsertText(Text::AbsolutePath),
 

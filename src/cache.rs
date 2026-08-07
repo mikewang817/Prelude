@@ -68,6 +68,8 @@ const SLOW: &[(&str, fn() -> Vec<Item>)] = &[
     ("ports", crate::sources::machine::ports),
     // Hundreds of session files, each needing its head parsed.
     ("sessions", crate::sources::sessions::all),
+    // `claude mcp list` runs a network health check on every server.
+    ("mcp", crate::sources::agents::mcp),
 ];
 
 pub fn refresh_named(name: &str) -> bool {
@@ -121,7 +123,7 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::user::snippets());
     items.extend(crate::sources::user::clips());
     items.extend(crate::sources::agents::skills());
-    items.extend(crate::sources::agents::mcp());
+
     items.extend(crate::sources::machine::apps());
     items.extend(crate::sources::machine::system());
     items.extend(crate::sources::agents::configs());
@@ -153,6 +155,15 @@ fn join_before(h: std::thread::JoinHandle<Vec<Item>>, budget: Duration) -> Optio
         std::thread::sleep(Duration::from_millis(1));
     }
     if h.is_finished() { h.join().ok() } else { None }
+}
+
+/// Just the agent-owned rows, for the `a:` overview.
+pub fn gather_agents() -> Vec<Item> {
+    let mut items = read_cached("mcp");
+    items.extend(crate::sources::agents::skills());
+    items.extend(crate::sources::agents::configs());
+    items.extend(read_cached("sessions"));
+    finish(items)
 }
 
 /// Dedupe, apply learned ranking, sort.

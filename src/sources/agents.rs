@@ -5,6 +5,7 @@ use crate::exec::shq;
 use crate::item::{Item, Kind};
 use crate::paths;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 fn skill_dirs() -> Vec<(std::path::PathBuf, &'static str)> {
     let h = paths::home();
@@ -65,9 +66,17 @@ pub fn skills() -> Vec<Item> {
             }
         }
     }
+    let names: Vec<String> = merged.keys().cloned().collect();
+    let usage = super::sessions::skill_usage(&names);
     merged
         .into_iter()
         .map(|(name, rec)| {
+            let (times, last) = usage.get(&name.to_lowercase()).copied().unwrap_or((0, 0.0));
+            let used = if times == 0 {
+                "never used".to_string()
+            } else {
+                format!("used {times}× · {}", super::user::ago(last))
+            };
             let agents = rec.agents.join(", ");
             let missing = missing_agents(&agents);
             let gap = if missing.is_empty() {
@@ -77,7 +86,7 @@ pub fn skills() -> Vec<Item> {
             };
             Item::new(format!("/{name}"), Kind::Skill)
                 .title(&name)
-                .fields([agents.clone(), gap, rec.desc.clone()])
+                .fields([agents.clone(), used, gap, rec.desc.clone()])
                 .put("missing", missing.join(","))
                 .put("name", &name)
                 .put("agent", agents)
@@ -120,85 +129,127 @@ fn frontmatter(p: &std::path::Path, fallback: &str) -> (String, String) {
     (name, crate::width::flatten(&desc))
 }
 
-/// MCP servers across every agent that has any configured.
+/// MCP servers, with the status each agent actually reports.
+///
+/// Reading the config files was wrong: it missed every claude.ai-hosted
+/// server (they are not in `mcpServers`) and every HTTP server codex keeps
+/// elsewhere, and it could not tell you the one thing that matters — whether
+/// the server works. A panel that lists an MCP server without saying it is
+/// disabled or logged out is worse than no panel.
+///
+/// `claude mcp list` performs a network health check, so this is slow and
+/// always runs behind the cache.
 pub fn mcp() -> Vec<Item> {
     let mut items = Vec::new();
-    let home = paths::home();
-
-    // codex — ~/.codex/config.toml  [mcp_servers.NAME]
-    let codex = home.join(".codex/config.toml");
-    if let Ok(text) = std::fs::read_to_string(&codex) {
-        for (section, body) in crate::minitoml::parse(&text) {
-            let Some(name) = section.strip_prefix("mcp_servers.") else { continue };
-            if name.contains('.') {
-                continue; // nested tables like mcp_servers.x.env
-            }
-            let cmd = body.get("command").cloned().unwrap_or_default();
-            let args = body.get("args").cloned().unwrap_or_default();
-            items.push(
-                Item::new(format!("codex mcp get {}", shq(name)), Kind::Mcp)
-                    .title(name)
-                    .fields(["codex".to_string(), format!("{cmd} {args}").trim().to_string()])
-                    .put("agent", "codex")
-                    .put("name", name)
-                    .put("config", codex.to_string_lossy()),
-            );
-        }
-    }
-
-    // claude — ~/.claude.json, global and per-project
-    let cj = home.join(".claude.json");
-    if let Ok(text) = std::fs::read_to_string(&cj) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            let mk = |name: &str, detail: String| {
-                Item::new(format!("claude mcp get {}", shq(name)), Kind::Mcp)
-                    .title(name)
-                    .fields(["claude".to_string(), detail])
-                    .put("agent", "claude")
-                    .put("name", name)
-                    .put("config", cj.to_string_lossy())
-            };
-            if let Some(obj) = v.get("mcpServers").and_then(|m| m.as_object()) {
-                for (name, body) in obj {
-                    let cmd = body.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                    items.push(mk(name, cmd.to_string()));
-                }
-            }
-            if let Some(projects) = v.get("projects").and_then(|p| p.as_object()) {
-                for (proj, body) in projects {
-                    let Some(servers) = body.get("mcpServers").and_then(|m| m.as_object()) else {
-                        continue;
-                    };
-                    let short = proj.rsplit('/').next().unwrap_or(proj).to_string();
-                    for name in servers.keys() {
-                        items.push(mk(name, short.clone()));
-                    }
-                }
-            }
-        }
-    }
-
-    // a project-local .mcp.json, if we're standing in one
-    if let Some(root) = super::project::root() {
-        let local = root.join(".mcp.json");
-        if let Ok(text) = std::fs::read_to_string(&local) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(obj) = v.get("mcpServers").and_then(|m| m.as_object()) {
-                    for name in obj.keys() {
-                        items.push(
-                            Item::new(format!("claude mcp get {}", shq(name)), Kind::Mcp)
-                                .title(name)
-                                .fields(["claude".to_string(), "this project".to_string()])
-                                .put("agent", "claude")
-                                .put("name", name)
-                                .put("config", local.to_string_lossy()),
-                        );
-                    }
-                }
-            }
-        }
-    }
+    mcp_claude(&mut items);
+    mcp_codex(&mut items);
     items
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Health {
+    Ok,
+    Disabled,
+    NeedsAuth,
+    Failed,
+    Unknown,
+}
+
+impl Health {
+    fn label(self) -> &'static str {
+        match self {
+            Health::Ok => "✔ connected",
+            Health::Disabled => "⏸ disabled",
+            Health::NeedsAuth => "⚠ not logged in",
+            Health::Failed => "✘ failed",
+            Health::Unknown => "· unknown",
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Health::Ok => "ok",
+            Health::Disabled => "disabled",
+            Health::NeedsAuth => "auth",
+            Health::Failed => "failed",
+            Health::Unknown => "unknown",
+        }
+    }
+}
+
+fn mcp_item(agent: &str, name: &str, detail: &str, health: Health) -> Item {
+    Item::new(format!("{agent} mcp get {}", shq(name)), Kind::Mcp)
+        .title(name)
+        .fields([agent.to_string(), health.label().to_string(), detail.to_string()])
+        .put("agent", agent)
+        .put("name", name)
+        .put("health", health.key())
+}
+
+/// `claude mcp list` prints `<name>: <target> - <status>` per server.
+fn mcp_claude(out: &mut Vec<Item>) {
+    if crate::exec::which("claude").is_none() {
+        return;
+    }
+    let text = crate::exec::run(&["claude", "mcp", "list"], Duration::from_secs(30));
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((name, rest)) = line.split_once(": ") else { continue };
+        if name.is_empty() || name.contains("Checking") {
+            continue;
+        }
+        let (target, status) = match rest.rsplit_once(" - ") {
+            Some((t, s)) => (t.trim(), s.trim()),
+            None => (rest.trim(), ""),
+        };
+        let low = status.to_lowercase();
+        let health = if low.contains("connect") && !low.contains("fail") {
+            Health::Ok
+        } else if low.contains("pending") || low.contains("approve") {
+            Health::NeedsAuth
+        } else if low.is_empty() {
+            Health::Unknown
+        } else {
+            Health::Failed
+        };
+        out.push(mcp_item("claude", name, target, health));
+    }
+}
+
+/// codex has --json, which also reports auth_status and why it is disabled.
+fn mcp_codex(out: &mut Vec<Item>) {
+    if crate::exec::which("codex").is_none() {
+        return;
+    }
+    let text = crate::exec::run(&["codex", "mcp", "list", "--json"], Duration::from_secs(20));
+    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return };
+    for s in list {
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let auth = s.get("auth_status").and_then(|v| v.as_str()).unwrap_or("");
+        let health = if !enabled {
+            Health::Disabled
+        // codex reports this as `not_logged_in`, underscores and all.
+        } else if auth.replace('_', " ").to_lowercase().contains("not logged") {
+            Health::NeedsAuth
+        } else {
+            Health::Ok
+        };
+        let tr = s.get("transport");
+        let detail = tr
+            .and_then(|t| t.get("url").and_then(|u| u.as_str()).map(str::to_string))
+            .or_else(|| tr.and_then(|t| t.get("command").and_then(|c| c.as_str()).map(str::to_string)))
+            .or_else(|| tr.and_then(|t| t.get("type").and_then(|c| c.as_str()).map(str::to_string)))
+            .unwrap_or_default();
+        let detail = detail.rsplit('/').next().unwrap_or(&detail).to_string();
+        let mut it = mcp_item("codex", name, &detail, health);
+        if let Some(r) = s.get("disabled_reason").and_then(|v| v.as_str()) {
+            it = it.put("reason", r);
+        }
+        out.push(it);
+    }
 }
 
 /// Which agents are *missing* a skill — the other half of "who has it".

@@ -38,6 +38,15 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             v.push(a("copy", "Copy the session id", it.get("id")));
             v
         }
+        Kind::Agent => {
+            let n = it.get("agent").to_string();
+            vec![
+                a("insert", &format!("Start {n} here"), &it.cmd),
+                a("run", &format!("Start {n} now"), ""),
+                (leak(format!("askagent:{n}")), format!("Ask {n} something"), String::new()),
+                a("copy", "Copy its name", &n),
+            ]
+        }
         Kind::Config => vec![
             a("open", "Open in editor", it.get("path")),
             a("reveal", "cd to its folder", parent_of(it.get("path"))),
@@ -246,6 +255,9 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             // Whatever is selected becomes the subject of a question.
             let subject = if it.get("path").is_empty() { it.cmd.clone() } else { it.get("path").into() };
             ui::emit("INSERT", &format!("claude {}", shq(&format!("about this: {subject}"))), paste);
+        }
+        _ if id.starts_with("askagent:") => {
+            ui::emit("INSERT", &format!("@{} ", &id[9..]), paste);
         }
         _ if id.starts_with("run:") => {
             let agent = &id[4..];

@@ -82,6 +82,9 @@ struct Raw {
     agent: &'static str,
     id: String,
     title: String,
+    /// The opening message verbatim. The displayed title may be an
+    /// AI-generated summary, which loses the `/skill-name` that started it.
+    opening: String,
     cwd: String,
     mtime: SystemTime,
 }
@@ -146,13 +149,14 @@ fn scan_claude(out: &mut Vec<Raw>) {
                     break;
                 }
             }
+            let opening = first_user.clone();
             if title.is_empty() {
                 title = first_user;
             }
             if title.is_empty() {
                 continue;
             }
-            out.push(Raw { agent: "claude", id, title, cwd, mtime });
+            out.push(Raw { agent: "claude", id, title, opening, cwd, mtime });
         }
     }
 }
@@ -205,7 +209,8 @@ fn scan_codex(out: &mut Vec<Raw>) {
                 title = folder_label(&cwd, p);
             }
             if !id.is_empty() {
-                out.push(Raw { agent: "codex", id, title, cwd, mtime });
+                let opening = title.clone();
+                out.push(Raw { agent: "codex", id, title, opening, cwd, mtime });
             }
         });
     }
@@ -233,7 +238,8 @@ fn scan_pi(out: &mut Vec<Raw>) {
             title = folder_label(&cwd, p);
         }
         if !id.is_empty() {
-            out.push(Raw { agent: "pi", id, title, cwd, mtime });
+            let opening = title.clone();
+            out.push(Raw { agent: "pi", id, title, opening, cwd, mtime });
         }
     });
 }
@@ -281,6 +287,8 @@ pub fn all() -> Vec<Item> {
                 .put("agent", r.agent)
                 .put("id", r.id)
                 .put("cwd", r.cwd)
+                .put("ts", format!("{ts:.0}"))
+                .put("opening", crate::width::flatten(&r.opening))
         })
         .collect()
 }
@@ -333,4 +341,36 @@ pub fn start_cmd(agent: &str, cwd: Option<&str>, prompt: Option<&str>) -> String
         None => s.push_str(agent),
     }
     s
+}
+
+/// How often each skill has actually been invoked, mined from past sessions.
+///
+/// Only Prelude can answer this: it is the one place that sees both the
+/// skills you have written and the conversations you have had. A skill you
+/// wrote months ago and never used once is worth knowing about.
+///
+/// Restricted to names we know are skills — otherwise every `/Users/...`
+/// path in a message would look like an invocation.
+pub fn skill_usage(known: &[String]) -> std::collections::HashMap<String, (u32, f64)> {
+    let mut out: std::collections::HashMap<String, (u32, f64)> = Default::default();
+    if known.is_empty() {
+        return out;
+    }
+    for it in crate::cache::read_cached("sessions") {
+        let hay = format!("{} {}", it.title, it.get("opening")).to_lowercase();
+        if !hay.contains('/') {
+            continue;
+        }
+        let ts = it.get("ts").parse::<f64>().unwrap_or(0.0);
+        for name in known {
+            // Scan for the marker anywhere: CJK text has no spaces, so the
+            // invocation is often glued to the words around it.
+            if hay.contains(&format!("/{}", name.to_lowercase())) {
+                let e = out.entry(name.to_lowercase()).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 = e.1.max(ts);
+            }
+        }
+    }
+    out
 }

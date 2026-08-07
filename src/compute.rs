@@ -419,6 +419,79 @@ pub fn agent_query(q: &str) -> Option<(String, String)> {
     Some((agent.to_string(), prompt.to_string()))
 }
 
+/// `a:` — everything about your agents, grouped, in one place.
+pub fn agent_overview(term: &str) -> Vec<Item> {
+    use std::collections::BTreeMap;
+    let items = crate::cache::gather_agents();
+    let mut rows = Vec::new();
+
+    // installed agents, with what each one holds
+    let mut per_agent: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    for it in &items {
+        for a in it.get("agent").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let e = per_agent.entry(a.to_string()).or_default();
+            match it.kind {
+                Kind::Skill => e.0 += 1,
+                Kind::Mcp => e.1 += 1,
+                Kind::Session => e.2 += 1,
+                _ => {}
+            }
+        }
+    }
+    for name in crate::sources::sessions::installed() {
+        let (sk, mc, se) = per_agent.get(name).copied().unwrap_or_default();
+        rows.push(
+            Item::new(name, Kind::Agent)
+                .title(name)
+                .fields([
+                    format!("{sk} skills"),
+                    format!("{mc} mcp"),
+                    format!("{se} sessions"),
+                ])
+                .put("agent", name),
+        );
+    }
+
+    // then the agent-owned rows themselves, filtered by whatever follows `a:`
+    let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
+    for it in items {
+        if !needles.is_empty() {
+            let hay = format!("{} {}", it.title, it.fields.join(" ")).to_lowercase();
+            if !needles.iter().all(|n| hay.contains(n.as_str())) {
+                continue;
+            }
+        }
+        rows.push(it);
+    }
+    rows
+}
+
+pub fn agent_query_prefix(q: &str) -> Option<&str> {
+    let t = q.trim();
+    for p in ["a:", "A:"] {
+        if let Some(rest) = t.strip_prefix(p) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// `/skill-name args` — invoke a skill and answer in the panel.
+pub fn skill_query(q: &str) -> Option<(Item, String)> {
+    let t = q.trim();
+    let rest = t.strip_prefix('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let (name, args) = match rest.split_once(char::is_whitespace) {
+        Some((n, a)) => (n, a.trim()),
+        None => (rest, ""),
+    };
+    let skills = crate::sources::agents::skills();
+    let hit = skills.into_iter().find(|s| s.title.eq_ignore_ascii_case(name))?;
+    Some((hit, args.to_string()))
+}
+
 /// Does this query produce a computed row rather than a search?
 ///
 /// Pattern-matching only — this runs on *every* keystroke, so it must not
@@ -433,6 +506,9 @@ pub fn is_special(q: &str) -> bool {
         return true;
     }
     if session_query(t).is_some() || agent_query(t).is_some() {
+        return true;
+    }
+    if agent_query_prefix(t).is_some() || (t.starts_with('/') && skill_query(t).is_some()) {
         return true;
     }
     if translate_query(t).is_some() {
@@ -481,6 +557,28 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
                     .sub("no index yet — run:  prelude index"),
             ),
         }
+    }
+    if let Some(term) = agent_query_prefix(q) {
+        rows.extend(agent_overview(term));
+    }
+    if let Some((skill, args)) = skill_query(q) {
+        // Pick an agent that actually has it; "shared" is a directory, not
+        // something you can run.
+        let agent = skill.get("agent").split(',').map(str::trim)
+            .find(|a| !a.is_empty() && *a != "shared").unwrap_or("claude").to_string();
+        let prompt = if args.is_empty() {
+            skill.cmd.clone()
+        } else {
+            format!("{} {args}", skill.cmd)
+        };
+        rows.push(
+            Item::new(crate::sources::sessions::start_cmd(&agent, None, Some(&prompt)), Kind::Session)
+                .title(format!("{}{}", skill.title, if args.is_empty() { String::new() } else { format!(" {args}") }))
+                .fields([agent.clone(), "⏎ answers in the panel".to_string(), skill.get("desc").to_string()])
+                .put("agent", agent)
+                .put("prompt", prompt)
+                .put("mode", "start"),
+        );
     }
     if let Some(term) = session_query(q) {
         rows.extend(crate::sources::sessions::search(term));

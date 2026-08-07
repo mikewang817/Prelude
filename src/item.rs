@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
+    Agent,
     Session,
     Config,
     Translate,
@@ -37,6 +38,7 @@ impl Kind {
     pub fn priority(self) -> i64 {
         use Kind::*;
         match self {
+            Agent => 170,
             Session => 160,
             Config => 118,
             Translate => 420,
@@ -67,6 +69,7 @@ impl Kind {
         use crate::ansi::*;
         use Kind::*;
         match self {
+            Agent => (GREEN, "agent"),
             Session => (MAGENTA, "session"),
             Config => (YELLOW, "config"),
             Translate => (CYAN, "translate"),
@@ -95,7 +98,7 @@ impl Kind {
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
-            Session, Config, Translate, Calc, Port, Proc, Link, Find, Container, Snippet, Clip,
+            Agent, Session, Config, Translate, Calc, Port, Proc, Link, Find, Container, Snippet, Clip,
             Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }
