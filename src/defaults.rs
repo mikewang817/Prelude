@@ -53,16 +53,25 @@ pub enum Verb {
     OpenConfig,
     RunSkill,
     ResumeSession,
+    /// Run it right here in the launcher and show the output.
+    RunHere,
 }
 
 /// The one place that decides what Enter means.
-pub fn on_enter(kind: Kind, host: Host) -> Default_ {
+pub fn on_enter(item: &Item, host: Host) -> Default_ {
     use Default_::*;
     use Kind::*;
     if std::env::var_os("PRELUDE_CLASSIC_ENTER").is_some() {
         return Insert;
     }
-    match (kind, host) {
+    // Starting an agent with a prompt is a request for an answer, not for a
+    // command to review. Run it here and show what it says. Resuming an
+    // existing session is different — you want that in a real terminal, so
+    // it still goes onto the prompt.
+    if item.kind == Session && item.get("mode") == "start" {
+        return Act(Verb::RunHere);
+    }
+    match (item.kind, host) {
         // Commands: unchanged in both hosts. Destructive ones especially.
         (History | Script | Path | Snippet | Ssh | Container | Git, _) => Insert,
         (Port | Proc | Sys, _) => Insert,
@@ -102,8 +111,8 @@ pub fn on_enter(kind: Kind, host: Host) -> Default_ {
 
 /// A human-readable name for the current default, shown as the first entry of
 /// the action panel so the behaviour is never a mystery.
-pub fn describe(kind: Kind, host: Host) -> &'static str {
-    match on_enter(kind, host) {
+pub fn describe(item: &Item, host: Host) -> &'static str {
+    match on_enter(item, host) {
         Default_::Insert => "Insert into prompt",
         Default_::InsertText(Text::AbsolutePath) => "Insert the full path",
         Default_::InsertText(Text::Name) => "Insert its name",
@@ -115,6 +124,7 @@ pub fn describe(kind: Kind, host: Host) -> &'static str {
         Default_::Act(Verb::OpenConfig) => "Open its config",
         Default_::Act(Verb::RunSkill) => "Run it with an agent",
         Default_::Act(Verb::ResumeSession) => "Resume this session",
+        Default_::Act(Verb::RunHere) => "Run it here and show the output",
     }
 }
 

@@ -117,7 +117,9 @@ it at all.
 | **`$PATH`** | Every executable, ranked lowest |
 
 Plus rows computed from what you type: arithmetic, unit and currency
-conversion, date arithmetic, on-device translation, and quicklinks.
+conversion, date arithmetic, on-device translation, and quicklinks. Once a
+query declares an intent this way, the rest of the list disappears — you
+asked for one thing, so you see one thing.
 
 ```
 10kg to lb        →  22.046226 lb        1847*0.23     →  424.81
@@ -164,8 +166,15 @@ skill, so it knows which do not:
      ^K  →  Copy it to codex / Copy it to pi / Copy it to all missing
 ```
 
-**Start a session from the launcher** with `@claude refactor this`, which
-opens an agent in the current directory with that prompt.
+**Start a session from the launcher** with `@claude refactor this`. Enter
+runs it right there in the panel and shows the answer — you asked a question,
+so you get the answer, not a command to press Enter on again. Resuming an
+existing session still goes onto your prompt, because you want that in a real
+terminal rather than a popup.
+
+Each agent is invoked with its own syntax (`opencode` needs `opencode run`,
+the others take the prompt positionally), and `@` completes only against
+agents actually installed.
 
 **Jump to any agent config** — `CLAUDE.md`, `AGENTS.md`, `settings.json`,
 `config.toml`, `.mcp.json` — as a first-class row.

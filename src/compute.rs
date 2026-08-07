@@ -491,8 +491,9 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
         rows.push(
             Item::new(cmd, Kind::Session)
                 .title(format!("{agent}: {prompt}"))
-                .fields([agent.clone(), "new session here".to_string()])
-                .put("agent", agent),
+                .fields([agent.clone(), "runs here".to_string()])
+                .put("agent", agent)
+                .put("mode", "start"),
         );
     }
     if let Some((lang, text)) = translate_query(q) {

@@ -179,7 +179,7 @@ pub fn apply_default(item: &Item, paste: &Option<String>) -> i32 {
     use crate::defaults::{on_enter, text_for, Default_, Host, Verb};
     let host = if paste.is_some() { Host::Agent } else { Host::Shell };
     crate::frecency::bump(&item.cmd);
-    match on_enter(item.kind, host) {
+    match on_enter(item, host) {
         Default_::Insert => {
             let cmd = if item.kind == Kind::Snippet {
                 fill_placeholders(&item.cmd)
@@ -215,6 +215,7 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             eprintln!("copied: {}", item.cmd);
         }
         ResumeSession => emit("INSERT", &item.cmd, paste),
+        RunHere => return crate::runhere::run_item(item),
         RunSkill => {
             // A skill name means nothing to a shell, so pick an agent that
             // actually has it and hand the invocation over.

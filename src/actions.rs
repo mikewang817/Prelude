@@ -146,7 +146,7 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         ],
     };
     // Say plainly what Enter does here, so the behaviour is never a mystery.
-    acts.insert(0, a("default", crate::defaults::describe(it.kind, host), "⏎"));
+    acts.insert(0, a("default", crate::defaults::describe(it, host), "⏎"));
     acts.push(a("ask", "Ask an agent about this", "hands it to claude"));
     if let Some(cwd) = &it.cwd {
         acts.push(a("cd", "Go to project folder", cwd.clone()));

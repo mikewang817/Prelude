@@ -128,6 +128,12 @@ fn dynamic(q: &str, path: &str, cols: usize) -> i32 {
     if !rows.is_empty() {
         println!("{}", render::render(&rows, cols, None));
     }
+    // Once the query has clearly declared an intent — a sum, a translation,
+    // an agent to start — the 2000-odd unrelated rows underneath are noise.
+    // Show only what was asked for.
+    if compute::is_special(q) {
+        return 0;
+    }
     if !path.is_empty() {
         if let Ok(t) = std::fs::read_to_string(path) {
             print!("{t}");
