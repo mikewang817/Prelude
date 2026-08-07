@@ -63,6 +63,13 @@ fn main() -> ExitCode {
             println!("{}", render::render(&items, term_width(), None));
             0
         }
+        // Scriptable equivalent of the ^K action, and what its test drives.
+        ["_copy-skill", dir, agent, name] => {
+            match sources::agents::copy_skill(dir, agent, name) {
+                Ok(p) => { println!("copied {name} -> {p}"); 0 }
+                Err(e) => { eprintln!("prelude: {e}"); 1 }
+            }
+        }
         ["_refresh-path"] => { sources::user::scan_path(); 0 }
         ["_refresh", name] => if cache::refresh_named(name) { 0 } else { 1 },
         ["_bind", q, path, cols] => bind(q, path, cols),
@@ -226,6 +233,46 @@ mod tests {
         }
         for s in ["git push origin main", "npm run build", "psql -U admin"] {
             assert!(!crate::secrets::looks_secret(s), "{s}");
+        }
+    }
+
+    /// Copying a skill is the only place Prelude writes to user files, so
+    /// pin both halves: it copies the whole tree, and it never overwrites.
+    #[test]
+    fn skill_copy_is_complete_and_refuses_to_overwrite() {
+        let root = std::env::temp_dir().join(format!("prelude-t{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src/demo");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
+        std::fs::write(src.join("nested/extra.txt"), "x").unwrap();
+
+        let dest_root = root.join("dest");
+        let dest = dest_root.join("demo");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        crate::sources::agents::copy_tree(&src, &dest).unwrap();
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("nested/extra.txt").exists(), "subdirectories must come too");
+
+        // and the guard that stops a copy clobbering an existing skill
+        assert!(dest.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enter_defaults_split_commands_from_objects() {
+        use crate::defaults::{on_enter, Default_, Host};
+        use crate::item::Kind::*;
+        // Commands are never acted on, in either host.
+        for k in [History, Script, Path, Snippet, Port, Proc, Sys] {
+            for h in [Host::Shell, Host::Agent] {
+                assert_eq!(on_enter(k, h), Default_::Insert, "{k:?} in {h:?}");
+            }
+        }
+        // Objects act at a shell but hand over text to an agent.
+        for k in [File, App, Link] {
+            assert!(matches!(on_enter(k, Host::Shell), Default_::Act(_)), "{k:?}");
+            assert!(matches!(on_enter(k, Host::Agent), Default_::InsertText(_)), "{k:?}");
         }
     }
 

@@ -234,7 +234,7 @@ pub fn copy_skill(from_dir: &str, agent: &str, name: &str) -> Result<String, Str
     Ok(crate::paths::tilde(&dest.to_string_lossy()))
 }
 
-fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+pub fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
