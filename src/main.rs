@@ -1014,6 +1014,96 @@ mod tests {
         assert!(needs_confirming(Kind::App, "run").is_none());
     }
 
+    /// Trashing is offered on many kinds now, so the guard is no longer a
+    /// property of skill directories — it has to stand on its own against
+    /// whatever path a row happened to carry.
+    ///
+    /// Trash is recoverable, so this is not the last line of defence; the
+    /// confirmation is. It is the line against the *catastrophic*: a fuzzy
+    /// list, a mis-aimed Enter, and a row whose path was `$HOME`.
+    #[test]
+    fn nothing_can_trash_your_home_or_the_system() {
+        use crate::paths::{home, is_protected, trash};
+        for bad in [
+            home(),
+            std::path::PathBuf::from("/"),
+            std::path::PathBuf::from("/System"),
+            std::path::PathBuf::from("/usr"),
+            std::path::PathBuf::from("/etc"),
+            std::path::PathBuf::from("/usr/bin"),
+        ] {
+            assert!(is_protected(&bad), "{} must be protected", bad.display());
+            assert!(trash(&bad).is_err(), "{} must be refused", bad.display());
+        }
+        // A path that does not resolve is refused rather than guessed at.
+        assert!(is_protected(std::path::Path::new("/nope/nothing/here")));
+        // Ordinary things a person might actually select are not protected.
+        let tmp = std::env::temp_dir();
+        assert!(!is_protected(&tmp) || tmp.starts_with("/var"), "{}", tmp.display());
+    }
+
+    /// The gaps the checklist found, closed. Each is a slot that had no
+    /// answer for one kind while its neighbour answered it.
+    #[test]
+    fn the_checklist_gaps_are_closed() {
+        use crate::item::{Item, Kind};
+        let ids = |it: &Item| -> Vec<String> {
+            crate::actions::actions_for(it).iter().map(|(i, ..)| i.to_string()).collect()
+        };
+        // Slot 9 on a file: a skill could be deleted and a file could not.
+        let f = Item::new("/tmp/x.txt", Kind::File).put("path", "/tmp/x.txt");
+        assert!(ids(&f).contains(&"trash".to_string()), "{:?}", ids(&f));
+        // …but not on a config: deleting the file your agent is configured
+        // by, out of a fuzzy list, is a foot-gun with nothing on the far side.
+        let c = Item::new("/x/.claude.json", Kind::Config).put("path", "/x/.claude.json");
+        assert!(!ids(&c).contains(&"trash".to_string()), "{:?}", ids(&c));
+        // Slot 5 on an app, which a file two rows away already answered.
+        let ap = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
+        assert!(ids(&ap).contains(&"reveal-finder".to_string()), "{:?}", ids(&ap));
+        assert!(ids(&ap).contains(&"trash".to_string()), "{:?}", ids(&ap));
+        // Slots 3, 3b, 7 and 9 on an MCP server — five of nine were empty.
+        let m = Item::new("codex mcp get n", Kind::Mcp)
+            .put("name", "n")
+            .put("agent", "codex")
+            .put("health", "needsauth");
+        let mi = ids(&m);
+        assert!(mi.contains(&"mcptools".to_string()), "what it exposes: {mi:?}");
+        assert!(mi.contains(&"mcplogin".to_string()), "not logged in, no way in: {mi:?}");
+        assert!(mi.contains(&"mcpremove".to_string()), "{mi:?}");
+        assert!(mi.iter().any(|i| i.starts_with("install:") || i == "menu:install"), "{mi:?}");
+        // A healthy server is not nagged about logging in.
+        let ok = Item::new("codex mcp get n", Kind::Mcp)
+            .put("name", "n").put("agent", "codex").put("health", "ok");
+        assert!(!ids(&ok).contains(&"mcplogin".to_string()), "{:?}", ids(&ok));
+    }
+
+    /// Installing a server for good puts its definition on the command line,
+    /// so unlike lending there is no form of it that keeps a credential off
+    /// the shell history this launcher reads back. Both agents must refuse.
+    #[test]
+    fn installing_a_server_for_good_refuses_to_carry_a_secret() {
+        use crate::lend::{install_cmd, Mcp};
+        let secret = Mcp::Stdio {
+            name: "paid".into(),
+            command: "server".into(),
+            args: Vec::new(),
+            env: vec![("API_KEY".into(), "abc123".into())],
+        };
+        for agent in ["claude", "codex"] {
+            let e = install_cmd(agent, &secret).unwrap_err();
+            assert!(e.contains("API_KEY"), "{agent}: {e}");
+        }
+        // Without one, both get a command in their own dialect.
+        let plain = Mcp::Http {
+            name: "chatcut".into(),
+            url: "https://example.test/mcp".into(),
+            headers: Vec::new(),
+        };
+        assert!(install_cmd("claude", &plain).unwrap().starts_with("claude mcp add-json "));
+        let c = install_cmd("codex", &plain).unwrap();
+        assert!(c.starts_with("codex mcp add ") && c.contains("--url"), "{c}");
+    }
+
     /// Deleting is the only destructive thing Prelude does to a user's
     /// files, and the path it acts on has been through JSON, a row, and a
     /// shell. A launcher that removes whatever it is handed is one malformed

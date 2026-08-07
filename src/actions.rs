@@ -66,6 +66,12 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
             }
             v
         }
+        // Every other installed agent that has an `mcp add` of its own.
+        "install" => crate::sources::sessions::installed()
+            .into_iter()
+            .filter(|n| *n != it.get("agent") && matches!(*n, "claude" | "codex"))
+            .map(|n| (format!("install:{n}"), n.to_string(), String::new()))
+            .collect(),
         // Only agents that actually have a copy to delete.
         "rm" => crate::sources::agents::copies_of(it)
             .into_iter()
@@ -170,7 +176,7 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             v.push(a("copy", "Copy the question", ""));
             v
         }
-        Kind::Config => open_actions(it.get("path"), &editor),
+        Kind::Config => open_actions(it.kind, it.get("path"), &editor),
         Kind::Port => vec![
             a("run", "Kill it now", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
             a("copy", "Copy the pid", it.get("pid")),
@@ -220,13 +226,29 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // than being guessed at here.
             with_options(&mut v, it, "lend", "Lend it to {} for one run",
                          "Lend it for one run…", &format!("from {owner}"));
-            v.push(a("insert", "Insert the lookup command", &it.cmd));
+            // Slot 7. Lending lasts one run; this is the other half, and it
+            // uses the agent's own `mcp add` rather than editing anyone's
+            // config file — the CLI knows the format and we do not have to.
+            with_options(&mut v, it, "install", "Install it in {} for good",
+                         "Install it for good…", "");
+            // Slot 3. A row can say `✔ connected` and never say connected to
+            // *what*, which is the only reason an MCP server exists.
+            v.push(a("mcptools", "Show what it exposes", format!("{owner} mcp get")));
+            // Slot 3 again: a row that says `⚠ not logged in` and offers no
+            // way to log in is a diagnosis with no treatment.
+            if matches!(it.get("health"), "needsauth" | "failed") {
+                v.push(a("mcplogin", "Log in to it", format!("{owner} mcp login")));
+            }
+            // Slot 9. Inserted rather than run: it edits the agent's config,
+            // and a command line on your prompt is this launcher's own form
+            // of confirmation.
+            v.push(a("mcpremove", "Remove it…", format!("{owner} mcp remove")));
             v.push(a("open", "Open in editor", &target));
             v.push(a("reveal", "cd to its folder", parent_of(&target)));
             v.push(a("copy", "Copy name", ""));
             v
         }
-        Kind::File | Kind::Find => open_actions(it.get("path"), &editor),
+        Kind::File | Kind::Find => open_actions(it.kind, it.get("path"), &editor),
         // Enter pastes it and the secondary puts it back on the clipboard,
         // both stated above. What is left is the thing you cannot get any
         // other way: reading it in a language you have.
@@ -250,10 +272,15 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             a("copy", "Copy host", it.get("host")),
         ],
         // No "Launch it now": Enter is that, and the panel states it above.
+        // Slot 5 had no answer here while a file two rows away had two, and
+        // slot 9 none at all — yet dragging an .app to the Trash is how you
+        // uninstall on this platform.
         Kind::App => vec![
             a("insert", "Insert the open command", &it.cmd),
+            a("reveal-finder", "Reveal in Finder", it.get("path")),
             a("reveal", "cd to its folder", it.get("path")),
             a("copy", "Copy its path", it.get("path")),
+            a("trash", "Move it to the Trash…", "uninstalls it, recoverably"),
         ],
         Kind::Sys => vec![
             a("copy", "Copy the command", ""),
@@ -384,8 +411,9 @@ fn group(kind: Kind, id: &str) -> u8 {
         "default" => 0,
         "secondary" => 1,
         // Irreversible, so last however the kind happened to list it.
-        "killrun" | "stop" => DESTROY,
+        "killrun" | "stop" | "trash" | "mcpremove" => DESTROY,
         _ if id.starts_with("rm:") || id == "menu:rm" => DESTROY,
+        "mcptools" | "mcplogin" => ACT,
         "run" if matches!(kind, Kind::Port | Kind::Proc) => DESTROY,
         // Text out of the row.
         "insert" | "copy" | "copyabs" | "here" | "desc" | "inspect" | "tr_src" => TAKE,
@@ -404,11 +432,11 @@ fn group(kind: Kind, id: &str) -> u8 {
 /// shell: which application opens this, and should that stick. The chosen
 /// application is named rather than implied, so the first row says what
 /// Enter already does instead of leaving you to find out.
-fn open_actions(path: &str, editor: &str) -> Vec<Act> {
+fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
     let chosen = crate::openwith::chosen_for(path);
     let ext = crate::openwith::ext_of(path);
     let scope = if ext.is_empty() { "files like this".to_string() } else { format!(".{ext} files") };
-    vec![
+    let mut v = vec![
         (leak("openwith".into()), "Open with…".into(), match &chosen {
             Some(app) => format!("currently {app}"),
             None => "currently the system default".into(),
@@ -418,7 +446,15 @@ fn open_actions(path: &str, editor: &str) -> Vec<Act> {
         a("open", "Open in $EDITOR", editor),
         a("copyabs", "Copy absolute path", path),
         a("reveal", "cd to its folder", parent_of(path)),
-    ]
+    ];
+    // Slot 9. A skill could be deleted and the kind the launcher spends most
+    // of its rows on could not. Not offered for a config: deleting the file
+    // your agent is configured by, out of a fuzzy list, is a foot-gun with
+    // very little on the other side of it.
+    if kind != Kind::Config {
+        v.push(a("trash", "Move it to the Trash…", "recoverable from Finder"));
+    }
+    v
 }
 
 fn first_nonempty(it: &Item, keys: &[&str]) -> String {
@@ -699,6 +735,61 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 _ => return 2,
             };
             ui::emit("INSERT", &cmd, paste);
+        }
+        // Slot 9 for anything on disk. The path is named in the
+        // confirmation, it goes to the Trash rather than being unlinked, and
+        // `paths::trash` refuses $HOME, the root and the system directories
+        // however the row got here.
+        "trash" => {
+            let p = first_nonempty(it, &["path", "file", "dir"]);
+            if p.is_empty() {
+                ui::note("nothing to delete on that row", paste);
+                return 2;
+            }
+            if !ui::confirm(
+                &format!("move {} to the Trash?", short_name(&p)),
+                &format!("Move {}", crate::paths::tilde(&p)),
+                "recoverable from Finder",
+            ) {
+                return 130;
+            }
+            match crate::paths::trash(std::path::Path::new(&p)) {
+                Ok(d) => ui::note(
+                    &format!("moved to {}", crate::paths::tilde(&d.to_string_lossy())),
+                    paste,
+                ),
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            }
+        }
+        // The MCP verbs are the agent's own CLI, handed over rather than run.
+        // Each of these edits the agent's configuration or opens a browser
+        // for OAuth, and both are things to read before agreeing to.
+        "mcptools" => {
+            let c = format!("{} mcp get {}", it.get("agent"), shq(it.get("name")));
+            return crate::runhere::run_cmd(&c);
+        }
+        "mcplogin" => ui::emit(
+            "INSERT",
+            &format!("{} mcp login {}", it.get("agent"), shq(it.get("name"))),
+            paste,
+        ),
+        "mcpremove" => ui::emit(
+            "INSERT",
+            &format!("{} mcp remove {}", it.get("agent"), shq(it.get("name"))),
+            paste,
+        ),
+        _ if id.starts_with("install:") => {
+            let target = &id[8..];
+            match crate::lend::resolve(it).and_then(|d| crate::lend::install_cmd(target, &d)) {
+                Ok(c) => ui::emit("INSERT", c.as_str(), paste),
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            }
         }
         // The only destructive thing here. It names the agent and the path
         // before asking, moves the directory to the Trash rather than

@@ -70,7 +70,7 @@ impl Mcp {
     }
 
     /// The name of the first field that `secrets` calls a credential.
-    fn secret_field(&self) -> Option<String> {
+    pub fn secret_field(&self) -> Option<String> {
         let pairs: &[(String, String)] = match self {
             Mcp::Stdio { env, .. } => env,
             Mcp::Http { headers, .. } => headers,
@@ -100,6 +100,19 @@ impl Mcp {
     /// The `--mcp-config` payload claude accepts. Its help says "JSON files
     /// or strings", so a definition with nothing sensitive in it rides
     /// inline and leaves no file behind; `mcp_flags` decides which.
+    /// Just the server object, without the `mcpServers` wrapper.
+    ///
+    /// `--mcp-config` wants a whole config file; `mcp add-json` wants one
+    /// server. Same data, two shapes.
+    pub fn to_body_json(&self) -> String {
+        let full = self.to_claude_json();
+        serde_json::from_str::<serde_json::Value>(&full)
+            .ok()
+            .and_then(|v| v.get("mcpServers")?.as_object()?.values().next().cloned())
+            .map(|b| b.to_string())
+            .unwrap_or(full)
+    }
+
     pub fn to_claude_json(&self) -> String {
         let body = match self {
             Mcp::Stdio { command, args, env, .. } => {
@@ -440,4 +453,50 @@ fn pairs(v: Option<&serde_json::Value>) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The command that installs a borrowed server into another agent **for
+/// good**, using that agent's own `mcp add` rather than editing its config.
+///
+/// Borrowing lasts one run; this is the other half of slot 7. Both CLIs know
+/// their own format, so writing `~/.claude.json` or `~/.codex/config.toml`
+/// ourselves would be inventing a job someone else already does correctly —
+/// and doing it to a file that holds far more than MCP servers.
+///
+/// The command is handed over unrun, like every other command line here.
+///
+/// **A server whose env holds a credential is refused for both**, which is
+/// the difference from lending: claude can be *lent* one because the
+/// definition goes into a 0600 file, but `mcp add` takes it inline, so there
+/// is no form of this that keeps the key off the command line — and off the
+/// shell history this launcher reads back.
+pub fn install_cmd(agent: &str, m: &Mcp) -> Result<String, String> {
+    if let Some(k) = m.secret_field() {
+        return Err(format!(
+            "{} carries {k} — installing it would put the key on your command line",
+            m.name()
+        ));
+    }
+    let name = m.key();
+    match (agent, m) {
+        ("claude", _) => Ok(format!(
+            "claude mcp add-json {} {}",
+            crate::exec::shq(&name),
+            crate::exec::shq(&m.to_body_json())
+        )),
+        ("codex", Mcp::Http { url, .. }) => Ok(format!(
+            "codex mcp add {} --url {}",
+            crate::exec::shq(&name),
+            crate::exec::shq(url)
+        )),
+        ("codex", Mcp::Stdio { command, args, .. }) => {
+            let mut s = format!("codex mcp add {} -- {}", crate::exec::shq(&name), crate::exec::shq(command));
+            for a in args {
+                s.push(' ');
+                s.push_str(&crate::exec::shq(a));
+            }
+            Ok(s)
+        }
+        _ => Err(format!("{agent} has no way to add an MCP server from the command line")),
+    }
 }

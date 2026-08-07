@@ -16,11 +16,23 @@ pub fn run_item(it: &Item) -> i32 {
         it.cmd.clone()
     };
     crate::frecency::bump(&cmd);
+    run_in_window(&cmd, it.cwd.as_deref())
+}
+
+/// The same window, for a command the panel composed rather than one a row
+/// carried — `claude mcp get <server>`, whose answer is the point and whose
+/// output belongs here rather than on your prompt.
+pub fn run_cmd(cmd: &str) -> i32 {
+    run_in_window(cmd, None)
+}
+
+fn run_in_window(cmd: &str, cwd: Option<&str>) -> i32 {
+    let cmd = cmd.to_string();
 
     println!("{DIM}$ {RESET}{cmd}\n");
     let mut c = std::process::Command::new("sh");
     c.arg("-c").arg(&cmd);
-    if let Some(dir) = &it.cwd {
+    if let Some(dir) = cwd {
         if std::path::Path::new(dir).is_dir() {
             c.current_dir(dir);
         }

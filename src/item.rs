@@ -129,18 +129,20 @@ impl Kind {
     /// fallback's manners: a calculator row is `424.81`, a translation row
     /// is the translation, and a skill row is `/cnipa-ooa`, which a shell
     /// answers with "no such file". See `docs/ACTIONS.md`, R3.
-    /// `App`, `Link` and `Dir` are deliberately absent. Their `cmd` reads
+    /// `App`, `Link`, `Dir` and `Mcp` are deliberately absent. Their `cmd` reads
     /// like a command — `open -a Zed`, `open https://…`, `cd /tmp` — but the
     /// row denotes an application, a URL and a folder. Enter already launches
     /// the first two, so "Run in the shell below" was the same action under a
     /// worse name; and `cd` in a subshell that exits immediately does
-    /// nothing at all.
+    /// nothing at all. An MCP row's `cmd` is `<agent> mcp get <name>`, and
+    /// the panel has a purpose-built entry for it — `Show what it exposes` —
+    /// so the generic runners were three more ways to say the same thing.
     pub fn is_command_line(self) -> bool {
         use Kind::*;
         matches!(
             self,
             History | Script | Path | Snippet | Ssh | Container | Git | Port | Proc | Sys | Clip
-                | Agent | Session | Mcp
+                | Agent | Session
         )
     }
 

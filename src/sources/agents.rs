@@ -168,26 +168,7 @@ pub fn delete_skill(dir: &str) -> Result<std::path::PathBuf, String> {
     if !is_skill_dir(path) {
         return Err(format!("{dir} is not a skill directory — refusing"));
     }
-    if !path.is_dir() {
-        return Err(format!("{dir} is not there any more"));
-    }
-    let name = path.file_name().ok_or_else(|| "no name".to_string())?;
-    let trash = paths::home().join(".Trash");
-    std::fs::create_dir_all(&trash).map_err(|e| format!("no Trash: {e}"))?;
-
-    // Two agents' copies of one skill share a name, and so does anything you
-    // deleted last week. Never overwrite what is already in there.
-    let mut dest = trash.join(name);
-    let mut n = 2;
-    while dest.exists() {
-        dest = trash.join(format!("{} {n}", name.to_string_lossy()));
-        n += 1;
-        if n > 999 {
-            return Err("too many copies of that name in the Trash".into());
-        }
-    }
-    std::fs::rename(path, &dest).map_err(|e| format!("could not move it to the Trash: {e}"))?;
-    Ok(dest)
+    crate::paths::trash(path)
 }
 
 /// Is this the directory of an installed skill, rather than some other path?

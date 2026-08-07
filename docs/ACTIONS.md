@@ -56,14 +56,31 @@ the subtractive pass had found:
 
 | Kind | Slot | What is missing |
 |---|---|---|
-| **file** | 9 Destroy | **No way to move a file to the Trash.** A skill can be deleted; the file the launcher spends most of its rows on cannot. Raycast ships `Action.Trash` as a built-in for exactly this. |
-| **app** | 5 Locate | **No Reveal in Finder**, though a file has one. The same slot, answered for one kind and not its neighbour. |
-| **mcp** | 3 Understand | **No way to see the tools it exposes** — which is the entire reason an MCP server exists. The row says `✔ connected`; it cannot say *connected to what*. |
-| **mcp** | 3 Understand | A row can say `⚠ not logged in` and offer **no way to log in**, and no way to see the error behind `✘ failed`. |
-| **mcp** | 7 Propagate | **Lend, but never copy.** A skill can be installed into another agent for good; a server can only be borrowed for one run. |
-| **mcp** | 8 Configure | **No enable / disable**, though the status column reports `⏸ disabled`. |
-| **mcp** | 9 Destroy | **No remove.** Already recorded below as a gap; the checklist says which slot it is. |
-| **skill** | 3 Understand | The row says `used 8× · 1d ago` and there is no way to see *which* conversations. Weak — recorded, not proposed. |
+| **file** | 9 Destroy | **No way to move a file to the Trash.** A skill could be deleted; the kind the launcher spends most of its rows on could not. Raycast ships `Action.Trash` as a built-in for exactly this. → **closed** |
+| **app** | 5 Locate | **No Reveal in Finder**, though a file has one. The same slot, answered for one kind and not its neighbour. → **closed**, along with slot 9: dragging an `.app` to the Trash is how you uninstall here. |
+| **mcp** | 3 Understand | **No way to see the tools it exposes** — the entire reason an MCP server exists. The row says `✔ connected`; it could not say *connected to what*. → **closed** (`Show what it exposes`) |
+| **mcp** | 3 Understand | A row could say `⚠ not logged in` and offer **no way to log in**. → **closed** (`Log in to it`, shown only when the health says so) |
+| **mcp** | 7 Propagate | **Lend, but never copy.** → **closed** (`Install it in claude for good`) |
+| **mcp** | 8 Configure | **No enable / disable.** → **refused**: neither `claude mcp` nor `codex mcp` has the verb, and the alternative is editing the agent's config file ourselves. Left to the agent to add. |
+| **mcp** | 9 Destroy | **No remove.** → **closed** (`Remove it…`) |
+| **skill** | 3 Understand | The row says `used 8× · 1d ago` with no way to see *which* conversations. → **still open**, and weak. |
+
+### How the mcp slots were filled
+
+Both agents turn out to have a complete CLI — `add`, `remove`, `login`,
+`logout`, `get` — so **none of this edits anyone's config file**. That was
+the risk that had kept these gaps open, and it evaporates once you look:
+the agent already knows its own format, and `~/.claude.json` holds far more
+than MCP servers.
+
+Two consequences follow. `Remove it…` and `Log in to it` are **inserted, not
+run** — they change the agent's configuration or open a browser for OAuth,
+and a command line on your prompt is this launcher's own form of
+confirmation. And `Install it for good` **refuses a server whose env holds a
+credential, for both agents** — unlike lending, where claude can be handed a
+`0600` file, `mcp add` takes the definition inline, so there is no form of it
+that keeps the key off the command line and out of the history this launcher
+reads back.
 
 `mcp` is the striking one: five of the nine slots are empty, and it is the
 only kind whose *primary* action is not "use it" — Enter opens its config,
