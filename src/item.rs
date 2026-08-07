@@ -38,9 +38,15 @@ impl Kind {
     pub fn priority(self) -> i64 {
         use Kind::*;
         match self {
-            Agent => 170,
-            Session => 160,
-            Config => 118,
+            // Agents occupy their own band, far enough above everything
+            // else that learned ranking cannot lift another kind past them.
+            // They are what this launcher is for; everything else is one
+            // keystroke away through search.
+            Agent => 1000,
+            Skill => 990,
+            Mcp => 985,
+            Session => 980,
+            Config => 975,
             Translate => 420,
             Calc => 400,
             Port => 150,
@@ -50,12 +56,12 @@ impl Kind {
             Container => 145,
             Snippet => 140,
             Clip => 135,
-            Skill => 130,
-            Mcp => 125,
             Ssh => 120,
-            App => 112,
-            Sys => 110,
+            // What this project can do beats a static system command or an
+            // app you could have launched from anywhere.
             Script => 100,
+            App => 88,
+            Sys => 86,
             History => 90,
             Dir => 80,
             Git => 70,

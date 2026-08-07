@@ -127,6 +127,8 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::machine::apps());
     items.extend(crate::sources::machine::system());
     items.extend(crate::sources::agents::configs());
+    items.extend(crate::sources::agents::summary());
+    items.extend(read_cached("mcp"));
 
     let deadline = std::time::Instant::now() + EXTERNAL_DEADLINE;
     for (name, h) in handles {
@@ -159,9 +161,12 @@ fn join_before(h: std::thread::JoinHandle<Vec<Item>>, budget: Duration) -> Optio
 
 /// Just the agent-owned rows, for the `a:` overview.
 pub fn gather_agents() -> Vec<Item> {
-    let mut items = read_cached("mcp");
+    let mut items = crate::sources::agents::summary();
+    items.extend(read_cached("mcp"));
     items.extend(crate::sources::agents::skills());
     items.extend(crate::sources::agents::configs());
+    items.extend(crate::sources::agents::summary());
+    items.extend(read_cached("mcp"));
     items.extend(read_cached("sessions"));
     finish(items)
 }
@@ -178,7 +183,10 @@ pub fn finish(items: Vec<Item>) -> Vec<Item> {
             continue;
         }
         if let Some((n, last)) = freq.get(&it.cmd) {
-            it.score += crate::frecency::score(*n, *last) * 12.0;
+            // Capped: what you use often should rise within its kind, not
+            // vault over a whole category. Without a ceiling, copying one
+            // command a few times put it above every agent row.
+            it.score += (crate::frecency::score(*n, *last) * 12.0).min(60.0);
         }
         out.push(it);
     }

@@ -146,6 +146,33 @@ text to insert, it is something you kill or inspect.
 
 ## One surface for every agent
 
+Open the launcher and this is what you see first, before typing anything:
+
+```
+▸ claude    agent · 9 skills · 3 mcp ·  28 sessions
+  codex     agent · 2 skills · 3 mcp · 490 sessions
+  pi        agent · 2 skills · 0 mcp · 120 sessions
+  cnipa-ooa skill · claude, shared · used 8× · 19h ago
+  Gmail     mcp   · claude · ✔ connected
+```
+
+`a:` shows exactly the same thing, filtered — the two share one code path so
+they cannot drift apart. Everything else is one keystroke away through
+search.
+
+**MCP servers report real status**, asked of each agent rather than read out
+of config files: `✔ connected`, `⏸ disabled`, `⚠ not logged in`. Reading the
+config missed every claude.ai-hosted server and could not tell you whether
+anything actually worked.
+
+**Skills say whether you have ever used them**, mined from past sessions —
+`used 8× · 19h ago`, or `never used`. Nothing else can answer this, because
+nothing else sees both your skills and your conversations.
+
+**`/skill-name args`** invokes a skill and answers in the panel, picking an
+agent that has it.
+
+
 **Resume a past conversation** without hunting for a uuid. Sessions from
 Claude Code, Codex and pi are merged, newest first, with Claude's
 AI-generated titles where available:

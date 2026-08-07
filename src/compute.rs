@@ -421,49 +421,18 @@ pub fn agent_query(q: &str) -> Option<(String, String)> {
 
 /// `a:` — everything about your agents, grouped, in one place.
 pub fn agent_overview(term: &str) -> Vec<Item> {
-    use std::collections::BTreeMap;
     let items = crate::cache::gather_agents();
-    let mut rows = Vec::new();
-
-    // installed agents, with what each one holds
-    let mut per_agent: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
-    for it in &items {
-        for a in it.get("agent").split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let e = per_agent.entry(a.to_string()).or_default();
-            match it.kind {
-                Kind::Skill => e.0 += 1,
-                Kind::Mcp => e.1 += 1,
-                Kind::Session => e.2 += 1,
-                _ => {}
-            }
-        }
-    }
-    for name in crate::sources::sessions::installed() {
-        let (sk, mc, se) = per_agent.get(name).copied().unwrap_or_default();
-        rows.push(
-            Item::new(name, Kind::Agent)
-                .title(name)
-                .fields([
-                    format!("{sk} skills"),
-                    format!("{mc} mcp"),
-                    format!("{se} sessions"),
-                ])
-                .put("agent", name),
-        );
-    }
-
-    // then the agent-owned rows themselves, filtered by whatever follows `a:`
     let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
-    for it in items {
-        if !needles.is_empty() {
-            let hay = format!("{} {}", it.title, it.fields.join(" ")).to_lowercase();
-            if !needles.iter().all(|n| hay.contains(n.as_str())) {
-                continue;
+    items
+        .into_iter()
+        .filter(|it| {
+            if needles.is_empty() || it.kind == Kind::Agent {
+                return true;
             }
-        }
-        rows.push(it);
-    }
-    rows
+            let hay = format!("{} {}", it.title, it.fields.join(" ")).to_lowercase();
+            needles.iter().all(|n| hay.contains(n.as_str()))
+        })
+        .collect()
 }
 
 pub fn agent_query_prefix(q: &str) -> Option<&str> {

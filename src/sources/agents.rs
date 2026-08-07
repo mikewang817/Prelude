@@ -329,3 +329,44 @@ pub fn configs() -> Vec<Item> {
         })
         .collect()
 }
+
+/// One row per installed agent, saying what it holds. The first thing you
+/// see when the launcher opens, because it is the thing most worth seeing.
+pub fn summary() -> Vec<Item> {
+    use std::collections::BTreeMap;
+    let mut per: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    let mut tally = |it: &Item| {
+        for a in it.get("agent").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let e = per.entry(a.to_string()).or_default();
+            match it.kind {
+                Kind::Skill => e.0 += 1,
+                Kind::Mcp => e.1 += 1,
+                Kind::Session => e.2 += 1,
+                _ => {}
+            }
+        }
+    };
+    for it in skills() {
+        tally(&it);
+    }
+    for it in crate::cache::read_cached("mcp") {
+        tally(&it);
+    }
+    for it in crate::cache::read_cached("sessions") {
+        tally(&it);
+    }
+    super::sessions::installed()
+        .into_iter()
+        .map(|name| {
+            let (sk, mc, se) = per.get(name).copied().unwrap_or_default();
+            Item::new(name, Kind::Agent)
+                .title(name)
+                .fields([
+                    format!("{sk} skills"),
+                    format!("{mc} mcp"),
+                    format!("{se} sessions"),
+                ])
+                .put("agent", name)
+        })
+        .collect()
+}
