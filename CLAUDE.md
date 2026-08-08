@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 180 tests
+cargo test                 # 118 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -142,30 +142,22 @@ terminal, and `·` is the separator on every row. `doctor` measures it with a
 cursor-position report and caches the answer. Always use `width::dwidth`.
 
 **The home and root commands are not the catalogue.** An empty query renders
-what is outstanding — Msg, Task, Run and the Agent launch entries — plus the
-exceptions a person should be told about: an MCP server that cannot account
-for itself, a Skill whose copies have drifted apart or whose tree is broken.
-Healthy inventory is not on that screen; a skill that is fine is reachable
-through `/name`, `a:` and ordinary search, a server that answers through
-`mcp:`, `a:` and ordinary search, and forty of them in front of three running
-agents is a list nobody reads. A row is dropped when it *accounts for itself*,
-which is narrower than "is healthy" in one direction and wider in the other.
-An MCP server goes when `health` is `ok` **or** `disabled` — disabled is
-somebody's decision and `doctor mcp` records it as a note and reports the
-server fine, so a permanent home row would be Prelude arguing with its own
-diagnostic — and stays for `failed`, `auth`, `unknown`, a word the vocabulary
-does not know, or no health field at all. A Skill goes on `single`,
-`identical`, `unknown` or `private-unknown` provided no copy has a broken or
-escaping link or an unreadable file; `unknown` means a copy has no fingerprint
-yet, which on a first launch is every skill on the machine, and the unreadable
-case is caught by its own count rather than through that word. A row with no
-`integrity` field at all has had nothing claimed about it and is shown. The
-home's order interleaves two kinds by state — Msg, failed Task, completed
-Task, waiting Run, waiting Task, working Run, working Task, queued Task, Agent
-entries, then the inventory exceptions — which is why it is its own ordering
-in `home_items` and not a change to `by_rank` or to any `Kind::priority`,
-whose band rule governs *search*. An ordinary query
-searches all of that plus Skill, MCP, Search commands and fixed Quicklinks —
+the things this launcher manages — a question an agent is blocked on, the
+Agents themselves, what they are running, their Skills, their MCP servers, and
+the newest `sessions::IN_MAIN_LIST` conversations. Ordering is `by_rank` like
+everywhere else, so the kind bands do the work and the home has no second
+ordering rule of its own.
+
+That was briefly not so, and the correction is worth keeping. The home was made
+an *attention list*: healthy Skills and servers were pushed into `/name` and
+`mcp:` so only exceptions — a server that had stopped answering, a Skill whose
+copies had drifted — reached the empty query. It reads well as a principle and
+was wrong in front of a person. A launcher you open to see what you have is not
+improved by hiding what you have, and the panel went quiet exactly when nothing
+was broken, which is most of the time. It came from an acceptance criterion in
+`docs/AGENT-CONTROL-PLANE.md`, implemented faithfully and only then looked at.
+Sessions are on the home now, which they never were before. An ordinary query
+searches all of that plus Search commands and fixed Quicklinks —
 never the thousands of files, history entries, apps, clipboard rows and
 `$PATH` commands underneath. Exact `f` shows one Search Files command; `f:`
 opens its results. `:` lists every scope, and clearing restores the home. Keep
@@ -341,11 +333,9 @@ question at a time, so minutes pass between seeing something and acting on it
 — and staging names are deterministic (`borrow/<server>.json`,
 `borrow/<skill>/`), so a borrow staged *while the confirmation is on screen*
 wears the name the question is about. Every `Repair` therefore carries the
-evidence its finding was made on — mtime and mode for a Trash, the run and
-session ids for an orphaned Task — and declines when that no longer matches.
-The Task side re-finds the fleet at the moment of applying rather than
-trusting the report, the same rule Session trash follows, and re-decides
-orphanhood with `task::orphans` rather than a second copy of the rule. A
+evidence its finding was made on — mtime and mode for a Trash — and declines
+when that no longer matches, the same rule Session trash follows when it
+re-finds the fleet rather than trusting the launcher's snapshot. A
 broken symlink under `borrow/` is reported without a repair: `paths::trash`
 gates on `exists()`, which follows the link, so the offer could only fail at
 the moment somebody said yes to it. And a staging root that will not open is

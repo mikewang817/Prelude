@@ -5,14 +5,21 @@ vision document: every checkbox is an implementation obligation, and every
 status change must name its evidence.
 
 The source of truth is this file, not a conversation summary. Before changing
-Agent, Run, Session, Task, Skill, MCP, Config, Home, messaging or Agent doctor
+Agent, Run, Session, Skill, MCP, Config, Home, messaging or Agent doctor
 behaviour, read this file.
 
-**All nine milestones are complete.** There is no current milestone. What is
-left is written down as recorded limitations and deliberate deferrals under the
-milestone that owns each one — they are decisions with reasons, not a backlog,
-and reopening one means arguing with the reason. New Control Plane work starts
-by adding a milestone here, not by editing an existing one's criteria.
+**Seven milestones are complete and two were removed after they shipped.**
+There is no current milestone. What is left is written down as recorded
+limitations under the milestone that owns each one — decisions with reasons,
+not a backlog, and reopening one means arguing with the reason.
+
+Milestones 6 and 8 — the Task entity and the messaging/handoff layer built on
+it — were implemented, reviewed, committed, and then deleted at the owner's
+decision because they made Prelude a different product. The sections are kept
+rather than erased: a plan that hides what it withdrew teaches nobody, and the
+commit that holds the code is named there. Part of Milestone 7 was withdrawn
+for a sharper reason — the criterion itself was wrong, and is quoted in place
+so the mistake is legible.
 
 ## How this document is used
 
@@ -22,6 +29,8 @@ Status markers:
 - `[>]` implemented in part; unchecked acceptance criteria remain
 - `[ ]` not started
 - `[!]` blocked; the reason must be written next to it
+- `[-]` withdrawn after shipping; the reason and the commit holding the code
+  must be written next to it
 
 Rules for every Control Plane change:
 
@@ -33,13 +42,17 @@ Rules for every Control Plane change:
 6. Update this file in the same commit with checked criteria and measured evidence.
 7. Mark a milestone `[x]` only when every acceptance criterion is checked.
 8. Record deliberate deferrals under that milestone rather than calling it complete.
+9. A criterion is not self-justifying. If implementing one faithfully produces a
+   worse product, withdraw the criterion and say so here — do not implement it
+   and call the milestone done. Quote the withdrawn text rather than deleting
+   it, so the next reader can see what was tried.
 
 ## Non-negotiable architecture
 
 ### Authority
 
 - Agent CLI output, native Session files and live processes are authoritative.
-- Prelude may add stable IDs, labels, relationships, Task state and archive state.
+- Prelude may add stable IDs, labels, relationships and archive state.
 - Prelude must not rewrite native Session records to make its graph convenient.
 - Prelude must not invent model, token, cost, capability or state information.
 - Evidence priority is: structured Agent event, conversation evidence, process/file clocks.
@@ -49,7 +62,6 @@ Rules for every Control Plane change:
 - Agent: native name such as `claude`, `codex`, `pi`.
 - Run: `agent:pid:process-start-time`.
 - Session: `agent:native-session-id`.
-- Task: Prelude-generated immutable ID.
 - Skill copy: name, canonical path and content fingerprint.
 - MCP capability: normalized name plus redacted semantic fingerprint per owner.
 
@@ -70,8 +82,6 @@ Rules for every Control Plane change:
 - No Agent CLI, tmux query, directory hash or relationship join runs per keystroke.
 - Process liveness and mtimes may be updated through syscalls on the live path.
 - Session inventory, Skill hashes, MCP health/tools and relationship snapshots use caches.
-- Task and event persistence uses ordinary atomic JSON/JSONL files unless those files
-  prove unable to preserve consistency.
 
 ## Entity model
 
@@ -79,19 +89,16 @@ Rules for every Control Plane change:
 Agent
  ├─ Run
  │   ├─ Session
- │   ├─ Task
  │   ├─ explicit Capability load (Skill / MCP)
  │   └─ effective Config evidence
  ├─ Session
- ├─ Task
  ├─ Skill copies
  ├─ MCP variants
  └─ Config
 
-Question / Message
- ├─ sender and recipient Agent
- ├─ Run / Session when known
- └─ Task when known
+Question
+ ├─ sender Agent
+ └─ Run / Session when known
 ```
 
 `src/control.rs` is the canonical serializable graph. Launcher `Item`s are
@@ -115,12 +122,11 @@ Implemented foundation:
 
 Completed with the rest of the relationship model:
 
-- [x] Task entity and Run/Session/Question → Task edges.
 - [x] Run → explicitly loaded Skill/MCP edges.
 - [x] Agent-level evidence for effective Config, recording per CLI what is
       actually exposed rather than inferring it from files.
-- [x] Reverse indexes for all new Task and Capability edges: `SkillRecord.runs`,
-      `McpRecord.runs`, `RunRecord.tasks`, `SessionRecord.tasks`.
+- [x] Reverse indexes for the Capability edges: `SkillRecord.runs` and
+      `McpRecord.runs`. The Task edges went with Milestone 6.
 
 **Recorded limitation — `Run → effective Config evidence` is not obtainable.**
 A Run's effective configuration is its layered files *plus* the flags it was
@@ -138,8 +144,7 @@ about an existing pid, or — better, and already this plan's top evidence tier 
 agents writing their resolved configuration into a structured start event.
 
 Evidence: `1c18cb2`, `src/control.rs` (schema 3), `src/sources/agents.rs`
-(`effective_config`, `read_effective`), relationship tests in `src/main.rs`,
-`src/cache.rs::attach_runs`.
+(`effective_config`, `read_effective`), relationship tests in `src/main.rs`.
 
 ### 2. Session lifecycle — `[x]`
 
@@ -286,7 +291,7 @@ tool inventory is unsupported.
 
 Acceptance criteria:
 
-- [x] Run Quick Look shows Agent, project, branch, Session, Task, state and start time.
+- [x] Run Quick Look shows Agent, project, branch, Session, state and start time.
 - [x] Parse explicit one-run Skill/MCP flags without retaining the full command line.
 - [x] Link only explicitly confirmed borrowed/loaded capabilities.
 - [x] Distinguish installed inventory from capabilities confirmed for this Run.
@@ -294,7 +299,7 @@ Acceptance criteria:
 - [x] Show last verified structured event, then conversation evidence as fallback.
 - [x] Show model only if a native structured source confirms it.
 - [x] Never guess token usage or cost.
-- [x] Add graph reverse edges from Capability/Task/Session to Run.
+- [x] Add graph reverse edges from Capability/Session to Run.
 
 Branch comes from `.git/HEAD` read directly, walking ancestors and handling a
 `gitdir:` file for worktrees and submodules, a detached HEAD (reported as a
@@ -321,98 +326,32 @@ server names from a bounded scan.
 
 Evidence: `src/sources/running.rs`, `src/control.rs` (schema 3), `src/preview.rs`.
 
-### 6. Task and structured events — `[x]`
+### 6. Task and structured events — `[-]` **removed, deliberately**
 
-Acceptance criteria:
+Built, reviewed, committed in `85d6f97`, and taken back out the same day at the
+owner's decision. `git show 85d6f97 -- src/task.rs src/events.rs` retrieves all
+of it. Removed: the Task entity and store, the append-only event log, the
+`prelude task` verbs, `Kind::Task` and its Quick Look and action panel, the
+Task edges in the graph, and the event-over-clock precedence in `running.rs`.
 
-- [x] Immutable Prelude Task ID and atomic Task metadata.
-- [x] States: queued, working, waiting, done, failed, cancelled.
-- [x] Project, title, prompt reference, assignment, dependencies and timestamps.
-- [x] Result and related Question/Message/Run/Session edges.
-- [x] CLI: `task start`, `progress`, `done`, `fail` with JSON output variants.
-- [x] Assign, reassign, retry, continue elsewhere, send context, mark done, cancel.
-- [x] Append-only local structured event JSONL.
-- [x] Agent event is authoritative over inferred process state.
-- [x] Orphan handling for a Task whose Run or Session disappeared.
-- [x] Prompt/result content follows the credential filtering policy.
+The reason is worth recording, because the code was not defective. Prelude is a
+launcher for managing agents, their Skills, their MCP servers and their
+conversations. A task tracker is a different product wearing the same binary:
+it asks the person to maintain state that the agents already hold, and every
+row it puts on the home is a row not spent on what they came to look at. That
+it worked is not an argument for keeping it.
 
-Ids are reserved with `O_EXCL`, so a check-then-write race cannot exist; 64
-concurrent threads produce 64 distinct ids. `valid_id` is what stands between
-`task show ../../../etc/passwd` and the filesystem, and it is applied to the
-id *inside* a record as well as to the filename, because `save` would
-otherwise trust a path the record supplied. "Continue elsewhere" and "send
-context" are Milestone 8's handoff and `say`, reached from the Task panel.
+What survived the removal, because it was never about tasks: the credential
+filter widening in `secrets.rs` (`sk-proj-`, `sk_live_`, JWTs, `github_pat_`,
+`AIza`, URL passwords), which guards shell history and the clipboard.
 
-The store is bounded on the read path, which is what lets a Task source sit on
-gather at all: `home_tasks` reads an index of open work plus undismissed
-results and **never** walks the directory, not even when the index is missing —
-it hands that to a detached rebuild, because a foreground scan is 54 ms over
-5,000 records and the whole launch budget is 40. `open_tasks` is the explicit
-reader that may scan, and rebuilds the index it paid for. Both writers hold an
-advisory lock, so a rebuild cannot lose a task opened beside it.
+### 7. Agent Home and scoped control queries — `[>]`
 
-Three failures the event log had to survive before it was honest. Only
-`detail` was length-bounded, so a 300 KB project name made the trim cut land
-past the last newline and write back an empty file — 940 records to zero.
-Every field is bounded now, and the trim drops oversized records wherever they
-sit rather than cutting a prefix whose window one can occupy. The trim race
-lost 3.5% of an 8-thread burst rather than the "one line" its comment claimed,
-and now takes a `flock`. And the credential filter reached only two of nine
-fields; the test that was supposed to prove otherwise exercised exactly those
-two.
+Scope acceptance criteria:
 
-A path is not a sentence: filtering `cwd` and `project` with the prose rule
-redacted a project directory legitimately named `token-service` or `secrets`,
-so both use the path rule, which still refuses a path genuinely containing a
-key.
-
-Evidence: `src/task.rs`, `src/events.rs`, `src/cache.rs`, `prelude task --help`.
-
-### 7. Agent Home and scoped control queries — `[x]`
-
-Home ordering acceptance criteria:
-
-1. [x] Explicit unanswered human Questions.
-2. [x] Failed/abnormally exited Agent Tasks.
-3. [x] Completed Tasks awaiting review.
-4. [x] Waiting Agents.
-5. [x] Working Agents.
-6. [x] Queued Tasks.
-7. [x] Agent launch entries.
-
-Additional criteria:
-
-- [x] Healthy inventory remains in explicit scopes.
-- [x] Broken MCP and divergent/invalid Skill exceptions may enter Home.
 - [x] `a:waiting`, `a:failed`, `a:claude Prelude`.
 - [x] `a:using <capability>` and `a:without <capability>`.
 - [x] Filters operate on one cached snapshot and start no Agent CLI.
-
-The ordering interleaves two kinds — a failed Task above a waiting Run, a
-queued Task below a working one — which `cache::by_rank` cannot express,
-because it settles the kind band before it looks at anything else. Home is
-therefore its own explicit ordering in `home_items`, and `by_rank` and every
-`Kind::priority` are deliberately untouched. Search asks *what kind of thing is
-this*; the home asks *what is outstanding*. They are different questions and
-must not be made to agree. `home_rank` also gives the two states the plan does
-not name — a waiting Task and a working Task — a slot beside their agent-state
-counterparts.
-
-"Awaiting review" is an explicit act, never inferred from a row having been
-looked at: focus and Quick Look cross rows without any decision being made, and
-a task is routinely opened while it is still running, so treating that as
-acknowledgement would silently drop its later completion — failure in the
-expensive direction. `prelude task ack` and a `Dismiss it` panel entry are the
-act. A finished task holds a row for 24 hours, bounded to 8 per state, and the
-bound is applied in the index writer rather than only in the answer, since a
-bound applied after the read bounds nothing.
-
-The home stopped being an inventory. A healthy Skill or MCP server is
-reachable through `/name`, `a:`, `mcp:` and ordinary search but does not sit on
-the empty query; a broken server or a Skill whose copies have drifted does,
-because that is an exception somebody should be told about. A *deliberately
-disabled* server is not a fault and does not — the home and `doctor mcp`
-disagreeing about one server is worse than either being wrong alone.
 
 The filters are pure, quote-aware, and read `run_skills` / `run_mcp` — the
 capabilities a Run confirmed, never the installed inventory. An unrecognised
@@ -420,55 +359,66 @@ filter collapses the list rather than silently matching everything; the same
 lie in the other direction is still a lie. Verified per keystroke by replacing
 `PATH` with logging shims: every `a:` query spawns nothing.
 
-Evidence: `src/compute.rs`, `src/cache.rs`, `src/task.rs`, `docs/SEARCH.md`.
+**The Home ordering criteria are withdrawn, and the reason is a correction to
+this document rather than to the code.** They read:
 
-### 8. Persistent messaging and task handoff — `[x]`
+> 1. Explicit unanswered human Questions · 2. Failed Agent Tasks ·
+> 3. Completed Tasks awaiting review · 4. Waiting Agents · 5. Working Agents ·
+> 6. Queued Tasks · 7. Agent launch entries
 
-Acceptance criteria:
+with *"Healthy inventory remains in explicit scopes"* and *"Broken MCP and
+divergent/invalid Skill exceptions may enter Home"*. All of it was implemented
+and tested, and the result was wrong in front of the person using it. Four of
+the seven slots were Tasks, which no longer exist. The other half of the rule
+— hiding a Skill or an MCP server that is *fine* — emptied the home of the
+inventory it exists to show: the panel went quiet exactly when nothing was
+broken, which is most of the time. A launcher you open to see what you have is
+not improved by hiding what you have.
 
-- [x] Thread ID and reply-to.
-- [x] Delivered, Read and Answered states.
-- [x] Optional Task, Run and Session edges.
-- [x] Persistent Inbox delivery when no tmux address exists.
-- [x] File-path attachments without copying file contents.
-- [x] Timeout, cancellation and reassignment.
-- [x] Agent-to-Agent Task handoff.
-- [x] Completion result returns to the originating Inbox/thread.
-- [x] Identity remains discovered, never manually declared.
-- [x] Exact recipient resolution remains mandatory.
+An acceptance criterion can be met exactly and still be a bad idea. This one
+was written into the plan, implemented faithfully, reviewed, and only then
+looked at — which is the wrong order for a decision about what a person sees
+first.
 
-`answer: Some("")` was doing double duty as "delivered", which is why a notice
-had to be described as born answered. States are explicit now, stored as a
-word so an unknown one from a newer build degrades rather than making a
-message unparseable, and every new field is `serde(default)` — an old message
-file still parses, still reads as pending, and is still never swept.
+The home is the inventory again: questions an agent is blocked on, the agents
+themselves, what they are running, their Skills, their MCP servers, and the
+newest `sessions::IN_MAIN_LIST` conversations. Ordering is `cache::by_rank`
+like everywhere else, so the kind bands do the work and there is no second
+ordering rule for one screen. `home_rank`, `on_home` and `skill_is_sound` are
+gone.
 
-The round trip is the feature, and three things nearly lost it. `sweep`
-deleted the message a live Task points at, because a handoff becomes
-*delivered* the moment it lands in a pane — so any task outliving a day lost
-its result entirely; the sweep now protects the message edge of every open
-Task. A second handoff left the first recipient holding a live instruction,
-two agents on one job, so it now withdraws its predecessor. And a result
-addressed only by pane and cwd was unreachable for an originator that had
-since `cd`'d, so a message carries the originating agent as a last address.
+Evidence: `src/compute.rs::home_items`, `src/cache.rs`, `docs/SEARCH.md`.
 
-Delivery flattens the text before it reaches tmux. A multi-line message
-arrived as several *separately submitted* inputs, only the first carrying the
-`[via prelude, from …]` attribution — which is exactly what that attribution
-exists to prevent.
+### 8. Persistent messaging and task handoff — `[-]` **removed, deliberately**
 
-`bus::items()` runs on every gather and was the one unbounded reader: 3,000
-messages put gather at 37.9 ms and 5,000 at 60.5 ms, and undelivered mail is
-never swept, so that ceiling was permanent. It reads a pending-question index
-now, on the same terms as the Task store — never scanning, handing a missing
-index to a detached rebuild. 5,000 messages went from a 68.8 ms median to
-15.0 ms.
+Removed with Milestone 6, and for the same reason: handoff, threading,
+delivered/read/answered states, attachments, deadlines, cancellation and
+reassignment are a coordination protocol, and coordinating agents is not what
+this launcher is for. `bus.rs` was rebuilt from its pre-`85d6f97` form rather
+than unpicked.
 
-Thread order is the reply chain, walked depth-first from the opener. Sorting
-on whole seconds gave three different orderings across six identical runs, and
-`thread --json` is the form an agent reads to pick up handed-over work.
+**The four verbs stay**, because they predate this plan and are the other half
+of the fleet view: `running.rs` detects that an agent has gone quiet from the
+outside, and `ask` / `tell` / `say` / `inbox` let it say so itself. A question
+an agent is blocked on still leads the home as `Kind::Msg`.
 
-Evidence: `src/bus.rs`, `src/fleet.rs`, `src/task.rs`, `prelude thread`.
+Two fixes found while the removed layer was under review apply to the original
+bus and were kept:
+
+- A message containing a newline arrived at the receiving agent as several
+  *separately submitted* inputs, only the first carrying the
+  `[via prelude, from …]` attribution — exactly what that attribution exists to
+  prevent. The delivered line is flattened now.
+- `prelude answer ../../id_rsa` built a path straight from a command-line id,
+  reading outside the bus and then writing the answer back over it. Both doors
+  take a `valid_id` guard.
+
+A third was restored after the removal went too far with it: message text runs
+through `secrets::looks_secret` line by line and is bounded. An agent quoting
+its own context into a question is the ordinary case, and that text becomes a
+file, a launcher row and `inbox --json` — so `secrets.rs`'s rule applies here
+as it does to history and the clipboard. Removing a subsystem is not a reason
+to remove a filter.
 
 ### 9. Maintenance and specialized Doctor — `[x]`
 
@@ -487,7 +437,8 @@ Checks:
 - [x] Skill collisions, divergence, invalid frontmatter and broken symlinks.
 - [x] MCP failure, duplicate, auth, stale health and tool inventory.
 - [x] Broken private borrow shims and stale staged files.
-- [x] Orphan Task, event, Inbox and relationship records.
+- [x] Orphan Inbox and relationship records. The Task and event checks went
+      with Milestone 6.
 - [x] Doctor reports by default; every repair is a separate confirmed action.
 
 Each check returns data and is rendered twice, so `--json` duplicates no logic
@@ -538,12 +489,14 @@ rediscovered. None is a pending task.
 As of 2026-08-09:
 
 - Branch: `feature/agent-control-plane`
-- Tests: 180 passing, and hermetic — no test reads or writes the user's real
+- Tests: 118 passing, and hermetic — no test reads or writes the user's real
   data directory, and none mutates the environment of a running process
+  (180 before Milestones 6 and 8 were withdrawn, taking 65 of their tests with
+  them)
 - Release Clippy: warning-free, including `--all-targets`
-- Gather benchmark: median 17.9–24.0 ms, budget 40 ms
-- Gather under load: 5,000 Tasks, 5,000 bus messages and a 512 KB event log
-  together measured 15.0 ms, against 68.8 ms before the read paths were bounded
+- Gather benchmark: median 13.9–19.3 ms on a settled machine, budget 40 ms
+- Empty-query home: 43 rows — 4 Agents, 5 Runs, 13 Skills, 6 MCP servers and
+  the 15 newest Sessions
 - Control schema: 3
 - `#[allow(dead_code)]` in `src/`: none
 - Working implementation commits:
@@ -553,6 +506,32 @@ As of 2026-08-09:
   - `b5e4c39` — MCP transport, tools, refresh, public Diff and diagnostics
 
 ## Progress log
+
+### 2026-08-09 — the collaboration layer withdrawn, and the home corrected
+
+Same day as the entry below, after looking at the result.
+
+- Removed Milestone 6 (Task and structured events) and Milestone 8 (persistent
+  messaging and task handoff) in full — `src/task.rs`, `src/events.rs`,
+  `Kind::Task`, the `prelude task` verbs, handoff/threading/states/attachments,
+  and their rows, panels, graph edges and doctor checks. `bus.rs` and
+  `fleet.rs` were rebuilt from their pre-`85d6f97` form rather than unpicked.
+  The four original verbs — `ask`, `tell`, `say`, `inbox` — stay.
+- Withdrew Milestone 7's Home ordering criteria. Four of the seven slots were
+  Tasks; the rest of the rule hid healthy Skills and MCP servers, which emptied
+  the home of the inventory it exists to show.
+- Restored the home to Agent, Run, Skill, MCP and the newest Sessions, ordered
+  by `cache::by_rank` alone. Sessions are on it for the first time; before this
+  work they were reachable only through `s:` and search.
+- Kept three fixes that belong to the original code rather than to the removed
+  layer: the widened credential filter in `secrets.rs`, the flattening of a
+  multi-line message before it is typed into another agent's pane, and the
+  `valid_id` guard that stops `prelude answer ../../id_rsa` escaping the bus.
+  A fourth — the per-line credential filter on message text — was removed with
+  the layer and put back: removing a subsystem is not a reason to remove a
+  filter.
+- Added rule 9 above, because this is the lesson worth keeping: an acceptance
+  criterion can be met exactly and still be the wrong thing to have built.
 
 ### 2026-08-09 — Milestones 1, 2, 3, 5, 6, 7, 8 and 9 completed
 

@@ -30,10 +30,9 @@
 //! the cached half — and the arguments themselves are never kept, only the
 //! capability *name*, because `--mcp-config` can be a whole server definition
 //! with an API key in it. The branch changes under a run and costs two file
-//! reads, so it is taken live. The model and the tasks attached to a run cost
-//! a bounded file read each and are wanted only when somebody looks at one
-//! run, so `effective_context` reads them on the explicit path and gather
-//! never pays for them at all.
+//! reads, so it is taken live. The model costs a bounded file read and is
+//! wanted only when somebody looks at one run, so `effective_context` reads it
+//! on the explicit path and gather never pays for it at all.
 
 use crate::item::{Item, Kind};
 use std::collections::HashMap;
@@ -88,118 +87,6 @@ pub fn classify(dead: bool, silent: u64, turn: Option<Turn>) -> State {
     } else {
         State::Working
     }
-}
-
-/// What an agent's own event says it is doing — or nothing, for a kind that
-/// makes no claim about it.
-///
-/// Deliberately partial. `task.queue` records that work was accepted, not
-/// that anybody started it, and `task.assign` describes a task rather than
-/// the process; reading either as a state would be exactly the invention the
-/// plan forbids. A finished task is the interesting one: the run is alive and
-/// has nothing left it was asked to do, which is the definition of waiting on
-/// you.
-fn reported_state(kind: &str) -> Option<State> {
-    match kind {
-        "task.start" | "task.progress" | "task.retry" => Some(State::Working),
-        "task.wait" | "task.done" | "task.fail" | "task.cancel" => Some(State::Waiting),
-        _ => None,
-    }
-}
-
-/// The same state machine with the evidence priority the plan states:
-/// a structured Agent event, then conversation evidence, then the clocks.
-///
-/// `event` is the newest thing the run said about itself and `activity` the
-/// newest clock reading for it — a pane redraw or a session-file append.
-/// The event wins only while it is *also* the newest thing that happened: one
-/// from ten minutes ago describes a run that has since written to its session
-/// file four hundred times, and honouring it would pin a working agent at
-/// "waiting" for as long as it stayed quiet about its task. Older than the
-/// clock, or a kind that asserts nothing, and this is `classify` unchanged.
-///
-/// A run with no clock at all — a batch run, or one with neither a pane nor a
-/// conversation file — has nothing to compare against, and comparing against
-/// zero is not a comparison: any event ever recorded against it would outrank
-/// the epoch and pin it, for the rest of its life, with no reading that could
-/// ever overtake it. That is how `codex exec` came to be reported as stuck,
-/// which is precisely what CLAUDE.md says must never happen. An unwatchable
-/// run is therefore spoken for only by a *recent* statement: `QUIET` is the
-/// same window silence is judged by, so a run says what it is doing on the
-/// cadence it would otherwise be judged silent on, or it is left alone.
-pub fn classify_reported(
-    dead: bool,
-    silent: u64,
-    turn: Option<Turn>,
-    event: Option<(&str, u64)>,
-    activity: Option<u64>,
-) -> State {
-    if dead {
-        return State::Dead;
-    }
-    if let Some((kind, at)) = event {
-        let speaks_for_it = match activity {
-            Some(activity) => at >= activity,
-            None => now().saturating_sub(at) <= QUIET,
-        };
-        if speaks_for_it {
-            if let Some(state) = reported_state(kind) {
-                return state;
-            }
-        }
-    }
-    classify(dead, silent, turn)
-}
-
-/// How much of the end of the event log a gather reads.
-///
-/// `events::all()` parses the file whole, which is right for `prelude task
-/// show` and wrong here: at the log's 512KB cap that is nine milliseconds, a
-/// quarter of the launch budget, spent to find records that are by
-/// construction in the last few lines of an append-only file. Sixty-four
-/// kilobytes is around eight hundred events — every run on the machine
-/// several times over — for a tenth of the cost.
-const EVENT_TAIL_BYTES: u64 = 64 * 1024;
-
-/// Where `events.rs` keeps the log. It owns the format and the writing; this
-/// only ever reads the tail of it. Naming the path twice is the price of not
-/// parsing half a megabyte on the launch path, and the failure mode if it
-/// ever moves is the one every source here has: nothing is found, the clocks
-/// carry on, and no one sees an error.
-fn event_log() -> PathBuf {
-    crate::paths::data().join("events.jsonl")
-}
-
-/// The newest structured event for every run that has one, in one pass.
-///
-/// Read backwards, so the first record seen for a run is its newest. Appends
-/// are chronological by construction, which is what makes that true without
-/// comparing timestamps — two events in the same second would otherwise be
-/// resolved by luck. A missing, unreadable or half-written log yields an
-/// empty map: a source degrades to nothing, and the clocks are still there.
-fn latest_events() -> HashMap<String, crate::events::Event> {
-    latest_events_in(&event_log())
-}
-
-/// The same read, against a log this caller names.
-///
-/// `events.rs` and `task.rs` take their root as a parameter for the reason
-/// `sessions.rs` writes down — `$XDG_DATA_HOME` belongs to the whole process
-/// and `cargo test` runs on several threads — and this is that rule applied to
-/// the one path here that reads the log. Production still asks
-/// `paths::data()`; nothing on the gather path changed.
-fn latest_events_in(log: &Path) -> HashMap<String, crate::events::Event> {
-    let mut latest = HashMap::new();
-    let Some(text) = window(&log.to_string_lossy(), true, EVENT_TAIL_BYTES) else {
-        return latest;
-    };
-    for line in text.lines().rev() {
-        let Ok(event) = serde_json::from_str::<crate::events::Event>(line) else { continue };
-        if let Some(run) = event.run.clone() {
-            latest.entry(run).or_insert(event);
-        }
-    }
-    latest
 }
 
 /// How much of the tail of a conversation to read.
@@ -1053,10 +940,6 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
     }
     attach_sessions(&mut runs, sessions);
     let panes = panes();
-    // The event log is read once, not once per run. `events::latest_for_run`
-    // parses the whole file per call and a gather asks about every run, so
-    // eight agents would have been eight parses of the same bounded file.
-    let reported = latest_events();
     // Runs in one project share a branch, and a project is usually where
     // several of them are. Two file reads is cheap; twenty is still worth not
     // doing.
@@ -1073,13 +956,10 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
             let by_file = mtime_of(it.get("session"));
             let last = by_pane.into_iter().chain(by_file).max();
             let silent = last.map(|t| now.saturating_sub(t)).unwrap_or(0);
-            let event = reported.get(it.get("run_id"));
             // A batch run writes to a pipe and keeps no conversation file, so
             // silence tells you nothing about it, and neither does a run with
             // no clock at all. Both are working as far as anything here can
-            // see — unless the agent itself has said otherwise. An event is a
-            // statement rather than an inference, and it is the only thing
-            // that can speak for a run nothing can watch.
+            // see.
             let blind = last.is_none() || it.get("batch") == "1";
             // The conversation says what the clock cannot: whether this run is
             // quiet because it is thinking or quiet because it asked you
@@ -1094,26 +974,7 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
             let turn = (!blind && silent >= QUIET)
                 .then(|| last_turn(it.get("session")))
                 .flatten();
-            let state = classify_reported(
-                false,
-                if blind { 0 } else { silent },
-                turn,
-                event.map(|e| (e.kind.as_str(), e.ts)),
-                last,
-            );
-            if let Some(event) = event {
-                // Carried on the row so the Quick Look and the control graph
-                // read the same record this state was decided from, rather
-                // than parsing the log again and possibly disagreeing with
-                // what is on screen. `detail` was credential-filtered when it
-                // was written.
-                it.data.insert("event_kind".into(), event.kind.clone());
-                it.data.insert("event_at".into(), event.ts.to_string());
-                it.data.insert("event_task".into(), event.task.clone());
-                if let Some(detail) = event.detail.clone() {
-                    it.data.insert("event_detail".into(), detail);
-                }
-            }
+            let state = classify(false, if blind { 0 } else { silent }, turn);
             let cwd = it.get("cwd").to_string();
             match branches.entry(cwd.clone()).or_insert_with(|| head_of(&cwd)) {
                 Some(Head::Branch(name)) => {
@@ -1160,10 +1021,9 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
 /// value means "nothing says so" and is the caller's to drop — a run outside a
 /// repository has no branch line at all, rather than a line saying it has none.
 ///
-/// The expensive parts are here rather than on the row for a reason: the model
-/// is a bounded read of the session file and the tasks are a directory of
-/// small files, and both are wanted only when somebody is looking at one run.
-/// Gather never calls this.
+/// The expensive part is here rather than on the row for a reason: the model
+/// is a bounded read of the session file, and it is wanted only when somebody
+/// is looking at one run. Gather never calls this.
 pub fn effective_context(run: &Item) -> Vec<(&'static str, String)> {
     let agent = run.get("agent");
     let (skills, mcp) = installed_counts(agent);
@@ -1172,7 +1032,6 @@ pub fn effective_context(run: &Item) -> Vec<(&'static str, String)> {
         ("project", project_label(run)),
         ("branch", branch_label(run).unwrap_or_default()),
         ("session", session_label(run)),
-        ("task", task_label(run)),
         ("state", state_label(run)),
         ("started", started_label(run)),
         ("model", model_of(agent, run.get("session")).unwrap_or_default()),
@@ -1186,13 +1045,7 @@ pub fn effective_context(run: &Item) -> Vec<(&'static str, String)> {
             format!("{skills} skills · {mcp} mcp servers, none loaded unless named above"),
         ),
     ];
-    // A structured event outranks the conversation, so the conversation is
-    // shown only when there is no event — two "last" lines saying different
-    // things is worse than either.
-    match event_label(run) {
-        Some(said) => out.push(("last report", said)),
-        None => out.push(("last said", transcript_tail(run.get("session"), 1).join(" "))),
-    }
+    out.push(("last said", transcript_tail(run.get("session"), 1).join(" ")));
     out
 }
 
@@ -1255,73 +1108,6 @@ fn session_label(run: &Item) -> String {
             if relation.is_empty() { subject } else { format!("{subject} · {relation}") }
         }
     }
-}
-
-/// Open tasks this run is doing, by title.
-///
-/// Read here rather than on the row because it is a directory of small files
-/// and gather has no use for it; `tasks_of` is the one rule for this edge, and
-/// the control graph builds `RunRecord::tasks` through it.
-fn task_label(run: &Item) -> String {
-    let titles: Vec<String> = tasks_of(run.get("run_id"))
-        .into_iter()
-        .map(|task| format!("{} · {}", task.title, task.state.as_str()))
-        .collect();
-    titles.join(" | ")
-}
-
-/// The open tasks attached to a run, newest first. Empty for a run nothing was
-/// opened against, which is most of them.
-///
-/// `open_tasks`, never `all`. A run is a live process, so the only tasks it
-/// can still be doing are open ones — every caller here filters the finished
-/// ones out again anyway — and `all` is O(every task ever created and not yet
-/// swept): 52 ms over a five-thousand-record store, paid by `effective_
-/// context` and therefore by every Quick Look of a running agent. The open
-/// set is bounded by outstanding work instead, and is read through the index
-/// rather than by walking the directory.
-pub fn tasks_of(run_id: &str) -> Vec<crate::task::Task> {
-    tasks_of_in(&crate::task::open_tasks(), run_id)
-}
-
-/// The same edge, for a caller that already holds the open set.
-///
-/// The control graph asks it about every run at once and would otherwise read
-/// the index once per row. It exists so that the *rule* — which tasks belong
-/// to a run, and in what order — is stated in one place and cannot drift:
-/// `control` used to build its own closure over `task::all()`, so a task
-/// marked done stayed on `runs[].tasks` in `control --json` after Quick Look
-/// had dropped it, and the two views of one edge disagreed.
-pub fn tasks_of_in(open: &[crate::task::Task], run_id: &str) -> Vec<crate::task::Task> {
-    if run_id.is_empty() {
-        return Vec::new();
-    }
-    let mut tasks: Vec<crate::task::Task> =
-        open.iter().filter(|task| task.run.as_deref() == Some(run_id)).cloned().collect();
-    tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at));
-    tasks
-}
-
-/// The last thing this run said about itself, as a sentence.
-///
-/// Absent rather than empty when there is no event, because the caller shows
-/// conversation evidence in its place — that is the fallback the evidence
-/// order calls for.
-fn event_label(run: &Item) -> Option<String> {
-    let kind = run.get("event_kind");
-    if kind.is_empty() {
-        return None;
-    }
-    let at: u64 = run.get("event_at").parse().unwrap_or(0);
-    let mut said = kind.to_string();
-    if at > 0 {
-        said.push_str(&format!(" · {} ago", short_dur(now().saturating_sub(at))));
-    }
-    match run.get("event_detail") {
-        "" => {}
-        detail => said.push_str(&format!(" · {detail}")),
-    }
-    Some(said)
 }
 
 /// What the *agent* has, which is a different question from what this run
@@ -1652,103 +1438,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_event_outranks_the_clock_only_while_it_is_the_newest_thing() {
-        // The clock says three hundred seconds of silence, which on its own
-        // reads as waiting. The agent said it was working, after that.
-        assert_eq!(
-            classify_reported(false, 300, Some(Turn::Spoke), Some(("task.progress", 1_000)), Some(900)),
-            State::Working,
-            "a statement beats a clock reading it postdates"
-        );
-        // The same event, older than the last thing the run actually did.
-        assert_eq!(
-            classify_reported(false, 300, Some(Turn::Spoke), Some(("task.progress", 800)), Some(900)),
-            State::Waiting,
-            "an event from before the last append describes a run that has moved on"
-        );
-        // And in the other direction: quiet for four seconds, but it has said
-        // it is blocked on somebody.
-        assert_eq!(
-            classify_reported(false, 4, None, Some(("task.wait", 1_000)), Some(999)),
-            State::Waiting
-        );
-        // A kind that asserts nothing about the process leaves the machine
-        // exactly as it was.
-        assert_eq!(
-            classify_reported(false, 300, None, Some(("task.assign", 5_000)), Some(10)),
-            State::Waiting
-        );
-        assert_eq!(
-            classify_reported(false, 5, None, Some(("something.new", 5_000)), Some(10)),
-            State::Working
-        );
-        // A run with no clock at all — a batch run — can still be spoken for,
-        // but only by something it said just now. There is no reading that
-        // could ever overtake an event here, so age is the only guard there
-        // is: without it the first `task.done` ever recorded against a
-        // `codex exec` pins it at "waiting" until the process exits.
-        assert_eq!(
-            classify_reported(false, 0, None, Some(("task.wait", now())), None),
-            State::Waiting,
-            "a statement made just now speaks for a run nothing can watch"
-        );
-        assert_eq!(
-            classify_reported(false, 0, None, Some(("task.wait", 7)), None),
-            State::Working,
-            "an event from 1970 is not a statement about what a run is doing"
-        );
-        assert_eq!(
-            classify_reported(false, 0, None, Some(("task.done", now() - QUIET - 1)), None),
-            State::Working,
-            "and neither is one that has gone stale"
-        );
-        assert_eq!(classify_reported(false, 0, None, None, None), State::Working);
-        // Nothing outranks a process that is gone.
-        assert_eq!(
-            classify_reported(true, 0, Some(Turn::Acting), Some(("task.progress", 9_000)), Some(1)),
-            State::Dead
-        );
-        // With no event this is `classify`, unchanged.
-        for (silent, turn) in [(0, None), (29, None), (30, None), (9_000, Some(Turn::Acting))] {
-            assert_eq!(
-                classify_reported(false, silent, turn, None, Some(1)),
-                classify(false, silent, turn)
-            );
-        }
-    }
-
-    /// The shape `live_with_sessions` passes for a run nothing can watch: no
-    /// clock, and therefore a silence of zero, because silence means nothing
-    /// about a process writing to a pipe.
-    fn blind_run(event: Option<(&str, u64)>) -> State {
-        classify_reported(false, 0, None, event, None)
-    }
-
-    #[test]
-    fn a_batch_run_is_never_reported_as_stuck_by_an_event_of_any_age() {
-        // `codex exec` and `claude -p` keep no conversation file and hold no
-        // pane. Every one of these kinds says "waiting" when it is fresh, and
-        // none of them may say it from the past — the whole reason the guard
-        // exists is that no clock can ever overtake an event here.
-        for kind in ["task.wait", "task.done", "task.fail", "task.cancel"] {
-            assert_eq!(
-                blind_run(Some((kind, now()))),
-                State::Waiting,
-                "{kind} said just now is a statement"
-            );
-            for stale in [0, 7, now().saturating_sub(QUIET + 1), now().saturating_sub(3_600)] {
-                assert_eq!(
-                    blind_run(Some((kind, stale))),
-                    State::Working,
-                    "{kind} at {stale} is history, and a batch run is not stuck"
-                );
-            }
-        }
-        // And with nothing said at all, silence is not evidence either way.
-        assert_eq!(blind_run(None), State::Working);
-    }
-
-    #[test]
     fn a_model_is_read_only_where_a_native_file_records_one() {
         let scratch = Scratch::new("model");
 
@@ -1866,9 +1555,6 @@ mod tests {
             .put("session_id", "claude:abc")
             .put("session_match", "explicit")
             .put("subject", "milestone five")
-            .put("event_kind", "task.progress")
-            .put("event_at", now().saturating_sub(30).to_string())
-            .put("event_detail", "reading running.rs")
             .fields(["repo", "waiting 4m", "work:1.0", "milestone five"]);
 
         let context = effective_context(&run);
@@ -1881,12 +1567,6 @@ mod tests {
         assert_eq!(value("session"), "milestone five · explicit");
         assert_eq!(value("state"), "waiting 4m", "the silence is part of the state");
         assert_eq!(value("started"), "10m ago");
-        assert!(value("last report").starts_with("task.progress · "));
-        assert!(value("last report").ends_with("reading running.rs"));
-        assert!(
-            context.iter().all(|(label, _)| *label != "last said"),
-            "an event replaces the conversation evidence rather than joining it"
-        );
         assert_eq!(value("model"), "", "no native file, no model line");
 
         // A detached HEAD is labelled, never presented as a branch name.
@@ -1894,50 +1574,9 @@ mod tests {
         assert_eq!(branch_label(&detached).as_deref(), Some("detached at 9f1c2d3"));
         assert_eq!(branch_label(&Item::new("kill 6", Kind::Run)), None);
 
-        // With no event the conversation is the fallback.
+        // The conversation is what a run is judged on when nothing else says
+        // anything, so the line is always there — empty when there is no file.
         let quiet = Item::new("kill 8", Kind::Run).put("agent", "claude").put("run_id", "claude:8:1");
         assert!(effective_context(&quiet).iter().any(|(label, _)| *label == "last said"));
-    }
-
-    #[test]
-    fn the_newest_event_per_run_survives_a_log_far_longer_than_the_window() {
-        use crate::events::{testing, Event, Log};
-        // A directory of this test's own, and a log addressed by path. No
-        // environment variable is touched, so nothing here is racing another
-        // test's `var_os` on another thread.
-        let root = testing::root("running-events");
-        let path = root.path.join("events.jsonl");
-        let log = Log::at(path.clone());
-        assert!(latest_events_in(&path).is_empty(), "no log is not an error");
-
-        for (run, note) in
-            [("claude:1:9", "first"), ("codex:2:9", "another agent"), ("claude:1:9", "newest")]
-        {
-            log.append(&Event::new("task.progress", "t1").run(run).detail(note))
-                .expect("append");
-        }
-        let latest = latest_events_in(&path);
-        assert_eq!(latest.len(), 2, "one record per run, not one per event");
-        assert_eq!(latest["claude:1:9"].detail.as_deref(), Some("newest"));
-        assert_eq!(latest["codex:2:9"].detail.as_deref(), Some("another agent"));
-        // A run nobody has said anything about has no record, and never
-        // borrows a neighbour's: this map is the only per-run lookup there
-        // is, so the isolation the events module used to prove separately is
-        // proved here, on the path that actually runs.
-        assert!(!latest.contains_key("claude:9:9"), "an unknown run has said nothing");
-        assert!(!latest.contains_key(""), "and neither has an empty run id");
-
-        // Push the whole conversation past the window this reads, then say
-        // one more thing. Gather wants the newest, and the newest is always
-        // at the end of an append-only file.
-        while std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) < EVENT_TAIL_BYTES * 2 {
-            log.append(&Event::new("task.progress", "t2").run("pi:3:9").detail("busy"))
-                .expect("append");
-        }
-        log.append(&Event::new("task.wait", "t1").run("claude:1:9").detail("your turn"))
-            .expect("append");
-        let latest = latest_events_in(&path);
-        assert_eq!(latest["claude:1:9"].kind, "task.wait");
-        assert_eq!(latest["claude:1:9"].detail.as_deref(), Some("your turn"));
     }
 }

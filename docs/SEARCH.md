@@ -5,82 +5,36 @@ the same list.
 
 ## Empty query: agent home
 
-The home is what is *outstanding*, not an inventory. The empty-query feed
-contains:
+The home is the agent inventory: the things this launcher exists to manage,
+on one screen, because looking at it *is* how you manage it.
 
 - questions waiting for a person (`Msg`)
-- open tasks (`Task`)
-- running agents (`Run`)
 - installed agents, as launch entries (`Agent`)
-- exceptions: an MCP server that cannot account for itself, and a Skill whose
-  copies have diverged or whose tree has a broken or escaping symlink or an
-  unreadable file
+- running agents (`Run`)
+- their skills (`Skill`) and MCP servers (`Mcp`)
+- the conversations you have had with them (`Session`)
 
-History, files, applications, `$PATH`, sessions and machine objects are still
-gathered at startup, but are not rendered into the home feed. Nor is healthy
-inventory: a skill that is fine is a keystroke away through `/name`, `a:` and
-ordinary search, a server that answers through `mcp:`, `a:` and ordinary
-search, and forty of them in front of three running agents is a list nobody
-reads.
+History, files, applications, `$PATH`, clipboard and machine objects are still
+gathered at startup, but are not rendered into the home feed — that is what
+stops the first screen being a list of two thousand files.
 
-A row is dropped when it *accounts for itself*, which is not the same as
-answering:
+This was briefly an attention list instead, where healthy Skills and servers
+were pushed behind `/name` and `mcp:` so that only exceptions reached the home.
+It reads well as a principle and was wrong in practice: a launcher you open to
+see what you have is not improved by hiding what you have, and the panel went
+quiet exactly when nothing was broken, which is most of the time.
 
-| Kind | Dropped | Shown |
-|---|---|---|
-| `Mcp` | `health` is `ok` or `disabled` | `failed`, `auth`, `unknown`, an unrecognised word, or no `health` field at all |
-| `Skill` | `integrity` is `single`, `identical`, `unknown` or `private-unknown`, **and** no copy has a broken or escaping symlink or an unreadable file | `divergent`, any of those tree faults, or no `integrity` field at all |
-
-`disabled` is somebody's decision, and `prelude doctor mcp` says so — it
-records a note rather than an issue and reports the server `ok`. A permanent
-home row for it would be Prelude contradicting its own diagnostic for ever.
-What stays is the server that can say neither.
-
-`unknown` integrity means at least one copy has no fingerprint, so nothing can
-be said about whether they match. In the launcher the usual cause is that the
-background `skill-hashes` source has not reached that copy yet, which is true
-of every skill on a machine's first launch; the other cause, a tree that could
-not be read, is caught directly by the `unreadable` count rather than through
-the word. `doctor skills` words the state identically and names the cause it
-can be sure of: it hashes as it reports, so a missing fingerprint there is
-always a copy that could not be read.
+Sessions are the one kind counted rather than filtered. There are hundreds of
+them, so `gather` puts only the newest `sessions::IN_MAIN_LIST` in the list at
+all and `s:` owns the rest.
 
 ### Home order
 
-Home rows are ordered by what is outstanding rather than by kind. The plan
-names seven slots; `home_rank` inserts two more, so the full order is:
-
-1. explicit unanswered human questions
-2. failed tasks
-3. completed tasks awaiting review
-4. waiting agents
-   - tasks that reported themselves waiting
-5. working agents
-   - tasks that reported themselves working
-6. queued tasks, and anything terminal that is not a failure
-7. agent launch entries, then inventory exceptions
-
-A task that reported itself waiting or working sits beside its agent-state
-counterpart, because a task saying it is blocked and a run that has gone quiet
-are the same fact reported two ways — below it rather than above, because the
-machine's own reading of a run outranks a claim the task made about itself
-some time ago.
-
-This is deliberately *not* `cache::by_rank`. That comparison settles the kind
-band before it looks at any score, which is what stops learned ranking lifting
-one kind over another in search. The home interleaves two kinds by state — a
-failed task above the waiting runs, a queued one below the working ones — and
-those two orderings point in opposite directions, so no single band per kind
-can express both. `home_rank` is that order, applied in `home_items` after the
-general list is built; the sort is stable, so within one slot the source's own
-ranking and frecency still decide.
-
-A completed task stays in slot 3 until it is acknowledged, and acknowledgement
-is an explicit act that removes it from the home's source — never inferred
-from the row having been looked at. Focus and Quick Look move across rows
-without a decision being made, and a task is routinely opened while it is
-still running, so "opening acknowledges it" would silently drop the completion
-notice the slot exists to show.
+`cache::by_rank`, exactly as everywhere else: the kind band decides and
+frecency orders within it. A question blocking somebody leads, then the
+agents, what they are running, Skills, MCP, and the recent conversations
+underneath. `home_items` is a filter and nothing more — it leaves the order it
+was handed alone — because one ordering rule for the launcher was enough.
 
 ## Ordinary query: root commands
 
@@ -102,7 +56,7 @@ row whose displayed text does not contain `c:`.
 
 | Prefix | Contents |
 |---|---|
-| `a:` | agents, open tasks, running agents, skills, MCP and agent config |
+| `a:` | agents, running agents, skills, MCP and agent config |
 | `r:` | running agents, classified live |
 | `s:` | all conversation sessions |
 | `f:` | current-project files and the indexed roots |
@@ -138,21 +92,14 @@ is their scope.
 
 Agent sessions intentionally do not appear under `a:`. Hundreds of old
 conversations turned the agent overview into a session browser; `s:` already
-has that job. Open tasks do appear there, and have no scope of their own:
-they are bounded by outstanding work rather than by everything ever done, so
-they cannot swamp the control scope the way conversations did, and `a:waiting`
-and `a:failed` already ask the task-shaped questions inside the scope that
-owns the control plane. A `t:` prefix would be a second door onto the same
-handful of rows, at the cost of a permanent root-command row and a prefix
-nothing else can use.
+has that job.
 
 Control filters are explicit words inside `a:`:
 
 | Query | Meaning |
 |---|---|
-| `a:waiting` | anything waiting — a run gone quiet, a task that said so, a question blocked on you |
-| `a:failed` | failed tasks |
-| `a:queued`, `a:working`, `a:done`, `a:cancelled` | the rest of the `task::State` vocabulary |
+| `a:waiting` | anything waiting — a run gone quiet, or a question blocked on you |
+| `a:working`, `a:dead` | the rest of a Run's own state vocabulary |
 | `a:claude Prelude` | an agent name and a project together |
 | `a:agent:claude`, `a:project:Prelude` | the exact forms; a project is never widened into a substring |
 | `a:using deploy` | runs that explicitly loaded that Skill or MCP server |
@@ -176,7 +123,7 @@ this; an MCP server's name is whatever its owner called it, and several of the
 common ones have spaces.
 
 `project:` reads all three places a project is written down: the `project`
-field a Run or Task carries, its working directory, and the `projects` array
+field a Run carries, its working directory, and the `projects` array
 an Agent carries one entry of per live run. Reading only the first two hid the
 agent working in the very project asked about while listing its run.
 
@@ -221,14 +168,7 @@ resolve back to their target kind.
 
 ## Implementation constraints
 
-- `cache::gather` still runs once, within the 40 ms budget. The Task source
-  reads `task::home_tasks`, which is bounded by outstanding work rather than
-  by everything ever done: 0.07 ms for a real store, 0.9 ms for fifty open
-  tasks among five thousand records. Reading that same store whole is 54 ms,
-  which is why nothing on this path calls `task::all`. Nor does it call
-  `task::open_tasks`, which is the reader that *may* walk the directory: that
-  one is for `task list`, `task show` and `doctor`, where a complete answer is
-  worth a scan and there is no per-keystroke budget to blow.
+- `cache::gather` still runs once, within the 40 ms budget.
 - `ui::search` renders `home.txt` and the root-command `list.txt` with one
   shared layout, and stores the complete gathered items as JSON for scopes.
 - Per-keystroke helpers read those files; they do not gather sources again.

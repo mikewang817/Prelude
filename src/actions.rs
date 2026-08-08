@@ -133,39 +133,8 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
             .into_iter()
             .map(|(agent, dir)| (format!("rm:{agent}"), agent, crate::paths::tilde(&dir)))
             .collect(),
-        // Who a task can be handed to: whoever is running right now.
-        "handoff" => handoff_targets(&crate::sources::running::live(), it),
         _ => Vec::new(),
     }
-}
-
-/// The live runs a task can be handed over to, as `apply` ids.
-///
-/// A separate function from `agent_options` so the rule can be tested against
-/// a fleet rather than against whatever this machine happens to be running.
-///
-/// The id carries the *address*, not the agent name. `bus::handoff` refuses
-/// anything but exactly one resolved recipient — two claudes in two projects
-/// are two different targets, and handing work to "claude" when there are two
-/// of them is the ambiguity that rule exists to stop. A pane address is
-/// unique; a bare pid is what `bus::resolve` matches when there is no pane.
-/// And the run already doing this task is not a handoff.
-pub fn handoff_targets(runs: &[Item], it: &Item) -> Vec<(String, String, String)> {
-    runs.iter()
-        .filter(|run| run.get("run_id") != it.get("run_id") || it.get("run_id").is_empty())
-        .filter_map(|run| {
-            let address = match (run.get("pane"), run.get("pid")) {
-                ("", "") => return None,
-                ("", pid) => pid.to_string(),
-                (pane, _) => pane.to_string(),
-            };
-            Some((
-                format!("handoff:{address}"),
-                format!("{} · {}", run.get("agent"), run.get("project")),
-                run.get("addr").to_string(),
-            ))
-        })
-        .collect()
 }
 
 /// Add a verb to the panel: as one row when there is a choice to make, or as
@@ -323,62 +292,6 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
                 v.push(a("zoom", "Go to agent full-screen", it.get("pane")));
             }
             v.push(a("copy", "Copy question", ""));
-            v
-        }
-        // A task in someone else's conversation is a reference, not a
-        // workflow. Marking work done or cancelling it out of an agent's
-        // input box would be the launcher acting on the person's behalf in a
-        // window they are only passing through; what is actually wanted here
-        // is to *mention* it — the id, or enough of the record for the agent
-        // to know what is being talked about.
-        Kind::Task if host == crate::defaults::Host::Agent => {
-            let mut v = vec![a("task-context", "Insert its context", "one line the agent can act on")];
-            v.push(a("details", "Show its record locally", it.get("state")));
-            v.push(a("copy", "Copy task id", it.get("task_id")));
-            v
-        }
-        // The work itself. Enter shows the record, or goes to whoever is
-        // doing it; everything that *changes* the task is here, and the one
-        // that ends it is last and red.
-        Kind::Task => {
-            let finished = matches!(it.get("state"), "done" | "failed" | "cancelled");
-            let mut v = Vec::new();
-            if !finished {
-                // The verb is the decision and the recipient is a parameter
-                // of it, so many agents collapse into a submenu.
-                with_options(&mut v, it, "handoff", "Hand off to {}", "Hand off to…",
-                             "keeps the id, the title and the history");
-                v.push(a("task-done", "Mark it done…", "with a result, if there is one"));
-            } else {
-                // A finished task is on the home because nobody has said they
-                // have seen it, so the first thing to offer is saying so.
-                // Nothing is lost by it — the record, its result and its whole
-                // event trail stay exactly where they were, and `task show`
-                // and `task list --all` still find it. It is not destructive
-                // and does not ask, because there is nothing to take back.
-                //
-                // Done and Failed only. `task::awaiting_review` deliberately
-                // excludes Cancelled — cancelling *is* the decision, taken
-                // from a panel that asked first — so a cancelled task never
-                // asked for anything, and "stops it asking" against one was an
-                // offer to silence a question nobody had been asked.
-                if matches!(it.get("state"), "done" | "failed") {
-                    v.push(a("task-ack", "Dismiss it", "keeps the record · stops it asking"));
-                }
-                // `task::retry` refuses a live task outright — retrying one
-                // that is still running is two agents on one job — so it is
-                // offered exactly where it works rather than offered and
-                // then explained away.
-                v.push(a("task-retry", "Try it again", "a new task, with an edge back to this one"));
-            }
-            if !it.get("pane").is_empty() {
-                v.push(a("zoom", "Go to its pane full-screen", it.get("addr")));
-            }
-            v.push(a("task-history", "Show its event history", "what was said about it, in order"));
-            v.push(a("copy", "Copy task id", it.get("task_id")));
-            if !finished {
-                v.push(a("task-cancel", "Cancel it…", "stops the work · retry opens a new task"));
-            }
             v
         }
         Kind::Config => open_actions(it.kind, it.get("path"), &editor),
@@ -715,7 +628,6 @@ pub fn is_destructive(kind: Kind, id: &str) -> bool {
     matches!(
         id,
         "killrun" | "stop" | "trash" | "session-trash" | "mcpremove" | "quicklink-remove"
-            | "task-cancel"
     )
         || id.starts_with("rm:")
         || id.starts_with("sync:")
@@ -727,13 +639,6 @@ pub fn is_destructive(kind: Kind, id: &str) -> bool {
 pub fn needs_confirming(kind: Kind, id: &str) -> Option<(&'static str, &'static str)> {
     match id {
         "killrun" => Some(("End it", "the conversation in it is lost")),
-        // Red *and* confirmed, though `retry` exists. Retry is not an undo:
-        // it opens a *new* task with a new id, and everything already
-        // pointing at this one — a message's `--task`, another task's
-        // `--needs`, the event trail — stays pointed at a cancelled record.
-        // It is also the only action here that stops work an agent may be
-        // doing right now, from a fuzzy list, on one keystroke.
-        "task-cancel" => Some(("Cancel it", "retry opens a new task; this id stays cancelled")),
         "run" if matches!(kind, Kind::Port | Kind::Proc) => {
             Some(("Kill it", "the process does not come back"))
         }
@@ -985,7 +890,7 @@ fn stays_in_panel(id: &str) -> bool {
     matches!(
         id,
         "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcp-tools"
-            | "mcpcompare" | "task-history"
+            | "mcpcompare"
     ) || id.starts_with("diff:")
 }
 
@@ -1294,106 +1199,6 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         _ if id.starts_with("run:") => {
             let agent = &id[4..];
             ui::emit("RUN", &format!("{agent} {}", shq(&it.cmd)), paste);
-        }
-        // Everything a task offers, in one place. `task::*` returns a
-        // `Result` and prints nothing, so each of these says what happened
-        // through `ui::note` rather than through a stdout the widget is
-        // reading as its own protocol.
-        "task-done" => {
-            let Some(result) = ui::prompt_line(" result (optional) ") else { return 130 };
-            match crate::task::done(it.get("task_id"), &result) {
-                Ok(task) => ui::note(&format!("task {} done", task.id), paste),
-                Err(e) => { ui::note(&e, paste); return 2; }
-            }
-        }
-        // Already confirmed above, by `needs_confirming`, with Cancel first.
-        "task-cancel" => match crate::task::cancel(it.get("task_id"), "") {
-            Ok(task) => ui::note(&format!("task {} cancelled", task.id), paste),
-            Err(e) => { ui::note(&e, paste); return 2; }
-        },
-        // Idempotent in the store, so a row that went stale in somebody's
-        // terminal cannot do anything worse than agree with itself.
-        "task-ack" => match crate::task::ack(it.get("task_id")) {
-            Ok(task) => ui::note(&format!("task {} dismissed — the record stays", task.id), paste),
-            Err(e) => { ui::note(&e, paste); return 2; }
-        },
-        "task-retry" => match crate::task::retry(it.get("task_id")) {
-            Ok(task) => ui::note(&format!("opened {} — a fresh attempt, queued", task.id), paste),
-            Err(e) => { ui::note(&e, paste); return 2; }
-        },
-        "task-history" => {
-            let id = it.get("task_id");
-            let lines: Vec<String> = crate::events::for_task(id)
-                .into_iter()
-                .map(|event| {
-                    let detail = event.detail.unwrap_or_default();
-                    format!(
-                        "{} {}{}",
-                        crate::width::pad_to(&crate::sources::user::ago(event.ts as f64), 12, false),
-                        event.kind,
-                        if detail.is_empty() { String::new() } else { format!("  {detail}") },
-                    )
-                })
-                .collect();
-            let lines = if lines.is_empty() {
-                vec!["nothing has been said about this task yet".to_string()]
-            } else {
-                lines
-            };
-            return crate::runhere::show_text(&format!("task {id} · {}", it.title), &lines);
-        }
-        // Enough for the agent to know which piece of work is meant, and
-        // nothing it would have to be told twice. Never the cwd of a task
-        // that has none, and never a result that was redacted into a marker.
-        "task-context" => {
-            let context = match crate::task::get(it.get("task_id")) {
-                Some(task) => {
-                    let mut line = format!(
-                        "task {} · {} — {}",
-                        task.id,
-                        task.state.as_str(),
-                        task.title
-                    );
-                    for (label, value) in [
-                        ("agent", task.agent.as_str()),
-                        ("project", task.project.as_str()),
-                        ("result", task.result.as_deref().unwrap_or_default()),
-                        ("reason", task.reason.as_deref().unwrap_or_default()),
-                    ] {
-                        if !value.is_empty() {
-                            line.push_str(&format!(" · {label}: {value}"));
-                        }
-                    }
-                    line
-                }
-                None => format!("task {} · {}", it.get("task_id"), it.title),
-            };
-            ui::emit("INSERT", &crate::width::flatten(&context), paste);
-        }
-        // Handing work over types into somebody else's conversation and
-        // presses Enter for them, so it runs through the same window
-        // `askagent:` uses: the answer is the point, and its stdout must not
-        // reach the shell widget as protocol.
-        _ if id.starts_with("handoff:") => {
-            let target = &id[8..];
-            let task_id = it.get("task_id");
-            if task_id.is_empty() {
-                ui::note("that row carries no task id", paste);
-                return 2;
-            }
-            let Some(note) = ui::prompt_line(" note for them (optional) ") else { return 130 };
-            let me = std::env::current_exe().unwrap_or_default();
-            let mut cmd = format!(
-                "{} handoff {} {}",
-                shq(&me.to_string_lossy()),
-                shq(target),
-                shq(task_id)
-            );
-            if !note.trim().is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&shq(note.trim()));
-            }
-            return crate::runhere::run_cmd(&cmd);
         }
         // A skill merged across four agents is four directories, and an
         // "open all" that quietly opened the first would look like a failure.
@@ -1778,8 +1583,6 @@ fn copy_text(it: &Item) -> String {
         Kind::Mcp => it.get("name"),
         Kind::Link => it.get("url"),
         Kind::File | Kind::Find | Kind::App => it.get("path"),
-        // The id, never the title: it is what every other verb takes.
-        Kind::Task => it.get("task_id"),
         _ => "",
     };
     if by_kind.is_empty() { it.cmd.clone() } else { by_kind.to_string() }

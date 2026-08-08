@@ -787,7 +787,7 @@ struct ScopeDef {
 }
 
 const SCOPES: &[ScopeDef] = &[
-    ScopeDef { scope: Scope::Agent, prefix: "a:", title: "Agent Control Center", desc: "agents, tasks, skills, MCP and config" },
+    ScopeDef { scope: Scope::Agent, prefix: "a:", title: "Agent Control Center", desc: "agents, runs, skills, MCP and config" },
     ScopeDef { scope: Scope::Running, prefix: "r:", title: "Running Agents", desc: "working and waiting now" },
     ScopeDef { scope: Scope::Sessions, prefix: "s:", title: "Past Conversations", desc: "all agent sessions" },
     ScopeDef { scope: Scope::Files, prefix: "f:", title: "Search Files", desc: "project and indexed roots" },
@@ -878,130 +878,38 @@ fn agent_prompt_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
 
 // ─── the agent home ──────────────────────────────────────────────────────
 
-/// Is this a row the empty query shows at all?
+/// The empty query: the things this launcher exists to manage.
 ///
-/// The home is what is *outstanding*, not an inventory. A skill that is fine
-/// and an MCP server that answers are things you own; a skill is a keystroke
-/// away through `/name`, `a:` and ordinary search, a server through `mcp:`,
-/// `a:` and ordinary search, and forty of them in front of three running
-/// agents is a list nobody reads. What stays is work — questions, tasks, runs
-/// — plus the agents you start them with, and the exceptions: a server that is
-/// not answering, a skill whose copies have drifted apart or whose tree is
-/// broken.
+/// Agents, what they are running, their Skills, their MCP servers and the
+/// conversations you have had with them — the inventory, on one screen,
+/// because looking at it *is* how you manage it.
 ///
-/// A row is dropped when it *accounts for itself*, which is not the same as
-/// answering. `ok` is a server that answers and `disabled` is one its owner
-/// turned off on purpose — `doctor mcp` calls that "not a fault" and records
-/// no issue for it, so a permanent home row saying otherwise would be Prelude
-/// contradicting its own diagnostic about a decision somebody made. What stays
-/// is the server that cannot say either: `failed`, `auth`, `unknown`, and any
-/// word this vocabulary does not know — the failure to avoid there is a
-/// missing row.
-fn on_home(it: &Item) -> bool {
-    match it.kind {
-        Kind::Msg | Kind::Task | Kind::Agent | Kind::Run => true,
-        Kind::Mcp => !matches!(it.get("health"), "ok" | "disabled"),
-        Kind::Skill => !skill_is_sound(it),
-        _ => false,
-    }
-}
-
-/// A Skill nobody needs to be told about.
+/// This was briefly an attention list instead: healthy Skills and servers were
+/// pushed into `/name` and `mcp:` so that only exceptions — a server that had
+/// stopped answering, a skill whose copies had drifted — reached the home. It
+/// reads well as a principle and was wrong in practice. A launcher you open to
+/// see what you have is not improved by hiding what you have; the panel went
+/// quiet exactly when nothing was broken, which is most of the time.
 ///
-/// `divergent` is the loud one: four agents hold copies of one skill and they
-/// no longer agree, so which of them runs it decides what happens. The rest
-/// are faults in the tree itself — a symlink with no target, a symlink
-/// pointing outside the skill, a file that cannot be read — each of which
-/// makes a skill that installs cleanly and fails where it is used.
+/// Ordering is `cache::by_rank` like everywhere else, so the bands do the work:
+/// a question that is blocking somebody, then agents, what they are running,
+/// Skills, MCP, and the recent conversations underneath. There is deliberately
+/// no second ordering rule for this one screen — one of those was enough.
 ///
-/// `unknown` is deliberately *not* an exception, and `doctor skills` words it
-/// the same way: **at least one copy has no fingerprint, so nothing can be
-/// said about whether they match**. Two things produce that, and they are
-/// worth separating. In the launcher the usual one is that the background
-/// `skill-hashes` source has not reached that copy yet, which is true of every
-/// skill on a machine's first launch; treating it as a fault would put the
-/// whole inventory back on the home under a different name. The other is a
-/// tree that could not be read — and that is caught directly below by
-/// `unreadable`, rather than through the word, so nothing is lost by letting
-/// `unknown` pass.
-///
-/// A row carrying no `integrity` field at all is a different thing again:
-/// nothing computed it, so nothing has been claimed, and it is shown.
-fn skill_is_sound(it: &Item) -> bool {
-    let integrity = it.get("integrity");
-    if integrity.is_empty() || integrity == "divergent" {
-        return false;
-    }
-    !crate::capability::copies(it).iter().any(|copy| {
-        !copy.broken_links.is_empty() || !copy.escaping_links.is_empty() || copy.unreadable > 0
-    })
-}
-
-/// Where a row sits on the empty-query home.
-///
-/// **This is not `cache::by_rank`, and the two must not be made to agree.**
-/// `by_rank` answers the search question — *what kind of thing is this* — and
-/// comparing the band before the score is what stops a frecency bonus lifting
-/// a config file over a skill. The home asks a different question: *what is
-/// outstanding*. Its answer interleaves two kinds by their state — a failed
-/// Task leads the waiting Runs, a queued Task falls below the working ones —
-/// and those two orderings point in opposite directions, so no single band
-/// per kind can express them. Changing `by_rank` or a `Kind::priority` to
-/// match this would reorder every search result in the launcher to fix one
-/// screen; changing this to match those would lose the interleaving that is
-/// the whole point of the home.
-///
-/// The seven numbered slots are the plan's, in its words. Two Task states it
-/// does not name sit beside their agent-state counterparts, because a task
-/// that says it is blocked and a run that has gone quiet are the same fact
-/// reported two ways. Inventory exceptions come last: they are a standing
-/// problem rather than something waiting on you this minute.
-///
-/// Higher first, and the sort is stable — so within one slot the source's own
-/// ranking and frecency still decide, exactly as they do everywhere else.
-fn home_rank(it: &Item) -> i64 {
-    let state = it.get("state");
-    match it.kind {
-        // 1. Explicit unanswered human questions.
-        Kind::Msg => 700,
-        Kind::Task => match state {
-            // 2. Failed / abnormally exited agent tasks.
-            "failed" => 690,
-            // 3. Completed tasks awaiting review. A `done` task the home is
-            //    still being handed is by construction one nobody has
-            //    finished with: acknowledgement is an explicit act that takes
-            //    it out of the source, and is never inferred here from the
-            //    row having been looked at. Focus and Quick Look cross rows
-            //    without any decision being made, and a task is routinely
-            //    opened while it is still running — so "opening it counts"
-            //    would silently drop the completion notice this slot exists
-            //    to show.
-            "done" => 680,
-            // A task that reported itself blocked, next to the waiting runs.
-            "waiting" => 640,
-            // …and one reporting progress, next to the working ones.
-            "working" => 620,
-            // 6. Queued tasks, and anything terminal that is not a failure.
-            _ => 600,
-        },
-        Kind::Run => match state {
-            // 4. Waiting agents.
-            "waiting" => 650,
-            // 5. Working agents.
-            "working" => 630,
-            _ => 610,
-        },
-        // 7. Agent launch entries.
-        Kind::Agent => 500,
-        // Broken MCP and divergent or faulty Skill exceptions.
-        _ => 400,
-    }
-}
-
+/// Sessions are the exception that has to be counted rather than filtered:
+/// there are hundreds of them, `gather` puts only the newest
+/// `sessions::IN_MAIN_LIST` in the list at all, and `s:` owns the rest.
 pub fn home_items(items: &[Item]) -> Vec<Item> {
-    let mut rows: Vec<Item> = items.iter().filter(|it| on_home(it)).cloned().collect();
-    rows.sort_by_key(|it| std::cmp::Reverse(home_rank(it)));
-    rows
+    items
+        .iter()
+        .filter(|it| {
+            matches!(
+                it.kind,
+                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Session
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 /// What an ordinary root query may fuzzy-match. Large and private sources
@@ -1009,18 +917,15 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
 /// and `f:` opens that scope. Fixed Quicklinks remain root commands even when
 /// their target happens to be a file or application.
 ///
-/// Healthy skills and MCP servers are here even though the home no longer
-/// shows them — this is the layer a typed query searches, and "not on the
-/// first screen" was never meant to be "not findable". Open tasks are here
-/// for the same reason: a task is named after the work, so the name is what
-/// somebody types looking for it.
+/// Sessions are the one kind held back: there are hundreds of them and `s:`
+/// owns them, on the same rule the home follows.
 pub fn root_items(items: &[Item]) -> Vec<Item> {
     items
         .iter()
         .filter(|it| {
             matches!(
                 it.kind,
-                Kind::Msg | Kind::Task | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search
+                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search
             ) || !it.get("quicklink").is_empty()
         })
         .cloned()
@@ -1045,8 +950,8 @@ pub fn root_items(items: &[Item]) -> Vec<Item> {
 ///   *none* of the named capabilities.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentFilters {
-    /// `waiting`, `failed`, `queued`, `working`, `done`, `cancelled` — the
-    /// `task::State` vocabulary, which a Run's own state words fit inside.
+    /// `waiting`, `working`, `dead` — a Run's own vocabulary, which is the
+    /// only kind on this scope that has a state at all.
     pub states: Vec<String>,
     /// `agent:claude`. Exact, never widened.
     pub agents: Vec<String>,
@@ -1112,11 +1017,11 @@ pub fn parse_agent_filters(term: &str) -> (AgentFilters, Vec<String>) {
         }
         let Some((key, value)) = word.split_once(':') else {
             // A state word is a state filter. The vocabulary is small, fixed
-            // and owned by `task::State`, so `a:waiting` cannot drift from
-            // what a Task can actually be.
-            match crate::task::State::from_str(&word) {
-                Some(state) => filters.states.push(state.as_str().to_string()),
-                None => needles.push(word),
+            // and owned by `running::State`, so `a:waiting` cannot drift from
+            // what a Run can actually be.
+            match is_run_state(&word) {
+                true => filters.states.push(word),
+                false => needles.push(word),
             }
             continue;
         };
@@ -1125,9 +1030,7 @@ pub fn parse_agent_filters(term: &str) -> (AgentFilters, Vec<String>) {
             "project" if !value.is_empty() => filters.projects.push(value.to_string()),
             "using" if !value.is_empty() => filters.using.push(value.to_string()),
             "without" if !value.is_empty() => filters.without.push(value.to_string()),
-            "state" if crate::task::State::from_str(value).is_some() => {
-                filters.states.push(value.to_string())
-            }
+            "state" if is_run_state(value) => filters.states.push(value.to_string()),
             "agent" | "project" | "using" | "without" | "state" => filters.unknown.push(word),
             // `a:` shares its box with paths and other prefixes, so anything
             // else containing a colon is an ordinary search word.
@@ -1137,13 +1040,21 @@ pub fn parse_agent_filters(term: &str) -> (AgentFilters, Vec<String>) {
     (filters, needles)
 }
 
-/// The one state word for a row, across both kinds that have one.
+/// The words a `a:` state filter knows, which are a Run's own three.
 ///
-/// A Run says `working`, `waiting` or `dead`; a Task says any of the six it
-/// can be in. A question carries no state field because being one *is* its
-/// state — it is explicitly blocked on a person, which is the plainest
-/// waiting in the building, and `a:waiting` that omitted it would be
-/// answering the wrong question.
+/// Small, fixed, and stated once: a filter that accepts a word nothing can
+/// ever be answers every query with an empty list and looks like a bug in the
+/// data rather than in the query.
+fn is_run_state(word: &str) -> bool {
+    matches!(word, "working" | "waiting" | "dead")
+}
+
+/// The one state word for a row, across the kinds that have one.
+///
+/// A Run says `working`, `waiting` or `dead`. A question carries no state
+/// field because being one *is* its state — it is explicitly blocked on a
+/// person, which is the plainest waiting in the building, and `a:waiting`
+/// that omitted it would be answering the wrong question.
 fn control_state(it: &Item) -> &str {
     match it.kind {
         Kind::Msg => "waiting",
@@ -1168,8 +1079,8 @@ fn run_loaded(it: &Item, want: &str) -> bool {
 /// rule, for the same reason: `project:app` quietly including every project
 /// whose path contains "app" is a filter pretending to be an answer.
 ///
-/// Three fields, because one row shape has no `project` of its own. A Run and
-/// a Task each sit in exactly one directory; an Agent is in as many as it has
+/// Three fields, because one row shape has no `project` of its own. A Run
+/// sits in exactly one directory; an Agent is in as many as it has
 /// runs, and `agents.rs` writes them as the JSON array `projects`. Reading
 /// only the singular fields made `a:project:Prelude` hide the very agent
 /// working in Prelude while listing its run — a filter that answers half the
@@ -1283,7 +1194,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         let (filters, needles) = parse_agent_filters(term);
         return static_items
             .iter()
-            .filter(|it| matches!(it.kind, Msg | Task | Agent | Run | Skill | Mcp | Config))
+            .filter(|it| matches!(it.kind, Msg | Agent | Run | Skill | Mcp | Config))
             .filter(|it| matches_agent_filters(it, &filters, &needles))
             .take(200)
             .cloned()
@@ -1596,17 +1507,6 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
 mod tests {
     use super::*;
 
-    /// Shaped like `task::items_as`: the project, state and agent are on the
-    /// row as fields, which is what an ordinary needle searches.
-    fn task(state: &str, title: &str) -> Item {
-        Item::new(format!("prelude task show {title}"), Kind::Task)
-            .title(title)
-            .fields(["Prelude".to_string(), format!("{state} · 2m"), "claude".to_string()])
-            .put("state", state)
-            .put("agent", "claude")
-            .put("project", "Prelude")
-    }
-
     fn run(state: &str, project: &str) -> Item {
         Item::new(format!("kill {state}{project}"), Kind::Run)
             .title("claude")
@@ -1616,107 +1516,44 @@ mod tests {
             .put("project", project)
     }
 
-    /// The plan's seven, in the plan's order, with one row of each.
-    ///
-    /// It interleaves two kinds — failed Task above waiting Run above queued
-    /// Task — which is exactly what `cache::by_rank` cannot say, and is why
-    /// the home has an ordering of its own.
+    /// The empty query is the inventory: the agents, what they are running,
+    /// their capabilities and the conversations you have had — plus a question
+    /// that is blocking somebody. Everything else on the machine is behind a
+    /// query, which is what stops the home being a list of two thousand files.
     #[test]
-    fn the_home_is_ordered_by_what_is_outstanding() {
+    fn the_home_is_the_agent_inventory_and_nothing_else() {
         let rows = vec![
             Item::new("agent", Kind::Agent).title("claude"),
-            task("queued", "reindex"),
             run("working", "api"),
-            run("waiting", "Prelude"),
-            task("done", "migrate"),
-            task("failed", "deploy"),
-            Item::new("ask", Kind::Msg).title("claude asks"),
-        ];
-        let order: Vec<String> =
-            home_items(&rows).into_iter().map(|it| format!("{:?}:{}", it.kind, it.title)).collect();
-        assert_eq!(
-            order,
-            [
-                "Msg:claude asks",     // 1. unanswered human questions
-                "Task:deploy",         // 2. failed tasks
-                "Task:migrate",        // 3. completed tasks awaiting review
-                "Run:claude",          // 4. waiting agents
-                "Run:claude",          // 5. working agents
-                "Task:reindex",        // 6. queued tasks
-                "Agent:claude",        // 7. agent launch entries
-            ]
-        );
-        // The two Run rows are indistinguishable by title; check the states
-        // landed the right way round.
-        let states: Vec<String> =
-            home_items(&rows).iter().map(|it| it.get("state").to_string()).collect();
-        assert_eq!(states[3], "waiting");
-        assert_eq!(states[4], "working");
-
-        // The states the plan does not name sit beside their counterparts,
-        // and never below a queued task.
-        let mixed = vec![task("queued", "q"), task("waiting", "w"), task("working", "k")];
-        let titles: Vec<String> = home_items(&mixed).into_iter().map(|it| it.title).collect();
-        assert_eq!(titles, ["w", "k", "q"]);
-    }
-
-    /// Ordering inside one slot is still the source's and frecency's, because
-    /// the sort is stable — the property `cache::by_rank` relies on too.
-    #[test]
-    fn the_home_does_not_reorder_within_a_slot() {
-        let rows = vec![run("waiting", "first"), run("waiting", "second")];
-        let projects: Vec<String> =
-            home_items(&rows).iter().map(|it| it.get("project").to_string()).collect();
-        assert_eq!(projects, ["first", "second"]);
-    }
-
-    #[test]
-    fn healthy_inventory_leaves_the_home_and_exceptions_stay() {
-        let copies = |json: &str| {
-            Item::new("/broken", Kind::Skill).title("broken").put("integrity", "identical").put("copy_info", json)
-        };
-        let rows = vec![
-            Item::new("codex mcp get ok", Kind::Mcp).title("node_repl").put("health", "ok"),
-            Item::new("claude mcp get bad", Kind::Mcp).title("gmail").put("health", "failed"),
-            Item::new("/fine", Kind::Skill).title("fine").put("integrity", "identical"),
-            Item::new("/new", Kind::Skill).title("new").put("integrity", "unknown"),
-            Item::new("/drift", Kind::Skill).title("drift").put("integrity", "divergent"),
-            copies(r#"[{"agent":"claude","dir":"/s/broken","broken_links":["ref.md"]}]"#),
+            Item::new("/deploy", Kind::Skill).title("deploy"),
+            Item::new("codex mcp get n", Kind::Mcp).title("node_repl"),
             Item::new("old", Kind::Session).title("old"),
+            Item::new("ask", Kind::Msg).title("claude asks"),
             Item::new("cargo", Kind::Path).title("cargo"),
+            Item::new("copied", Kind::Clip).title("copied"),
+            Item::new("git status", Kind::History).title("git status"),
         ];
         let shown: Vec<String> = home_items(&rows).into_iter().map(|it| it.title).collect();
-        assert_eq!(shown, ["gmail", "drift", "broken"]);
-        // …and everything is still reachable by typing.
-        let root: Vec<String> = root_items(&rows).into_iter().map(|it| it.title).collect();
-        assert!(root.contains(&"node_repl".to_string()) && root.contains(&"fine".to_string()));
-        assert!(!root.contains(&"old".to_string()), "sessions have their own s: scope");
-    }
+        assert_eq!(shown, ["claude", "claude", "deploy", "node_repl", "old", "claude asks"]);
+        // Healthy or not is not the question any more: a server that answers
+        // and a skill that agrees with its copies are things you own, and the
+        // home is where you look at what you own.
+        let unhealthy =
+            vec![Item::new("codex mcp get n", Kind::Mcp).title("gmail").put("health", "failed")];
+        assert_eq!(home_items(&unhealthy).len(), 1);
 
-    /// The home shows a server that cannot account for itself. `disabled` is
-    /// an account: somebody turned it off, `doctor mcp` records it as a note
-    /// rather than an issue and reports the server `ok`, and a permanent home
-    /// row would be Prelude arguing with its own diagnostic for ever.
-    #[test]
-    fn a_deliberately_disabled_server_is_not_an_exception() {
-        let server = |name: &str, health: &str| {
-            Item::new(format!("codex mcp get {name}"), Kind::Mcp).title(name).put("health", health)
-        };
-        let rows = vec![
-            server("node_repl", "ok"),
-            server("computer-use", "disabled"),
-            server("gmail", "failed"),
-            server("chatcut", "auth"),
-            server("mystery", "unknown"),
-            // A word this vocabulary does not know is not a claim of health.
-            server("newword", "sleeping"),
-            Item::new("codex mcp get quiet", Kind::Mcp).title("nothing-recorded"),
-        ];
-        let shown: Vec<String> = home_items(&rows).into_iter().map(|it| it.title).collect();
-        assert_eq!(shown, ["gmail", "chatcut", "mystery", "newword", "nothing-recorded"]);
-        // Both of the dropped ones are still one keystroke away.
+        // Ordering is `cache::by_rank`'s job, so this filter must leave the
+        // order it was handed alone.
+        let pair = vec![run("waiting", "first"), run("waiting", "second")];
+        let projects: Vec<String> =
+            home_items(&pair).iter().map(|it| it.get("project").to_string()).collect();
+        assert_eq!(projects, ["first", "second"]);
+
+        // A typed query searches the same inventory, minus the hundreds of
+        // old conversations that `s:` owns.
         let root: Vec<String> = root_items(&rows).into_iter().map(|it| it.title).collect();
-        assert!(root.contains(&"computer-use".to_string()) && root.contains(&"node_repl".to_string()));
+        assert!(root.contains(&"node_repl".to_string()) && root.contains(&"deploy".to_string()));
+        assert!(!root.contains(&"old".to_string()), "sessions have their own s: scope");
     }
 
     #[test]
@@ -1777,8 +1614,6 @@ mod tests {
                 .fields(["Prelude".to_string(), "asked 2m ago".to_string()])
                 .put("agent", "claude")
                 .put("project", "Prelude"),
-            task("failed", "deploy"),
-            task("queued", "reindex"),
             with(run("waiting", "Prelude"), "deploy", ""),
             with(run("working", "api"), "", "node_repl"),
             // An Agent is in as many projects as it has runs, and carries
@@ -1795,9 +1630,9 @@ mod tests {
         };
 
         assert_eq!(titles("waiting"), ["claude asks", "claude"], "a question is waiting on you");
-        assert_eq!(titles("failed"), ["deploy"]);
+        assert!(titles("dead").is_empty(), "nothing here has stopped");
         assert!(!titles("").iter().any(|t| t == "old"), "sessions have their own s: scope");
-        assert_eq!(titles("claude Prelude"), ["claude asks", "deploy", "reindex", "claude"]);
+        assert_eq!(titles("claude Prelude"), ["claude asks", "claude"]);
 
         // Confirmed capability, and only a Run can answer it.
         assert_eq!(titles("using deploy"), ["claude"], "the run that loaded it, not the skill row");
@@ -1809,15 +1644,15 @@ mod tests {
         assert!(titles("project:us").is_empty(), "nor is a path component");
 
         // `project:` reads all three places a project is written down: the
-        // singular field a Run or Task carries, the working directory, and
+        // singular field a Run carries, the working directory, and
         // the array an Agent carries one entry of per live run. Reading only
         // the first two hid the agent working in the very project asked about
         // while happily listing its run.
         assert_eq!(titles("project:api").len(), 2, "the run in api, and the agent that has it");
         assert_eq!(
             titles("project:prelude"),
-            ["claude asks", "deploy", "reindex", "claude", "claude"],
-            "question, both tasks, the run and the agent"
+            ["claude asks", "claude", "claude"],
+            "the question, the run and the agent"
         );
         assert_eq!(
             titles("project:/Users/mike/App/api"),

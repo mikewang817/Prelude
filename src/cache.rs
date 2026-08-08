@@ -149,23 +149,6 @@ const SLOW: &[Source] = &[
 ];
 
 pub fn refresh_named(name: &str) -> bool {
-    // Not a cache of Items, and deliberately reached through the same door.
-    // The task store's open-set index is reconstructed by walking the whole
-    // directory — 54 ms over five thousand records, more than a launch's
-    // entire budget — so the launcher refuses to do it in the foreground and
-    // hands it here instead, exactly as it hands over a stale SLOW source.
-    if name == "task-index" {
-        crate::task::rebuild_index();
-        return true;
-    }
-    // Same door, same reason: the bus's pending-question index is
-    // reconstructed by reading every message file, which is ~60 ms once five
-    // thousand have accumulated — and undelivered mail is never swept, so that
-    // is a ceiling a busy fleet reaches and stays at.
-    if name == "bus-index" {
-        crate::bus::rebuild_index();
-        return true;
-    }
     for (n, f) in FAST.iter().chain(SLOW.iter()) {
         if *n == name {
             write_cached(n, &f());
@@ -252,29 +235,9 @@ pub fn gather() -> Vec<Item> {
     let skills = crate::sources::agents::skills_with(&sessions);
     items.extend(skills.iter().cloned());
 
-    // Questions agents are blocked on — the most urgent thing the launcher
-    // can show, and for a long time the one unbounded reader left on this
-    // path. It was described here as a directory read of a handful of small
-    // files, which stopped being true the moment a fleet started leaving mail
-    // for itself: `bus::all()` costs about 10 µs a message, the store has no
-    // ceiling because undelivered mail is never swept, and five thousand
-    // messages measured 60 ms against a budget of forty. `items()` reads the
-    // bus's pending-question index instead — bounded by how many decisions are
-    // outstanding — and never walks the directory, not even when that index
-    // has gone missing: it asks a detached process to rebuild it, exactly as
-    // `home_tasks` does below.
+    // Questions agents are blocked on. A directory read of a handful of small
+    // files, and the most urgent thing the launcher can show.
     items.extend(crate::bus::items());
-
-    // …and the work behind them: what is still outstanding, plus the results
-    // and failures nobody has dismissed yet. Bounded by both, rather than by
-    // everything ever done, which is the whole reason a Task source can sit on
-    // the gather path at all: the same store read whole costs 54 ms once a few
-    // thousand finished records have accumulated, more than this entire
-    // budget. `home_tasks` never walks the directory, not even when its index
-    // has gone missing — it asks a detached process to rebuild it instead.
-    let mut tasks = crate::task::items_as(crate::item::Kind::Task);
-    attach_runs(&mut tasks, &runs);
-    items.extend(tasks);
 
     // Identities come from the cache; what each one is *doing* is decided
     // here and now, out of syscalls. A fleet view that is a minute stale is
@@ -307,44 +270,6 @@ pub fn gather() -> Vec<Item> {
     finish(items)
 }
 
-/// Give a Task the address of the Run doing it.
-///
-/// The Task store records which Run picked the work up, because an agent said
-/// so. It cannot record where that process *lives*: a pane comes and goes
-/// while the record does not, so caching one would be caching a fact with a
-/// shorter life than the file holding it. The live Run list has it, and by
-/// here both are in hand.
-///
-/// Without this the honest default for a Task is unreachable. `defaults.rs`
-/// reads `pane` to decide whether to go to the agent working on something or
-/// merely show its record, and a row that never carries one always answers
-/// the second — for a task an agent is visibly running right now. `actions.rs`
-/// gates its `zoom` row on the same key.
-///
-/// Built as a join rather than a scan per row: this runs on every gather, and
-/// neither the fleet nor the outstanding work is bounded by anything Prelude
-/// controls.
-fn attach_runs(tasks: &mut [Item], runs: &[Item]) {
-    if tasks.is_empty() {
-        return;
-    }
-    let by_id: std::collections::HashMap<&str, &Item> = runs
-        .iter()
-        .filter(|run| !run.get("run_id").is_empty())
-        .map(|run| (run.get("run_id"), run))
-        .collect();
-    for task in tasks {
-        let run_id = task.get("run_id").to_string();
-        let Some(run) = by_id.get(run_id.as_str()) else { continue };
-        for key in ["pane", "addr"] {
-            let value = run.get(key);
-            if !value.is_empty() {
-                task.data.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-}
-
 /// The agent control centre as data. Sessions deliberately have their own
 /// `sessions` command and `s:` scope; including hundreds of them here made
 /// both the human overview and `prelude agents --json` session listings in
@@ -357,9 +282,6 @@ pub fn gather_agents() -> Vec<Item> {
     write_cached_if_changed("sessions-linked", &sessions);
     let skills = crate::sources::agents::skills_with(&sessions);
     let mut items = crate::bus::items();
-    let mut tasks = crate::task::items_as(crate::item::Kind::Task);
-    attach_runs(&mut tasks, &runs);
-    items.extend(tasks);
     items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions, &runs));
     items.extend(runs);
     items.extend(skills);
@@ -419,47 +341,4 @@ pub fn finish(items: Vec<Item>) -> Vec<Item> {
     // produced them in — newest session first, and so on.
     out.sort_by(by_rank);
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::item::Kind;
-
-    fn task(run_id: &str) -> Item {
-        Item::new("prelude task show t1", Kind::Task).put("run_id", run_id)
-    }
-
-    fn run(run_id: &str, pane: &str, addr: &str) -> Item {
-        Item::new(format!("kill {run_id}"), Kind::Run)
-            .put("run_id", run_id)
-            .put("pane", pane)
-            .put("addr", addr)
-    }
-
-    /// The join is what makes "go to the agent doing it" reachable at all, and
-    /// it has to stay conservative: a Task whose Run has since exited must not
-    /// inherit an address, or Enter sends you to a pane that is not there.
-    #[test]
-    fn a_task_takes_the_address_of_the_run_doing_it_and_no_other() {
-        let mut tasks = vec![task("claude:42:7"), task("codex:9:1"), task("")];
-        let runs = vec![run("claude:42:7", "%3", "work:1.0")];
-        attach_runs(&mut tasks, &runs);
-
-        assert_eq!(tasks[0].get("pane"), "%3", "the run doing it lends its pane");
-        assert_eq!(tasks[0].get("addr"), "work:1.0");
-        assert_eq!(tasks[1].get("pane"), "", "a run that has gone lends nothing");
-        assert_eq!(tasks[2].get("pane"), "", "a task nobody picked up has no address");
-    }
-
-    /// A run outside tmux is a pid and no more. Copying an empty pane over
-    /// would be harmless, but copying an `addr` of "pid 42" would put a row in
-    /// the panel offering to jump somewhere that cannot be jumped to.
-    #[test]
-    fn a_run_with_no_pane_lends_nothing_to_jump_to() {
-        let mut tasks = vec![task("pi:5:2")];
-        attach_runs(&mut tasks, &[run("pi:5:2", "", "")]);
-        assert_eq!(tasks[0].get("pane"), "");
-        assert_eq!(tasks[0].get("addr"), "");
-    }
 }

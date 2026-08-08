@@ -8,11 +8,11 @@
 use crate::item::Item;
 use serde::Serialize;
 
-/// Schema 3 adds Run effective context — branch, model, confirmed
-/// capabilities, the last structured event — a `tasks` array, and the reverse
-/// edges from Capability, Task and Session back to Run. Every field schema 2
-/// had is still there and still means what it did; a reader that knows only
-/// the old shape keeps working.
+/// Schema 3 adds Run effective context — the branch, the model and the
+/// capabilities a run actually loaded — and the reverse edges from Skill and
+/// MCP back to the Runs that borrowed them. Every field schema 2 had is still
+/// there and still means what it did; a reader that knows only the old shape
+/// keeps working.
 const SCHEMA: u32 = 3;
 
 #[derive(Serialize)]
@@ -22,7 +22,6 @@ pub struct Snapshot {
     pub agents: Vec<AgentRecord>,
     pub runs: Vec<RunRecord>,
     pub sessions: Vec<SessionRecord>,
-    pub tasks: Vec<TaskRecord>,
     pub skills: Vec<SkillRecord>,
     pub mcp: Vec<McpRecord>,
 }
@@ -71,52 +70,6 @@ pub struct RunRecord {
     /// installed and available, and these are what was actually loaded.
     pub skills_confirmed: Vec<String>,
     pub mcp_confirmed: Vec<String>,
-    /// The **open** tasks this run is doing, newest first — `running::tasks_of`
-    /// and nothing else, so this array and the Quick Look line above it are
-    /// one fact rather than two. A run is a live process, so a finished task
-    /// is not something it is still doing; the whole history is in `tasks`
-    /// at the top level, keyed by `Task::run`.
-    pub tasks: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_event: Option<RunEvent>,
-}
-
-/// The last thing a run said about itself, which outranks the silence clock.
-#[derive(Serialize)]
-pub struct RunEvent {
-    pub kind: String,
-    pub at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    /// Credential-filtered when it was written to the log.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// A unit of work, and the edges it holds together.
-///
-/// Prompts and results are deliberately absent: the graph carries
-/// relationships, and `prelude task show --json` is where a task's own text
-/// lives.
-#[derive(Serialize)]
-pub struct TaskRecord {
-    pub id: String,
-    pub title: String,
-    pub project: String,
-    pub state: String,
-    pub agent: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub deps: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_of: Option<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
 }
 
 #[derive(Serialize)]
@@ -136,8 +89,6 @@ pub struct SessionRecord {
     pub active_run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_state: Option<String>,
-    /// Tasks being done in this conversation — the reverse of `Task::session`.
-    pub tasks: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -222,10 +173,6 @@ fn named_by(runs: &[RunRecord], is_skill: bool, name: &str) -> Vec<String> {
 }
 
 impl Snapshot {
-    /// The graph as it stands. Tasks are read here rather than passed in
-    /// because they are Prelude's own store rather than a gathered source,
-    /// and an empty store yields an empty array like every other source that
-    /// finds nothing.
     pub fn from_items(
         runs: &[Item],
         sessions: &[Item],
@@ -233,20 +180,6 @@ impl Snapshot {
         mcp: &[Item],
         configs: &[Item],
     ) -> Self {
-        let tasks = crate::task::all();
-        // The Run edge is `running::tasks_of`, read once for the whole
-        // snapshot rather than once per run. One rule, one answer: this used
-        // to be its own closure over `all()`, which meant `runs[].tasks` still
-        // listed a task after `prelude task done` while the Quick Look for the
-        // same run had already dropped it.
-        let open = crate::task::open_tasks();
-        let sessions_tasks_for = |session: &str| -> Vec<String> {
-            tasks
-                .iter()
-                .filter(|task| task.session.as_deref() == Some(session))
-                .map(|task| task.id.clone())
-                .collect()
-        };
         let run_records: Vec<RunRecord> = runs
             .iter()
             .map(|run| {
@@ -274,40 +207,12 @@ impl Snapshot {
                     ),
                     skills_confirmed,
                     mcp_confirmed,
-                    tasks: crate::sources::running::tasks_of_in(&open, run.get("run_id"))
-                        .into_iter()
-                        .map(|task| task.id)
-                        .collect(),
-                    last_event: (!run.get("event_kind").is_empty()).then(|| RunEvent {
-                        kind: run.get("event_kind").to_string(),
-                        at: run.get("event_at").parse().unwrap_or(0),
-                        task: some(run.get("event_task")),
-                        detail: some(run.get("event_detail")),
-                    }),
                 }
-            })
-            .collect();
-        let task_records: Vec<TaskRecord> = tasks
-            .iter()
-            .map(|task| TaskRecord {
-                id: task.id.clone(),
-                title: task.title.clone(),
-                project: task.project.clone(),
-                state: task.state.as_str().to_string(),
-                agent: task.agent.clone(),
-                run: task.run.clone(),
-                session: task.session.clone(),
-                message: task.message.clone(),
-                deps: task.deps.clone(),
-                retry_of: task.retry_of.clone(),
-                created_at: task.created_at,
-                updated_at: task.updated_at,
             })
             .collect();
         let session_records: Vec<SessionRecord> = sessions
             .iter()
             .map(|session| SessionRecord {
-                tasks: sessions_tasks_for(&session_id(session)),
                 id: session_id(session),
                 native_id: session.get("id").to_string(),
                 agent: session.get("agent").to_string(),
@@ -473,7 +378,6 @@ impl Snapshot {
             agents,
             runs: run_records,
             sessions: session_records,
-            tasks: task_records,
             skills: skill_records,
             mcp: mcp_records,
         }
@@ -505,28 +409,19 @@ pub fn list(json: bool) -> i32 {
         return 0;
     }
 
-    println!("agent       installed  runs  waiting  tasks  sessions  skills  mcp");
+    println!("agent       installed  runs  waiting  sessions  skills  mcp");
     for agent in &snapshot.agents {
         let waiting = snapshot
             .runs
             .iter()
             .filter(|run| run.agent == agent.id && run.state == "waiting")
             .count();
-        // Open tasks only. A finished one is history, and a column that grows
-        // for ever says nothing about what an agent is carrying now.
-        let tasks = snapshot
-            .tasks
-            .iter()
-            .filter(|task| task.agent == agent.id)
-            .filter(|task| !matches!(task.state.as_str(), "done" | "failed" | "cancelled"))
-            .count();
         println!(
-            "{:<11} {:<9}  {:>4}  {:>7}  {:>5}  {:>8}  {:>6}  {:>3}",
+            "{:<11} {:<9}  {:>4}  {:>7}  {:>8}  {:>6}  {:>3}",
             agent.id,
             if agent.installed { "yes" } else { "no" },
             agent.runs.len(),
             waiting,
-            tasks,
             agent.sessions.len(),
             agent.skills.len(),
             agent.mcp.len(),

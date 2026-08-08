@@ -14,7 +14,6 @@ mod compute;
 mod control;
 mod defaults;
 mod doctor;
-mod events;
 mod exec;
 mod fleet;
 mod frecency;
@@ -31,7 +30,6 @@ mod render;
 mod runhere;
 mod secrets;
 mod sources;
-mod task;
 mod translate_build;
 mod tty;
 mod ui;
@@ -79,28 +77,15 @@ fn main() -> ExitCode {
                 eprintln!("prelude: ask what?");
                 return ExitCode::from(2);
             }
-            let opts = match bus::parse_opts(&flags) {
-                Ok(opts) => opts,
-                Err(e) => {
-                    eprintln!("prelude: {e}");
-                    return ExitCode::from(2);
-                }
-            };
             let wait = flag_value(&flags, "--timeout").and_then(|v| v.parse().ok());
-            bus::ask_with(&text, wait.unwrap_or(bus::DEFAULT_WAIT), flags.contains(&"--no-wait"), opts)
+            bus::ask(&text, wait.unwrap_or(bus::DEFAULT_WAIT), flags.contains(&"--no-wait"))
         }
-        ["tell", rest @ ..] if !rest.is_empty() => {
-            let (flags, text) = split_flags(rest);
-            match bus::parse_opts(&flags) {
-                Ok(opts) => bus::tell_with(&text, opts),
-                Err(e) => { eprintln!("prelude: {e}"); 2 }
-            }
-        }
+        ["tell", rest @ ..] if !rest.is_empty() => bus::tell(&split_flags(rest).1),
         // The flags come before the recipient, not after it: `split_flags`
         // stops at the first non-flag word, and that word is the target. A
         // dashed word later on belongs to the message.
         ["say", rest @ ..] if !rest.is_empty() => {
-            let (flags, text) = split_flags(rest);
+            let (_, text) = split_flags(rest);
             let (target, body) = match text.split_once(' ') {
                 Some((target, body)) => (target.to_string(), body.to_string()),
                 None => (text.clone(), String::new()),
@@ -109,10 +94,7 @@ fn main() -> ExitCode {
                 eprintln!("prelude: say to whom, and what? — prelude say WHO TEXT");
                 return ExitCode::from(2);
             }
-            match bus::parse_opts(&flags) {
-                Ok(opts) => bus::say_with(&target, &body, opts),
-                Err(e) => { eprintln!("prelude: {e}"); 2 }
-            }
+            bus::say(&target, &body)
         }
         ["answer", id, rest @ ..] if !rest.is_empty() => bus::answer(id, &rest.join(" ")),
         ["answer-of", id] => bus::answer_of(id),
@@ -123,20 +105,6 @@ fn main() -> ExitCode {
             rest.contains(&"--human"),
         ),
         ["drain"] => bus::drain(),
-
-        // The rest of a message's life. Withdrawing one, pointing it
-        // somewhere else, handing over the work itself, and reading the whole
-        // exchange back — each a plain word with its text last, like the four
-        // above.
-        ["cancel", id, rest @ ..] => bus::cancel(id, &rest.join(" ")),
-        ["reassign", id, target] => bus::reassign(id, target),
-        ["handoff", target, task, rest @ ..] => bus::handoff(target, task, &rest.join(" ")),
-        ["thread", id, rest @ ..] => bus::thread_cmd(id, rest.contains(&"--json")),
-
-        // The same door, for work rather than for messages: an agent opens a
-        // task, reports against it, and finishes it, and the record outlives
-        // the process that was doing it.
-        ["task", rest @ ..] => task::cli(rest),
 
         ["agents", rest @ ..] => json_dump(cache::gather_agents(), rest.contains(&"--json")),
         ["sessions", rest @ ..] => {
@@ -360,37 +328,6 @@ AGENTS  (run these from inside a conversation; see `prelude init agent`)
                          --human shows questions waiting on a person instead
   prelude drain          mark your inbox collected
 
-  prelude cancel ID [WHY]  withdraw a question you no longer need answered
-  prelude handoff WHO TASK [NOTE]  give another agent the work, keeping the id
-                         the result comes back to you when they finish it
-  prelude reassign ID WHO  point a message at a different agent instead
-  prelude thread ID [--json]  the whole exchange a message belongs to
-
-  on ask, tell and say:  --attach=PATH  a file for them to read, not a copy
-                         --expires=N    seconds after which a question stops
-                         --task=ID --run=ID --session=ID --reply-to=ID
-
-  prelude task start TITLE   open a task · the new id goes to stdout
-                         --project P --agent A --run R --session S
-                         --needs ID,ID  --message ID  --prompt-ref REF
-                         a task with --needs starts queued, not working
-  prelude task progress ID NOTE   say what you are doing
-  prelude task wait     ID [NOTE] you are blocked on somebody else
-  prelude task done     ID [RESULT]
-  prelude task fail     ID [REASON]
-  prelude task cancel   ID [REASON]
-                         NOTE, RESULT and REASON are prose to the end of the
-                         line: put flags before them, and as --name=value
-  prelude task assign   ID AGENT  hand it over, keeping the id and history
-  prelude task retry    ID        a fresh task, with an edge back to this one
-                         only of a finished task · cancel a live one first
-  prelude task ack      ID        dismiss a finished task from the agent home
-                         the record, its result and its history all stay
-  prelude task list [--all] [--json]   open tasks · --all includes finished
-  prelude task show ID  [--json]  the record and everything said about it
-                         --json prints the whole record on every verb, so
-                         T=$(prelude task start \"…\") wants no flag at all
-
   prelude answer ID TEXT answer a question someone else is blocked on
   prelude answer-of ID   collect the answer to a --no-wait question
   prelude fleet --json   who else is running, and which of them are stuck
@@ -475,7 +412,6 @@ fn copy_line(line: &str) -> i32 {
         Link => it.get("url"),
         File | Find => it.get("path"),
         Clip => it.get("full"),
-        Task => it.get("task_id"),
         _ => "",
     };
     let text = if by_kind.is_empty() { it.cmd.clone() } else { by_kind.to_string() };
@@ -545,45 +481,6 @@ fn winsize_cols(fd: i32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    /// Run this test again in a child process with a data directory of its
-    /// own, and return `true` in the parent, which then has nothing left to do.
-    ///
-    /// `std::env::set_var` beside a concurrent read is documented undefined
-    /// behaviour, and `cargo test` is one process full of concurrent readers
-    /// on other threads — subprocesses included, since a child inherits
-    /// whatever the environment happens to be mid-write. A *child's*
-    /// environment is shared with nobody: `Command` builds it before the child
-    /// exists. So this is the door for the handful of tests whose subject
-    /// resolves `paths::data()` itself and cannot be handed a root.
-    fn in_a_child(test: &str) -> bool {
-        const MARK: &str = "PRELUDE_TEST_PRIVATE_DATA";
-        if std::env::var_os(MARK).is_some() {
-            // We are the child. Its whole environment was built for it.
-            return false;
-        }
-        let root = std::env::temp_dir().join(format!(
-            "prelude-test-child-{}-{}",
-            std::process::id(),
-            test.replace(':', "-")
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a private data directory");
-        let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
-            .args(["--exact", test, "--nocapture", "--test-threads=1"])
-            .env("XDG_DATA_HOME", &root)
-            .env(MARK, "1")
-            .output()
-            .expect("run the test in a child process");
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            out.status.success(),
-            "{test} failed in its own process:\n{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        true
-    }
-
     #[test]
     fn arithmetic() {
         for (q, want) in [
@@ -656,8 +553,11 @@ mod tests {
         ];
         all.extend(crate::compute::scope_commands());
         let home = home_items(&all);
-        assert_eq!(home.len(), 4);
-        assert!(home.iter().all(|i| matches!(i.kind, Kind::Agent | Kind::Skill | Kind::Mcp | Kind::Run)));
+        assert_eq!(home.len(), 5);
+        assert!(home.iter().all(|i| matches!(
+            i.kind,
+            Kind::Agent | Kind::Skill | Kind::Mcp | Kind::Run | Kind::Session
+        )));
         let root = root_items(&all);
         assert!(root.iter().any(|i| i.title == "Search Files"));
         assert!(root.iter().all(|i| !matches!(i.kind, Kind::Session | Kind::Path | Kind::Clip | Kind::History)));
@@ -1126,137 +1026,6 @@ mod tests {
         );
     }
 
-    /// A Task is an object, and its id is the one string every other verb
-    /// takes. So at a shell it acts — goes to whoever is doing it, or shows
-    /// the record when nobody is — and hands you the id instead; in a
-    /// conversation, where there is no prompt to paste onto, the two are the
-    /// other way round.
-    #[test]
-    fn a_task_acts_at_a_shell_and_is_an_id_in_a_conversation() {
-        use crate::defaults::{describe, on_enter, on_secondary, text_for, Default_, Host, Text, Verb};
-        use crate::item::{Item, Kind};
-
-        let idle = Item::new("prelude task show t1", Kind::Task)
-            .title("migrate legacy_users")
-            .put("task_id", "t1")
-            .put("state", "queued");
-        // Nobody is doing it, so there is nothing to go to and the whole of
-        // the task is its record.
-        assert_eq!(on_enter(&idle, Host::Shell), Default_::Act(Verb::RunHere));
-        assert_eq!(describe(&idle, Host::Shell), "Show its record and history");
-        assert_eq!(
-            on_secondary(&idle, Host::Shell),
-            Some(Default_::InsertText(Text::Name)),
-            "the opposite of acting is handing over the text",
-        );
-
-        // A task whose run is in a pane is being worked on right now, and
-        // going there is the same answer an active Session gives.
-        let live = idle.clone().put("pane", "%4").put("addr", "work:2.1");
-        assert_eq!(on_enter(&live, Host::Shell), Default_::Act(Verb::JumpTo));
-        assert_eq!(describe(&live, Host::Shell), "Go to the agent doing it");
-
-        // In a conversation the id is the useful half, and it is the id —
-        // never the title, because two tasks may share one.
-        for it in [&idle, &live] {
-            assert_eq!(on_enter(it, Host::Agent), Default_::InsertText(Text::Name));
-            assert_eq!(describe(it, Host::Agent), "Insert the task id");
-            assert_eq!(text_for(it, Text::Name), "t1");
-            // Enter already hands over the text, so an inserting secondary
-            // would be the same keystroke twice.
-            assert_eq!(on_secondary(it, Host::Agent), None);
-        }
-    }
-
-    /// The Task panel offers what `task.rs` will actually accept.
-    ///
-    /// `task::retry` refuses a live task outright — retrying one that is
-    /// still running is two agents on one job — and `done`, `cancel` and
-    /// `assign` all refuse a finished one. Offering a verb and then
-    /// explaining it away is worse than not offering it.
-    #[test]
-    fn the_task_panel_offers_only_the_verbs_that_would_work() {
-        use crate::actions::{actions_for, actions_for_host, is_destructive, needs_confirming};
-        use crate::defaults::Host;
-        use crate::item::{Item, Kind};
-        let ids = |it: &Item| -> Vec<String> {
-            actions_for(it).iter().map(|(id, ..)| id.to_string()).collect()
-        };
-
-        let open = Item::new("prelude task show t1", Kind::Task)
-            .title("migrate legacy_users")
-            .put("task_id", "t1")
-            .put("state", "working");
-        let live = ids(&open);
-        assert!(live.contains(&"task-done".to_string()), "{live:?}");
-        assert!(live.contains(&"task-cancel".to_string()), "{live:?}");
-        assert!(!live.contains(&"task-retry".to_string()), "a live task cannot be retried: {live:?}");
-        // Nothing running, so there is no pane row to offer.
-        assert!(!live.contains(&"zoom".to_string()), "{live:?}");
-        // Ending the work is red, asks first, and comes last.
-        assert!(is_destructive(Kind::Task, "task-cancel"));
-        assert!(needs_confirming(Kind::Task, "task-cancel").is_some());
-        assert_eq!(live.last().map(String::as_str), Some("task-cancel"), "{live:?}");
-        // …and nothing here pretends a record is a command line.
-        assert!(!live.contains(&"run".to_string()) && !live.contains(&"runhere".to_string()));
-
-        let done = open.clone().put("state", "done");
-        let finished = ids(&done);
-        assert!(finished.contains(&"task-retry".to_string()), "{finished:?}");
-        assert!(!finished.contains(&"task-done".to_string()), "{finished:?}");
-        assert!(!finished.contains(&"task-cancel".to_string()), "{finished:?}");
-        assert!(!finished.iter().any(|id| id.starts_with("handoff:") || id == "menu:handoff"));
-
-        // A live run gives it somewhere to go, beyond Enter's own row.
-        let attached = open.clone().put("pane", "%4").put("addr", "work:2.1");
-        assert!(ids(&attached).contains(&"zoom".to_string()), "{:?}", ids(&attached));
-
-        // Over an agent's input box the useful thing is the reference, not
-        // the launcher's verbs: nothing here changes the task.
-        let in_chat: Vec<String> = actions_for_host(&open, Host::Agent)
-            .iter().map(|(id, ..)| id.to_string()).collect();
-        assert!(in_chat.contains(&"task-context".to_string()), "{in_chat:?}");
-        assert!(in_chat.contains(&"copy".to_string()), "{in_chat:?}");
-        assert!(
-            !in_chat.iter().any(|id| id.starts_with("task-done") || id.starts_with("task-cancel")),
-            "{in_chat:?}",
-        );
-    }
-
-    /// Handing work over refuses on anything but exactly one recipient, so
-    /// the panel addresses a *run* rather than an agent name: two claudes in
-    /// two projects are two different answers to "hand it to claude".
-    #[test]
-    fn a_handoff_names_one_run_and_never_the_run_already_doing_it() {
-        use crate::item::{Item, Kind};
-        let run = |agent: &str, project: &str, pane: &str, id: &str| {
-            Item::new("x", Kind::Run)
-                .put("agent", agent)
-                .put("project", project)
-                .put("pane", pane)
-                .put("pid", "7")
-                .put("addr", format!("work:{project}"))
-                .put("run_id", id)
-        };
-        let runs = vec![
-            run("claude", "api-gateway", "%4", "claude:4:1"),
-            run("claude", "docs", "%5", "claude:5:1"),
-            run("codex", "docs", "", "codex:6:1"),
-        ];
-        let task = Item::new("prelude task show t1", Kind::Task)
-            .put("task_id", "t1")
-            .put("run_id", "claude:4:1");
-        let options = crate::actions::handoff_targets(&runs, &task);
-        let ids: Vec<&str> = options.iter().map(|(id, ..)| id.as_str()).collect();
-        assert!(!ids.contains(&"handoff:%4"), "the run already doing it: {ids:?}");
-        assert_eq!(ids, ["handoff:%5", "handoff:7"], "{ids:?}");
-        // The label says which of the two claudes, because the id cannot.
-        assert_eq!(options[0].1, "claude · docs");
-        // A run with no pane is still addressable: `bus::resolve` matches a
-        // bare pid exactly.
-        assert_eq!(options[1].1, "codex · docs");
-    }
-
     /// Resuming with a borrowed capability exists only where the Agent has a
     /// one-run flag for it. Three of the eight pairings have none, and a
     /// command assembled for one of those fails after the launcher has
@@ -1506,10 +1275,6 @@ mod tests {
                     .put("desc", "d")
                     .put("missing", "codex")
                     .put("copies", r#"[["claude","/tmp/d"]]"#)
-                    // A Task row is nothing without its id, and its verbs
-                    // divide on whether the work is still open.
-                    .put("task_id", "t1")
-                    .put("state", "working")
             })
             .collect()
     }
@@ -2214,59 +1979,6 @@ mod tests {
         assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
     }
 
-    /// One rule for the Run→Task edge, in both places it is read.
-    ///
-    /// `control` used to close over `task::all()` — every task ever created —
-    /// while the Quick Look for the same Run listed `running::tasks_of`, which
-    /// is the open ones. After `prelude task done` the two disagreed: the
-    /// panel dropped the line and `control --json` still carried it.
-    ///
-    /// This is the one test in the suite that cannot be handed a root. Both
-    /// halves of the rule it checks — `control::Snapshot::from_items` and
-    /// `running::tasks_of` — resolve the store themselves through
-    /// `paths::data()`, which is `$XDG_DATA_HOME`, and giving either of them a
-    /// root is a change to `control.rs` and `task.rs`. So it runs in a child
-    /// process instead: `Command::env` builds an environment that belongs to
-    /// the child alone, which is the one way to point `$XDG_DATA_HOME`
-    /// somewhere without writing this process's own environment while other
-    /// tests are reading it on other threads.
-    #[test]
-    fn a_run_carries_the_same_tasks_in_the_graph_as_in_its_quick_look() {
-        use crate::item::{Item, Kind};
-        use crate::task::New;
-        if in_a_child("tests::a_run_carries_the_same_tasks_in_the_graph_as_in_its_quick_look") {
-            return;
-        }
-        let run_id = "claude:7:1";
-        let store = crate::task::store();
-        let still = store
-            .start(New { title: "still going".into(), run: run_id.into(), ..Default::default() })
-            .expect("open a task");
-        let over = store
-            .start(New { title: "already over".into(), run: run_id.into(), ..Default::default() })
-            .expect("open a task");
-        store.done(&over.id, "").expect("finish it");
-
-        let run = Item::new("kill 7", Kind::Run)
-            .put("agent", "claude")
-            .put("run_id", run_id)
-            .put("pid", "7");
-        let graph = crate::control::Snapshot::from_items(std::slice::from_ref(&run), &[], &[], &[], &[]);
-        let from_quick_look: Vec<String> = crate::sources::running::tasks_of(run_id)
-            .into_iter()
-            .map(|task| task.id)
-            .collect();
-        assert_eq!(from_quick_look, [still.id.clone()][..], "a finished task is not being done");
-        assert_eq!(
-            graph.runs[0].tasks, from_quick_look,
-            "the graph's Run edge is the one the panel shows"
-        );
-        // The finished one is history, and history is not lost — it is simply
-        // not something a live process is still doing.
-        assert!(graph.tasks.iter().any(|task| task.id == over.id && task.state == "done"));
-        assert!(graph.tasks.iter().any(|task| task.id == still.id));
-    }
-
     /// A confirmed MCP name is read off a command line, and what is written
     /// there is the sanitised key — never the display name.
     #[test]
@@ -2289,39 +2001,6 @@ mod tests {
             graph.mcp[0].runs, ["claude:7:1"],
             "a display name and a key are the same server"
         );
-    }
-
-    /// `Dismiss it` answers a question, and a cancelled task never asked one.
-    #[test]
-    fn a_cancelled_task_is_not_offered_a_dismissal_it_was_never_asking_for() {
-        use crate::actions::actions_for_host;
-        use crate::defaults::Host;
-        use crate::item::{Item, Kind};
-        let task = |state: &str| {
-            Item::new("prelude task show t1", Kind::Task)
-                .title("a job")
-                .put("task_id", "t1")
-                .put("state", state)
-        };
-        let labels = |state: &str| -> Vec<String> {
-            actions_for_host(&task(state), Host::Shell)
-                .into_iter()
-                .map(|(_, label, _)| label)
-                .collect()
-        };
-        for state in ["done", "failed"] {
-            assert!(
-                labels(state).iter().any(|label| label == "Dismiss it"),
-                "{state} arrives while nobody is looking and is worth acknowledging"
-            );
-        }
-        assert!(
-            !labels("cancelled").iter().any(|label| label == "Dismiss it"),
-            "cancelling is the decision — `task::awaiting_review` excludes it for the same reason"
-        );
-        // Everything else a finished task offers is unchanged.
-        assert!(labels("cancelled").iter().any(|label| label == "Try it again"));
-        assert!(!labels("working").iter().any(|label| label == "Dismiss it"));
     }
 
     /// "Resume with a skill…" means one the Agent does not have.

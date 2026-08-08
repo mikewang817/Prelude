@@ -116,21 +116,18 @@ authentication states are omitted.
 Rows without a tmux address omit pane-only actions.
 
 Quick Look for a Run is `running::effective_context` and nothing of its own:
-Agent, project, branch, Session, Task, state, start time, model, the
-capabilities this Run confirmed against what its Agent merely has installed,
-and then the last structured report — or, only where there is none, what the
-conversation last said.
+Agent, project, branch, Session, state, start time, model, the capabilities
+this Run confirmed against what its Agent merely has installed, and then what
+the conversation last said.
 
 `effective_context` has exactly one caller, and it is this panel. `prelude
 fleet` renders its own columns and shows no branch, model or capabilities, and
 `control.rs` re-derives what it needs from the same underlying helpers —
-`branch_label`, `model_of`, `confirmed_capabilities`, `tasks_of` — rather than
-from the list. Those helpers are the shared part, and they are shared precisely
-because two surfaces deriving one fact separately is how they start disagreeing
-about it: `runs[].tasks` in `control --json` was its own closure over every
-task ever created, so a task marked done stayed on the Run there after this
-panel had dropped it. Anything a second surface needs from a Run belongs in a
-helper both call, not in a second reading of the row.
+`branch_label`, `model_of`, `confirmed_capabilities` — rather than from the
+list. Those helpers are the shared part, and they are shared precisely because
+two surfaces deriving one fact separately is how they start disagreeing about
+it. Anything a second surface needs from a Run belongs in a helper both call,
+not in a second reading of the row.
 
 ### Question from an agent
 
@@ -141,55 +138,6 @@ helper both call, not in a second reading of the row.
 - Copy the question
 
 A custom answer remains Enter's default.
-
-### Task
-
-A Task is what a Run is *for*: the piece of work, which outlives the process
-doing it. It is an object rather than a command line, so Enter acts — it shows
-the record, which is the whole of what a Task is. The secondary hands over the
-id, because the id is what every other verb takes.
-
-- Hand it off to another running agent, keeping the id, the title and the history
-- Mark it done, with a result
-- Show its event history, without leaving the panel
-- Copy the task id
-- Dismiss it, once it is done or failed
-- Try it again, only once it has finished
-- Cancel it, last and red, after confirming
-
-Enter has a second reading — go to the agent doing it — taken when the row
-carries a `pane`, with `Go to its pane full-screen` on the same key. The Task
-store cannot supply that address: it records which Run took the work, because
-an agent said so, but a pane comes and goes while the record does not, so
-caching one would be caching a fact with a shorter life than the file holding
-it. `cache::attach_runs` joins it on at gather time instead, matching a Task's
-`run_id` against the live Run list. A task nobody is running has nothing to go
-to, and the whole of a task is its record, so opening it *is* showing that
-record.
-
-`Dismiss it` is offered on Done and Failed and on nothing else. Cancelling is
-itself the decision, taken from a panel that asked first, so a cancelled Task
-was never asking — `task::awaiting_review` excludes it, and the Quick Look
-`dismissed` line is absent for the same reason.
-
-Handing off addresses a *run*, not an agent name: `bus::handoff` refuses on
-anything but exactly one recipient, and two claudes in two projects are two
-different answers to "hand it to claude". Several candidates collapse into a
-submenu. The run already doing the task is not offered.
-
-Retry appears only on a finished Task and the three verbs that change a live
-one appear only on an open Task, because `task.rs` refuses the other way round
-in each case. Cancelling is red and confirms even though `retry` exists: retry
-opens a *new* task with a new id, so everything already pointing at this one —
-a message's `--task`, another Task's `--needs`, the event trail — stays
-pointed at a cancelled record.
-
-Over an agent's input box the panel is a different list. Nothing there changes
-the Task; what is wanted is the reference:
-
-- Insert its context — one line naming the id, state, agent, project and result
-- Show its record locally
-- Copy the task id
 
 ### Session
 

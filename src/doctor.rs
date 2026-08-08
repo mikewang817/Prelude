@@ -12,15 +12,14 @@
 //! front of `ui::confirm` with Cancel first, and does nothing at all to the
 //! ones a person does not say yes to. That shape is deliberate. A single
 //! "fix everything" prompt turns a list of unrelated decisions — this staged
-//! file is litter, that task's agent crashed — into one keystroke, which is
-//! exactly the accident the confirmation exists to prevent.
+//! file is litter, that one is a shim somebody is using — into one keystroke,
+//! which is exactly the accident the confirmation exists to prevent.
 //!
 //! A confirmation is also not a warrant. Minutes pass between a report being
 //! printed and a question being answered, so every repair carries the evidence
 //! its finding was made on and re-checks it before acting — see `Repair`.
 //!
-//! Only two things are ever repairable, and both are the same kind of thing:
-//! Prelude's own private staging files, and Prelude's own Task records.
+//! Only one thing is ever repairable: Prelude's own private staging files.
 //! Nothing here deletes a conversation, a Skill or an agent's configuration —
 //! those have their own confirmed actions in the launcher, with their own
 //! comparison steps, and a diagnostic is not a second way in.
@@ -77,19 +76,6 @@ pub enum Repair {
         /// longer the finding.
         mode: u32,
     },
-    /// Declare a Task orphaned, through `task::mark_orphaned`. The record is
-    /// kept and marked; nothing is deleted.
-    OrphanTask {
-        task: String,
-        /// The edges the task carried when it was found orphaned. A run that
-        /// has come back — or a task re-attached to a different one — is live
-        /// work, and marking it Failed would be the diagnostic lying about an
-        /// agent that is sitting there working.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        run: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session: Option<String>,
-    },
 }
 
 impl Repair {
@@ -104,37 +90,18 @@ impl Repair {
                     .unwrap_or_else(|| path.clone());
                 format!("Move {name} to the Trash")
             }
-            Repair::OrphanTask { task, .. } => format!("Mark {task} orphaned"),
         }
     }
 
     fn detail(&self) -> String {
         match self {
             Repair::Trash { path, .. } => paths::tilde(path),
-            Repair::OrphanTask { task, .. } => {
-                format!("{task} is recorded failed; nothing is deleted")
-            }
         }
     }
 
     fn apply(&self) -> Result<String, String> {
         match self {
             Repair::Trash { .. } => self.trash_in(&staging_root(), paths::trash),
-            Repair::OrphanTask { .. } => {
-                // Re-found, not read back from the launcher's snapshot. The
-                // whole question is whether the run is still gone, and a
-                // cached fleet is an answer from a minute ago.
-                let sessions = crate::sources::sessions::all();
-                let runs = crate::sources::running::fresh_identities_with_sessions(&sessions);
-                let live_runs: Vec<String> =
-                    runs.iter().map(|run| run.get("run_id").to_string()).collect();
-                let live_sessions: Vec<String> = sessions
-                    .iter()
-                    .map(|session| session.get("session_id").to_string())
-                    .filter(|id| !id.is_empty())
-                    .collect();
-                self.orphan_in(&crate::task::store(), &live_runs, &live_sessions)
-            }
         }
     }
 
@@ -148,9 +115,7 @@ impl Repair {
         mv: impl Fn(&Path) -> Result<std::path::PathBuf, String>,
     ) -> Result<String, String> {
         use std::os::unix::fs::PermissionsExt;
-        let Repair::Trash { path, modified, mode } = self else {
-            return Err("that repair does not move anything".into());
-        };
+        let Repair::Trash { path, modified, mode } = self;
         let path = Path::new(path);
         let shown = paths::tilde(&path.to_string_lossy());
         // The boundary is re-checked here rather than trusted from the report:
@@ -170,45 +135,6 @@ impl Repair {
         }
         let dest = mv(path)?;
         Ok(format!("moved to {}", paths::tilde(&dest.to_string_lossy())))
-    }
-
-    /// The Task half, with the store and the live ids passed in for the same
-    /// reason.
-    ///
-    /// Orphanhood is re-decided with `task::orphans`, the same function the
-    /// report used, rather than with a second copy of the rule here — two
-    /// implementations of "has its run gone" would eventually disagree, and
-    /// the disagreement would show up as a live task marked Failed.
-    fn orphan_in(
-        &self,
-        store: &crate::task::Store,
-        live_runs: &[String],
-        live_sessions: &[String],
-    ) -> Result<String, String> {
-        let Repair::OrphanTask { task, run, session } = self else {
-            return Err("that repair does not mark anything".into());
-        };
-        let record = store.get(task).ok_or_else(|| format!("there is no task {task} any more"))?;
-        if record.state.finished() {
-            return Err(format!(
-                "{task} is already {} — it finished after the report, and nothing needs declaring",
-                record.state.as_str()
-            ));
-        }
-        if record.run.as_deref() != run.as_deref() || record.session.as_deref() != session.as_deref()
-        {
-            return Err(format!(
-                "{task} has been attached to a different run or conversation since the report, \
-                 so this finding is about a state it is no longer in"
-            ));
-        }
-        if crate::task::orphans(std::slice::from_ref(&record), live_runs, live_sessions).is_empty() {
-            return Err(format!(
-                "{task}'s run or conversation is there again, so this is live work — left alone"
-            ));
-        }
-        store.mark_orphaned(task)?;
-        Ok(format!("{task} is now recorded as orphaned"))
     }
 }
 
@@ -808,63 +734,14 @@ fn run_rows(runs: &[crate::item::Item]) -> Vec<Row> {
     rows
 }
 
-/// Task, event and Inbox records pointing at something that no longer exists.
-fn orphan_rows(runs: &[crate::item::Item], sessions: &[crate::item::Item]) -> Vec<Row> {
-    use std::collections::BTreeSet;
+/// Inbox records addressed to something that no longer exists.
+///
+/// A message left for an agent is collected by pane or by working directory,
+/// so losing both leaves a record nothing can ever pick up. Reported and never
+/// swept here: an uncollected instruction is exactly the thing that must not
+/// disappear because a diagnostic tidied up.
+fn inbox_rows() -> Vec<Row> {
     let mut rows = Vec::new();
-
-    let tasks = crate::task::all();
-    let live_runs: Vec<String> = runs.iter().map(|r| r.get("run_id").to_string()).collect();
-    let live_sessions: Vec<String> =
-        sessions.iter().map(|s| s.get("session_id").to_string()).filter(|s| !s.is_empty()).collect();
-    let mut task_row = Row::new("tasks", format!("{} recorded", tasks.len()));
-    for orphan in crate::task::orphans(&tasks, &live_runs, &live_sessions) {
-        task_row.fixable(
-            "task-orphaned",
-            format!(
-                "{} ({}) is still {} but its {} has gone",
-                orphan.id,
-                orphan.title,
-                orphan.state.as_str(),
-                if orphan.run.is_some() { "run" } else { "session" }
-            ),
-            Repair::OrphanTask {
-                task: orphan.id.clone(),
-                run: orphan.run.clone(),
-                session: orphan.session.clone(),
-            },
-        );
-    }
-    rows.push(task_row);
-
-    // Events reference tasks by id and are append-only. A dangling reference
-    // is worth knowing about and is not worth rewriting a log over: editing an
-    // append-only file to make a report clean is how history stops being
-    // evidence.
-    let known: BTreeSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
-    let events = crate::events::all();
-    let dangling: BTreeSet<&str> = events
-        .iter()
-        .map(|e| e.task.as_str())
-        .filter(|task| !task.is_empty() && !known.contains(task))
-        .collect();
-    let mut event_row = Row::new("event log", format!("{} events", events.len()));
-    if !dangling.is_empty() {
-        let shown: Vec<&str> = dangling.iter().copied().take(6).collect();
-        event_row.issue(
-            "event-orphaned",
-            format!(
-                "{} task id{} referenced by events no longer has a record: {}{}",
-                dangling.len(),
-                if dangling.len() == 1 { "" } else { "s" },
-                shown.join(", "),
-                if dangling.len() > shown.len() { ", …" } else { "" }
-            ),
-        );
-        event_row.note("append-only by design — reported, never rewritten");
-    }
-    rows.push(event_row);
-
     let panes = live_panes();
     let messages = crate::bus::all();
     let mut inbox_row = Row::new("inbox", format!("{} messages on the bus", messages.len()));
@@ -873,7 +750,7 @@ fn orphan_rows(runs: &[crate::item::Item], sessions: &[crate::item::Item]) -> Ve
     }
     let stranded: Vec<&crate::bus::Msg> = messages
         .iter()
-        .filter(|m| m.to != "human" && matches!(m.state(), crate::bus::State::Sent | crate::bus::State::Undelivered))
+        .filter(|m| m.to != "human" && m.answer.is_none())
         .filter(|m| {
             undeliverable(
                 &m.to_pane,
@@ -896,7 +773,7 @@ fn orphan_rows(runs: &[crate::item::Item], sessions: &[crate::item::Item]) -> Ve
         if stranded.len() > 6 {
             inbox_row.note(format!("and {} more like it", stranded.len() - 6));
         }
-        inbox_row.note("`prelude cancel ID` withdraws one; a diagnostic will not answer for you");
+        inbox_row.note("a diagnostic reports these; it will not collect or answer them for you");
     }
     rows.push(inbox_row);
     rows
@@ -953,7 +830,7 @@ fn agents_report() -> Report {
     fleet.note(format!("effective config is {}", crate::sources::agents::RUN_SCOPE));
     rows.push(fleet);
     rows.extend(run_rows(&runs));
-    rows.extend(orphan_rows(&runs, &sessions));
+    rows.extend(inbox_rows());
     Report::new("agents", rows)
 }
 
@@ -1433,7 +1310,7 @@ fn staging_root() -> std::path::PathBuf {
 /// separately — otherwise the one entry most worth cleaning up would be the
 /// one entry that could not be.
 ///
-/// The root is a parameter, on `sessions.rs`'s and `task.rs`'s reasoning:
+/// The root is a parameter, on `sessions.rs`'s reasoning:
 /// repointing `$XDG_CACHE_HOME` for a test mutates state the whole process
 /// shares, and the alternative is a test suite that writes into the person's
 /// real `borrow/` directory to check a boundary.
@@ -2181,57 +2058,8 @@ mod tests {
                 "a relationship is never repaired by a diagnostic");
     }
 
-    /// The other race, and the more expensive one to get wrong: an agent that
-    /// has come back is live work, and marking its task Failed is a diagnostic
-    /// telling somebody their running agent has crashed.
-    ///
-    /// The store and the live ids are parameters, so this never touches the
-    /// person's real tasks and never re-finds the real fleet.
-    #[test]
-    fn an_orphan_repair_declines_once_the_run_is_back() {
-        let root = temp("orphan");
-        let store = crate::task::Store::at(root.clone());
-        let opened = store
-            .start(crate::task::New {
-                title: "ship it".into(),
-                run: "claude:123:1".into(),
-                ..Default::default()
-            })
-            .expect("open a task");
-        let repair = Repair::OrphanTask {
-            task: opened.id.clone(),
-            run: Some("claude:123:1".into()),
-            session: None,
-        };
-
-        // The run is back on the machine between report and answer.
-        let back = vec!["claude:123:1".to_string()];
-        let refused = repair.orphan_in(&store, &back, &[]).expect_err("that run is alive");
-        assert!(refused.contains("there again"), "{refused}");
-        assert_eq!(store.get(&opened.id).expect("still there").state, crate::task::State::Working);
-
-        // Re-attached to a different run: the finding was about a state this
-        // task is no longer in, whatever the fleet says.
-        let moved = Repair::OrphanTask {
-            task: opened.id.clone(),
-            run: Some("claude:999:1".into()),
-            session: None,
-        };
-        assert!(moved.orphan_in(&store, &[], &[]).is_err(), "the edge changed under the finding");
-
-        // Still gone, still unfinished, same edge: the repair happens.
-        assert!(repair.orphan_in(&store, &[], &[]).is_ok());
-        let marked = store.get(&opened.id).expect("still there");
-        assert_eq!(marked.state, crate::task::State::Failed);
-        assert!(marked.reason.is_some(), "and it says why");
-
-        // …and only once. A finished task is not re-declared.
-        assert!(repair.orphan_in(&store, &[], &[]).is_err());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Every check either offers no repair or offers one of exactly two, both
-    /// of which touch only files and records Prelude wrote itself.
+    /// Every check either offers no repair or offers the one there is, which
+    /// touches only files Prelude staged itself.
     ///
     /// Driven by fixtures rather than by running the real reports. Calling
     /// `skills_report()` here hashed every Skill tree on the machine and
@@ -2253,12 +2081,8 @@ mod tests {
         let report = Report::new("skills", rows);
         assert!(!report.repairable().is_empty(), "the fixtures have to produce some");
         for (_, issue) in report.repairable() {
-            match issue.repair.as_ref().expect("filtered") {
-                Repair::Trash { path, .. } => {
-                    assert!(inside(&root, Path::new(path)), "{path} is outside the staging root")
-                }
-                Repair::OrphanTask { .. } => panic!("staging does not mark tasks"),
-            }
+            let Repair::Trash { path, .. } = issue.repair.as_ref().expect("filtered");
+            assert!(inside(&root, Path::new(path)), "{path} is outside the staging root");
         }
 
         // The rest of every report: a Skill's health, a Session's troubles and
