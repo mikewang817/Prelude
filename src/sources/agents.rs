@@ -356,9 +356,11 @@ fn frontmatter(p: &std::path::Path, fallback: &str) -> (String, String) {
 /// `claude mcp list` performs a network health check, so this is slow and
 /// always runs behind the cache.
 pub fn mcp() -> Vec<Item> {
+    let checked_at = crate::frecency::now() as u64;
     let mut items = Vec::new();
-    mcp_claude(&mut items);
-    mcp_codex(&mut items);
+    mcp_claude(&mut items, checked_at);
+    mcp_codex(&mut items, checked_at);
+    crate::mcp_tools::attach_cached(&mut items);
     enrich_mcp_matrix(&mut items);
     items
 }
@@ -404,21 +406,44 @@ pub(crate) fn safe_mcp_detail(detail: &str) -> String {
     }
 }
 
-fn mcp_item(agent: &str, name: &str, detail: &str, health: Health) -> Item {
+pub(crate) fn normalize_transport(raw: &str) -> &str {
+    let low = raw.to_ascii_lowercase();
+    if low.contains("stdio") { "stdio" }
+    else if low.contains("sse") { "sse" }
+    else if low.contains("http") { "http" }
+    else if low.contains("hosted") { "hosted" }
+    else { "unknown" }
+}
+
+fn mcp_item(
+    agent: &str,
+    name: &str,
+    detail: &str,
+    health: Health,
+    transport: &str,
+    checked_at: u64,
+) -> Item {
     let detail = safe_mcp_detail(detail);
+    let public_definition = serde_json::json!({
+        "type": normalize_transport(transport),
+        "display_target": detail.clone(),
+    });
     Item::new(format!("{agent} mcp get {}", shq(name)), Kind::Mcp)
         .title(name)
         .fields([agent.to_string(), health.label().to_string(), detail.clone()])
         .put("agent", agent)
         .put("name", name)
         .put("health", health.key())
+        .put("transport", normalize_transport(transport))
+        .put("health_checked_at", checked_at.to_string())
         .put("portable", "false")
-        .put("definition_hash", crate::capability::fingerprint(detail.as_bytes()))
+        .put("definition_hash", crate::capability::fingerprint(public_definition.to_string().as_bytes()))
         .put("definition_source", "display")
+        .put("definition_public", public_definition.to_string())
 }
 
 /// `claude mcp list` prints `<name>: <target> - <status>` per server.
-fn mcp_claude(out: &mut Vec<Item>) {
+fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::which("claude").is_none() {
         return;
     }
@@ -446,12 +471,18 @@ fn mcp_claude(out: &mut Vec<Item>) {
         // claude.ai-hosted servers expose a display URL but their account
         // credentials are not a transferable local definition.
         let portable = !name.starts_with("claude.ai ");
-        out.push(mcp_item("claude", name, target, health).put("portable", portable.to_string()));
+        let transport = if !portable { "hosted" }
+            else if target.starts_with("http://") || target.starts_with("https://") { "http" }
+            else { "stdio" };
+        out.push(
+            mcp_item("claude", name, target, health, transport, checked_at)
+                .put("portable", portable.to_string())
+        );
     }
 }
 
 /// codex has --json, which also reports auth_status and why it is disabled.
-fn mcp_codex(out: &mut Vec<Item>) {
+fn mcp_codex(out: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::which("codex").is_none() {
         return;
     }
@@ -479,7 +510,9 @@ fn mcp_codex(out: &mut Vec<Item>) {
             .or_else(|| tr.and_then(|t| t.get("type").and_then(|c| c.as_str()).map(str::to_string)))
             .unwrap_or_default();
         let detail = detail.rsplit('/').next().unwrap_or(&detail).to_string();
-        let mut it = mcp_item("codex", name, &detail, health);
+        let transport = tr.and_then(|transport| transport.get("type"))
+            .and_then(|kind| kind.as_str()).unwrap_or("unknown");
+        let mut it = mcp_item("codex", name, &detail, health, transport, checked_at);
         if let Some(r) = s.get("disabled_reason").and_then(|v| v.as_str()) {
             it = it.put("reason", r);
         }
@@ -492,6 +525,7 @@ fn mcp_codex(out: &mut Vec<Item>) {
             it = it
                 .put("portable", "true")
                 .put("definition_hash", def.public_fingerprint())
+                .put("definition_public", def.public_definition().to_string())
                 .put("definition_source", "semantic")
                 .put("sensitive", sensitive.to_string());
             // Complete definitions never enter an Item or cache. Even a
@@ -517,11 +551,18 @@ fn enrich_mcp_matrix(items: &mut [Item]) {
             crate::capability::McpVariant {
                 agent: item.get("agent").to_string(),
                 health: item.get("health").to_string(),
+                transport: item.get("transport").to_string(),
+                health_checked_at: item.get("health_checked_at").parse().unwrap_or(0),
                 summary: item.fields.get(2).cloned().unwrap_or_default(),
                 fingerprint: item.get("definition_hash").to_string(),
                 source: item.get("definition_source").to_string(),
+                public_definition: serde_json::from_str(item.get("definition_public"))
+                    .unwrap_or(serde_json::Value::Null),
                 sensitive: item.get("sensitive") == "true",
                 portable: item.get("portable") == "true",
+                tools_status: item.get("tools_status").to_string(),
+                tools_checked_at: item.get("tools_checked_at").parse().unwrap_or(0),
+                tools: serde_json::from_str(item.get("tools")).unwrap_or_default(),
             }
         }).collect();
         let owners: Vec<String> = variants.iter().map(|variant| variant.agent.clone()).collect();

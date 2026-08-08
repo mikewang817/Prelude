@@ -85,8 +85,8 @@ impl Mcp {
     /// Stable comparison identity with all env/header names and values
     /// removed. A count says the definitions have private material without
     /// turning that material into indexed data.
-    pub fn public_fingerprint(&self) -> String {
-        let value = match self {
+    pub fn public_definition(&self) -> serde_json::Value {
+        match self {
             Mcp::Stdio { command, args, env, .. } => {
                 let command = if sensitive_text(command) { "<redacted>" } else { command };
                 let args: Vec<&str> = args.iter().map(|arg| {
@@ -101,8 +101,11 @@ impl Mcp {
                 "type": "http", "url": if sensitive_text(url) { "<redacted>" } else { url },
                 "private_fields": headers.len(),
             }),
-        };
-        crate::capability::fingerprint(value.to_string().as_bytes())
+        }
+    }
+
+    pub fn public_fingerprint(&self) -> String {
+        crate::capability::fingerprint(self.public_definition().to_string().as_bytes())
     }
 
     /// The name of the first field that `secrets` calls a credential.

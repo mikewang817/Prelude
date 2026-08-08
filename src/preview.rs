@@ -129,7 +129,7 @@ pub fn text(it: &Item) -> String {
     let mut out = vec![format!("{color}{label}{RESET}"), String::new()];
     fn kv(out: &mut Vec<String>, k: &str, v: &str) {
         if !v.is_empty() {
-            out.push(format!("{DIM}{k:<9}{RESET}{v}"));
+            out.push(format!("{DIM}{k:<16}{RESET}{v}"));
         }
     }
 
@@ -241,8 +241,19 @@ pub fn text(it: &Item) -> String {
             kv(&mut out, "agent", it.get("agent"));
             kv(&mut out, "name", it.get("name"));
             kv(&mut out, "config", &tilde(it.get("config")));
+            kv(&mut out, "transport", it.get("transport"));
+            let health_at = it.get("health_checked_at").parse::<f64>().unwrap_or(0.0);
+            if health_at > 0.0 {
+                kv(&mut out, "health checked", &crate::sources::user::ago(health_at));
+            }
+            kv(&mut out, "tools", it.get("tools_status"));
+            let tools_at = it.get("tools_checked_at").parse::<f64>().unwrap_or(0.0);
+            if tools_at > 0.0 {
+                kv(&mut out, "tools checked", &crate::sources::user::ago(tools_at));
+            }
             kv(&mut out, "comparison", it.get("comparison"));
             let variants = crate::capability::mcp_variants(it);
+            let variant_count = variants.len();
             if !variants.is_empty() {
                 out.push(String::new());
                 out.push(format!("{DIM}availability{RESET}"));
@@ -267,6 +278,25 @@ pub fn text(it: &Item) -> String {
                             ""
                         },
                     ));
+                    if !variant.tools.is_empty() {
+                        out.push(format!("           {DIM}tools · checked {}{RESET}",
+                            crate::sources::user::ago(variant.tools_checked_at as f64)));
+                        for tool in variant.tools {
+                            let detail = if tool.description.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {}", tool.description)
+                            };
+                            out.push(format!("             {}{detail}", tool.name));
+                        }
+                    } else if !variant.tools_status.is_empty() {
+                        out.push(format!("           {DIM}tools · {}{RESET}", variant.tools_status));
+                    }
+                }
+                if variant_count > 1 {
+                    out.push(String::new());
+                    out.push(format!("{DIM}public definition diff{RESET}"));
+                    out.extend(crate::capability::mcp_definition_diff(it));
                 }
             }
         }

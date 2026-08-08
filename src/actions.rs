@@ -345,10 +345,22 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         }
         Kind::Mcp if host == crate::defaults::Host::Agent => {
             let target = first_nonempty(it, &["file", "dir", "config"]);
-            let mut v = vec![
-                a("mcptools", "Show what it exposes", format!("{} mcp get", it.get("agent"))),
-                a("copy", "Copy server name", ""),
-            ];
+            let mut v = Vec::new();
+            if !it.get("tools").is_empty() && it.get("tools") != "[]" {
+                let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(it.get("tools"))
+                    .map(|tools| tools.len()).unwrap_or(0);
+                v.push(a("mcp-tools", "Show cached tools", format!("{count} tools")));
+            }
+            v.push(a("mcprefresh", if it.get("agent") == "claude" {
+                "Test connection now"
+            } else {
+                "Refresh status now"
+            }, it.get("agent")));
+            if it.get("transport") == "stdio" && it.get("health") != "disabled" {
+                v.push(a("mcp-tools-refresh", "Refresh tool inventory", "background protocol handshake"));
+            }
+            v.push(a("mcptools", "Show owner-reported details", format!("{} mcp get", it.get("agent"))));
+            v.push(a("copy", "Copy server name", ""));
             if crate::capability::mcp_variants(it).len() > 1 {
                 v.push(a("mcpcompare", "Compare Agent definitions", "redacted capability matrix"));
             }
@@ -361,6 +373,19 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             let target = first_nonempty(it, &["file", "dir", "config"]);
             let owner = it.get("agent");
             let mut v = Vec::new();
+            if !it.get("tools").is_empty() && it.get("tools") != "[]" {
+                let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(it.get("tools"))
+                    .map(|tools| tools.len()).unwrap_or(0);
+                v.push(a("mcp-tools", "Show cached tools", format!("{count} tools")));
+            }
+            v.push(a("mcprefresh", if owner == "claude" {
+                "Test connection now"
+            } else {
+                "Refresh status now"
+            }, owner));
+            if it.get("transport") == "stdio" && it.get("health") != "disabled" {
+                v.push(a("mcp-tools-refresh", "Refresh tool inventory", "explicit protocol handshake"));
+            }
             // Only offered to agents that can take one for a single run, and
             // never back to the one that already has it. Whether *this*
             // particular server can be lent at all takes a subprocess to
@@ -624,8 +649,18 @@ fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
     v
 }
 
+fn mcp_tool_lines(it: &Item) -> Vec<String> {
+    let tools: Vec<crate::mcp_tools::Tool> = serde_json::from_str(it.get("tools")).unwrap_or_default();
+    if tools.is_empty() {
+        return vec![format!("tool inventory: {}", it.get("tools_status"))];
+    }
+    tools.into_iter().map(|tool| {
+        if tool.description.is_empty() { tool.name } else { format!("{} · {}", tool.name, tool.description) }
+    }).collect()
+}
+
 fn mcp_matrix_lines(it: &Item) -> Vec<String> {
-    crate::capability::mcp_variants(it).into_iter().map(|variant| {
+    let mut lines: Vec<String> = crate::capability::mcp_variants(it).into_iter().map(|variant| {
         let hash = variant.fingerprint.strip_prefix("fnv1a64-v1:").unwrap_or(&variant.fingerprint);
         format!(
             "{:<10} {:<10} {} · {}{}",
@@ -641,7 +676,11 @@ fn mcp_matrix_lines(it: &Item) -> Vec<String> {
                 ""
             },
         )
-    }).collect()
+    }).collect();
+    lines.push(String::new());
+    lines.push("public definition diff".into());
+    lines.extend(crate::capability::mcp_definition_diff(it));
+    lines
 }
 
 fn first_nonempty(it: &Item, keys: &[&str]) -> String {
@@ -744,7 +783,7 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
 }
 
 fn stays_in_panel(id: &str) -> bool {
-    matches!(id, "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcpcompare")
+    matches!(id, "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcp-tools" | "mcpcompare")
         || id.starts_with("diff:")
 }
 
@@ -1222,6 +1261,44 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         // The MCP verbs are the agent's own CLI, handed over rather than run.
         // Each of these edits the agent's configuration or opens a browser
         // for OAuth, and both are things to read before agreeing to.
+        "mcp-tools" => return crate::runhere::show_text(
+            &format!("MCP tools · {} · {}", it.get("agent"), it.get("name")),
+            &mcp_tool_lines(it),
+        ),
+        "mcprefresh" => {
+            if !crate::cache::refresh_named("mcp") {
+                ui::note("could not refresh MCP status", paste);
+                return 2;
+            }
+            let refreshed = crate::cache::read_cached("mcp");
+            let current = refreshed.iter().find(|server| {
+                server.get("agent") == it.get("agent") && server.get("name") == it.get("name")
+            });
+            match current {
+                Some(server) => ui::note(
+                    &format!("{} status: {}", server.get("agent"), server.get("health")), paste,
+                ),
+                None => ui::note("the owner no longer reports that MCP server", paste),
+            }
+        }
+        "mcp-tools-refresh" => {
+            if !crate::cache::refresh_named("mcp-tools") {
+                ui::note("could not refresh MCP tools", paste);
+                return 2;
+            }
+            let refreshed = crate::cache::read_cached("mcp-tools");
+            let current = refreshed.iter().find(|server| {
+                server.get("agent") == it.get("agent") && server.get("name") == it.get("name")
+            });
+            match current {
+                Some(server) => {
+                    let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(server.get("tools"))
+                        .map(|tools| tools.len()).unwrap_or(0);
+                    ui::note(&format!("tool inventory: {} · {count} tools", server.get("status")), paste);
+                }
+                None => ui::note("no tool inventory was produced for that server", paste),
+            }
+        }
         "mcptools" => {
             let c = format!("{} mcp get {}", it.get("agent"), shq(it.get("name")));
             return crate::runhere::run_cmd(&c);

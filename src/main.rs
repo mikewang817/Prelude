@@ -21,6 +21,7 @@ mod init;
 mod item;
 mod lend;
 mod minitoml;
+mod mcp_tools;
 mod openwith;
 mod paths;
 mod preview;
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
         ["paste"] => ui::search(ui::resolve_pane(None)),
         ["paste", pane] => ui::search(ui::resolve_pane(Some(pane))),
         ["doctor"] => doctor::run(),
+        ["doctor", "mcp"] => doctor::mcp(),
         ["bench"] => bench(),
         ["fleet"] => fleet::list(false),
         ["fleet", "--json"] => fleet::list(true),
@@ -290,6 +292,7 @@ HUMANS
   prelude fleet --status one short line for a tmux status bar
   prelude watch          notify the moment an agent stops and waits for you
   prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
+  prelude doctor mcp     MCP transport, health, tools and privacy diagnostics
 
   Inside search:  : lists scopes · a: agents · s: sessions · f: files
                   c: clipboard · h: history · g TERM searches Google
@@ -1872,12 +1875,42 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_inventory_keeps_only_safe_bounded_metadata() {
+        assert_eq!(crate::sources::agents::normalize_transport("streamable_http"), "http");
+        assert_eq!(crate::sources::agents::normalize_transport("stdio"), "stdio");
+        assert_eq!(crate::sources::agents::normalize_transport("hosted"), "hosted");
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2,
+            "result": {"tools": [
+                {"name": "search", "description": "Search the public index"},
+                {"name": "API_KEY_exfiltrate", "description": "must disappear"},
+                {"name": "login", "description": "Use password=abcdefghijklmnop"}
+            ]}
+        });
+        let tools = crate::mcp_tools::parse_tools_response(&response);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "search");
+        assert_eq!(tools[0].description, "Search the public index");
+        assert_eq!(tools[1].name, "login");
+        assert!(tools[1].description.is_empty());
+        let json = serde_json::to_string(&tools).unwrap();
+        assert!(!json.contains("abcdefghijklmnop") && !json.contains("exfiltrate"));
+        let failed = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2,
+            "error": {"message": "startup failed with API_KEY=do-not-retain"}
+        });
+        assert!(crate::mcp_tools::parse_tools_response(&failed).is_empty());
+        assert!(!serde_json::to_string(&crate::mcp_tools::parse_tools_response(&failed))
+            .unwrap().contains("do-not-retain"));
+    }
+
+    #[test]
     fn control_snapshot_groups_mcp_variants_without_private_definitions() {
         use crate::capability::McpVariant;
         use crate::item::{Item, Kind};
         let variants = vec![
-            McpVariant { agent: "claude".into(), health: "ok".into(), summary: "node a.js".into(), fingerprint: "a".into(), source: "semantic".into(), sensitive: false, portable: true },
-            McpVariant { agent: "codex".into(), health: "auth".into(), summary: "node b.js".into(), fingerprint: "b".into(), source: "semantic".into(), sensitive: true, portable: true },
+            McpVariant { agent: "claude".into(), health: "ok".into(), summary: "node a.js".into(), fingerprint: "a".into(), source: "semantic".into(), public_definition: serde_json::json!({"type":"stdio","command":"node","args":["a.js"],"private_fields":0}), sensitive: false, portable: true, ..Default::default() },
+            McpVariant { agent: "codex".into(), health: "auth".into(), summary: "node b.js".into(), fingerprint: "b".into(), source: "semantic".into(), public_definition: serde_json::json!({"type":"stdio","command":"node","args":["b.js"],"private_fields":1}), sensitive: true, portable: true, ..Default::default() },
         ];
         let common = serde_json::to_string(&variants).unwrap();
         let claude = Item::new("claude mcp get shared", Kind::Mcp)
@@ -1887,6 +1920,10 @@ mod tests {
             .put("agent", "codex").put("name", "shared").put("capability_id", "mcp:shared")
             .put("comparison", "divergent").put("variants", common)
             .put("def", "private-definition-must-not-be-in-control");
+        let diff = crate::capability::mcp_definition_diff(&claude);
+        assert!(diff.iter().any(|line| line == "args[0]"));
+        assert!(diff.iter().any(|line| line.contains("a.js")));
+        assert!(diff.iter().any(|line| line.contains("b.js")));
         let graph = crate::control::Snapshot::from_items(&[], &[], &[], &[claude, codex], &[]);
         assert_eq!(graph.mcp.len(), 1);
         assert_eq!(graph.mcp[0].owners, ["claude", "codex"]);

@@ -212,11 +212,18 @@ impl Snapshot {
                     vec![crate::capability::McpVariant {
                         agent: server.get("agent").to_string(),
                         health: server.get("health").to_string(),
+                        transport: server.get("transport").to_string(),
+                        health_checked_at: server.get("health_checked_at").parse().unwrap_or(0),
                         summary: server.fields.get(2).cloned().unwrap_or_default(),
                         fingerprint: server.get("definition_hash").to_string(),
                         source: server.get("definition_source").to_string(),
+                        public_definition: serde_json::from_str(server.get("definition_public"))
+                            .unwrap_or(serde_json::Value::Null),
                         sensitive: server.get("sensitive") == "true",
                         portable: server.get("portable") == "true",
+                        tools_status: server.get("tools_status").to_string(),
+                        tools_checked_at: server.get("tools_checked_at").parse().unwrap_or(0),
+                        tools: serde_json::from_str(server.get("tools")).unwrap_or_default(),
                     }]
                 } else {
                     variants

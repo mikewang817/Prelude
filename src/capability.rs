@@ -205,17 +205,90 @@ pub struct McpVariant {
     pub agent: String,
     pub health: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transport: String,
+    #[serde(default)]
+    pub health_checked_at: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fingerprint: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub public_definition: serde_json::Value,
     #[serde(default)]
     pub sensitive: bool,
     #[serde(default)]
     pub portable: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tools_status: String,
+    #[serde(default)]
+    pub tools_checked_at: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<crate::mcp_tools::Tool>,
 }
 
 pub fn mcp_variants(item: &Item) -> Vec<McpVariant> {
     serde_json::from_str(item.get("variants")).unwrap_or_default()
+}
+
+fn flatten_json(prefix: &str, value: &serde_json::Value, out: &mut std::collections::BTreeMap<String, String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+                flatten_json(&path, value, out);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                flatten_json(&format!("{prefix}[{index}]"), value, out);
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string(), value.to_string());
+        }
+    }
+}
+
+pub fn mcp_definition_diff(item: &Item) -> Vec<String> {
+    let variants = mcp_variants(item);
+    if variants.len() < 2 {
+        return vec!["only one owner definition is available".into()];
+    }
+    let mut flattened = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for variant in &variants {
+        let mut fields = std::collections::BTreeMap::new();
+        flatten_json("", &variant.public_definition, &mut fields);
+        paths.extend(fields.keys().cloned());
+        flattened.push(fields);
+    }
+    let mut lines = Vec::new();
+    for path in paths {
+        let values: Vec<Option<&String>> = flattened.iter().map(|fields| fields.get(&path)).collect();
+        if values.windows(2).all(|pair| pair[0] == pair[1]) {
+            continue;
+        }
+        lines.push(path.clone());
+        for (variant, value) in variants.iter().zip(values) {
+            lines.push(format!(
+                "  {:<10} {}",
+                variant.agent,
+                value.map(String::as_str).unwrap_or("<absent>")
+            ));
+        }
+        if lines.len() >= 100 {
+            lines.push("… diff truncated".into());
+            break;
+        }
+    }
+    if lines.is_empty() {
+        lines.push(if variants.iter().any(|variant| variant.sensitive) {
+            "public structures match; private values were not compared".into()
+        } else {
+            "public structures match".into()
+        });
+    }
+    lines
 }

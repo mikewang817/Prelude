@@ -172,7 +172,7 @@ Remaining:
 
 Evidence: `02f3d65`, `src/capability.rs`, `src/sources/agents.rs`.
 
-### 4. MCP capability matrix — `[>]` **Current milestone**
+### 4. MCP capability matrix — `[x]`
 
 Implemented foundation:
 
@@ -187,24 +187,28 @@ Implemented foundation:
 - [x] Existing Show tools route uses the owner CLI on an explicit action.
 - [x] Login action appears for auth failures.
 
-Required to finish this milestone:
+Completed acceptance criteria:
 
-- [ ] Record normalized transport: `stdio`, `http`, `sse`, hosted or unknown.
-- [ ] Record `health_checked_at` from the slow MCP snapshot.
-- [ ] Inventory actual tool names/descriptions in the slow background cache.
-- [ ] Record `tools_checked_at` and distinguish unsupported from failed inventory.
-- [ ] Add `Test connection now` as an explicit refresh, never a per-key check.
-- [ ] Add Enable / Disable only for CLIs whose current help confirms syntax.
-- [ ] Produce a structural redacted definition Diff, not only summary plus hash.
-- [ ] Detect duplicate definitions within one owner where the CLI reports them.
-- [ ] Add targeted MCP diagnostics to `prelude doctor mcp`.
-- [ ] Pin tests proving tool output and failures cannot carry secrets into caches.
+- [x] Record normalized transport: `stdio`, `http`, `sse`, hosted or unknown.
+- [x] Record `health_checked_at` from the slow MCP snapshot.
+- [x] Inventory actual stdio tool names/descriptions through MCP `tools/list` in the slow background cache.
+- [x] Record `tools_checked_at` and distinguish unsupported, disabled and failed inventory.
+- [x] Add `Test connection now` for Claude and an honest status refresh for Codex, never per key.
+- [x] Verify Enable / Disable syntax before offering it. Current Claude and Codex MCP help exposes no server-level toggle, so no action is invented.
+- [x] Produce a structural redacted definition Diff, not only summary plus hash.
+- [x] Detect duplicate owner/name definitions in targeted diagnostics.
+- [x] Add targeted MCP diagnostics through `prelude doctor mcp`.
+- [x] Pin tests proving tool output and failures cannot carry secrets into caches.
+- [x] Paginate `tools/list`, bound retained tools/descriptions, drain stderr without retaining it, and terminate the inventory server.
+- [x] Represent HTTP/hosted tool inventory as unsupported when owner authentication is unavailable rather than reporting an empty successful list.
 
-Definition of done: `Ctrl+P`, `prelude control --json` and `prelude doctor mcp`
-must agree on owners, transport, health time, tools time, portability and public
-definition state, while no retained artifact contains a complete definition.
+Definition-of-done evidence: `Ctrl+P`, Control schema 2 and `prelude doctor mcp`
+now consume the same cached transport, health timestamp, tool timestamp,
+portability and redacted public-definition records. On the validation machine,
+`node_repl` reports three actual tools while hosted/HTTP definitions state why
+tool inventory is unsupported.
 
-### 5. Run effective context — `[ ]`
+### 5. Run effective context — `[ ]` **Current milestone**
 
 Acceptance criteria:
 
@@ -292,24 +296,22 @@ Checks:
 
 Work must proceed in this order unless this document records a reason to change it:
 
-1. MCP transport and health timestamps.
-2. Background MCP tools inventory with privacy filtering and timestamps.
-3. Explicit MCP connection refresh and verified Enable/Disable syntax.
-4. Structural redacted definition Diff and MCP doctor checks.
-5. Run explicit Capability extraction and effective-context Quick Look.
-6. Task/event persistence and CLI.
-7. Agent Home ordering/filtering on Task evidence.
-8. Persistent threaded messaging and handoff.
-9. Specialized Doctor and remaining Session/Skill maintenance gaps.
+1. Run explicit Capability extraction without retaining process arguments.
+2. Git branch evidence without spawning Git on gather or per-key paths.
+3. Effective-context Quick Look and graph reverse edges.
+4. Task/event persistence and CLI.
+5. Agent Home ordering/filtering on Task evidence.
+6. Persistent threaded messaging and handoff.
+7. Specialized Doctor and remaining Session/Skill maintenance gaps.
 
 ## Validation baseline
 
 As of 2026-08-08:
 
 - Branch: `feature/agent-control-plane`
-- Tests: 54 passing
+- Tests: 55 passing
 - Release Clippy: warning-free
-- Gather benchmark: median 19.5 ms, budget 40 ms
+- Gather benchmark: median 19.5 ms, max 23.1 ms, budget 40 ms
 - Control schema: 2
 - Working implementation commits:
   - `1c18cb2` — stable Agent/Run/Session graph
@@ -317,6 +319,16 @@ As of 2026-08-08:
   - `02f3d65` — Skill/MCP integrity matrix foundation
 
 ## Progress log
+
+### 2026-08-08 — MCP inventory and diagnostics completed
+
+- Added normalized transport and authoritative health timestamps.
+- Added a five-minute background MCP stdio handshake with paginated `tools/list`.
+- Retained only bounded, credential-filtered tool names/descriptions and generic errors.
+- Added health/tool refresh actions, structural public-definition Diff and `doctor mcp`.
+- Verified current Claude/Codex help has no server-level Enable/Disable command;
+  Prelude therefore offers none.
+- Advanced the current milestone to Run effective context.
 
 ### 2026-08-08 — plan made explicit
 

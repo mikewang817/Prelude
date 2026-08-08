@@ -808,14 +808,21 @@ refuses to copy a source containing credential-like files or lines.
 MCP inventory and health come from each agent's own CLI (`claude mcp list`,
 `codex mcp list --json`), which includes hosted servers and real connection
 state. Servers with the same name form one capability matrix across owners,
-health and redacted definition fingerprints. Complete definitions—arguments,
-env and headers included—are never retained in launcher Items or caches; an
-explicit lend/install action asks the owner CLI again. Account-hosted servers
-with no transferable local definition show as owner-only and have no fake
-borrow or install targets. A one-time migration
-removes definitions and derived search rows written by older builds.
-`prelude doctor` reports drift, unknown hashes, redactions and unhealthy MCP
-servers.
+health, normalized transport, timestamps and redacted definition fingerprints.
+A five-minute background snapshot starts enabled stdio servers long enough to
+perform the MCP initialize and paginated `tools/list` handshake. Quick Look
+then shows the actual bounded tool names and descriptions. HTTP and hosted
+servers say that tool inventory is unsupported when Prelude has no owner
+authentication; they are not presented as successful empty lists.
+
+Complete definitions—arguments, env and headers included—are never retained in
+launcher Items or caches; an explicit lend/install action asks the owner CLI
+again. Account-hosted servers with no transferable local definition show as
+owner-only and have no fake borrow or install targets. `Ctrl+K` can refresh
+health, refresh a stdio tool inventory, and show a structural redacted
+Definition Diff. A one-time migration removes definitions and derived search
+rows written by older builds. `prelude doctor mcp` reports transport, stale
+health/tools, duplicate owner/name records, auth failures and privacy state.
 
 ## It learns
 
@@ -913,6 +920,7 @@ run for themselves.
 | `prelude init zsh` · `tmux` · `agent` | shell, tmux, and the block for CLAUDE.md |
 | `prelude index` | build the file index for `f:name` |
 | `prelude doctor` | diagnose the setup |
+| `prelude doctor mcp` | MCP transport, health, tool inventory and privacy diagnostics |
 | `prelude bench` | measure candidate-gathering |
 | `prelude build-translate` | compile the Apple translation helper |
 

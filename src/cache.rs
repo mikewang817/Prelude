@@ -98,7 +98,14 @@ pub fn write_cached_if_changed(name: &str, items: &[Item]) {
     let _ = write_atomic(&cache_file(name), &json);
 }
 
-const REFRESH_TTL: u64 = 5;
+fn refresh_ttl(name: &str) -> u64 {
+    match name {
+        "mcp-tools" => 300,
+        "mcp" => 60,
+        "skill-hashes" => 30,
+        _ => 5,
+    }
+}
 
 pub fn stale(name: &str) -> bool {
     cache_file(name)
@@ -106,7 +113,7 @@ pub fn stale(name: &str) -> bool {
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.elapsed().ok())
-        .map(|age| age.as_secs() >= REFRESH_TTL)
+        .map(|age| age.as_secs() >= refresh_ttl(name))
         .unwrap_or(true)
 }
 
@@ -133,6 +140,9 @@ const SLOW: &[Source] = &[
     // Full Skill trees can contain scripts and references. Hash them away
     // from the launch path; gather reads only the small fingerprint cache.
     ("skill-hashes", crate::sources::agents::skill_hashes),
+    // MCP initialize + tools/list can start local server processes. It is a
+    // background inventory, never part of health gather or a keypress.
+    ("mcp-tools", crate::mcp_tools::inventory),
     // ps with full command lines plus a bulk lsof for their working
     // directories: ~95ms, and worth having only for completeness.
     ("fleet", crate::sources::running::fleet),

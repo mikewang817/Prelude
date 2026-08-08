@@ -169,9 +169,13 @@ not the server's primary purpose.
 
 Alternatives are:
 
+- Show cached actual tools when the background MCP handshake succeeded
+- Test Claude connection health now, or refresh Codex's owner-reported status
+- Refresh an enabled stdio tool inventory explicitly
+- Show owner-reported configuration details
 - Prepare one-off use with another supported agent
 - Insert an install command for review
-- Compare redacted definitions when several Agents own the same server
+- Compare structurally redacted definitions when several Agents own the same server
 - Prepare a remove-and-install replacement command only after showing that comparison
 - Insert a login command when authentication is required
 - Open the owning configuration when one exists
@@ -183,7 +187,10 @@ fingerprints omit env/header values and credential-bearing arguments. A
 replacement command is inserted for review, never run automatically, and is
 refused when the source cannot be represented without private fields.
 Account-hosted servers without a transferable local definition offer no
-borrow, install or replacement action.
+borrow, install or replacement action. HTTP/hosted tool inventory is labelled
+unsupported when owner authentication is unavailable. Current Claude and Codex
+CLI help exposes no server-level Enable/Disable verb, so Prelude does not invent
+one.
 
 ### File and config
 

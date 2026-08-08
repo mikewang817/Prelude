@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 54 tests
+cargo test                 # 55 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -368,7 +368,16 @@ headers and even URLs can hold credentials. Cache only a redacted semantic
 fingerprint and display summary; `lend::resolve` asks the owner CLI again on
 an explicit action. Account-hosted servers with no local definition are
 `portable=false` and must expose no borrow/install target. `privacy_migrations`
-scrubs old MCP and derived search caches once. Prelude's 0600 `borrow/` staging files are the deliberate
+scrubs old MCP and derived search caches once.
+
+Actual MCP tools come from `mcp_tools.rs`, not from pretending `mcp get` is a
+tool list. The slow source starts enabled stdio servers, performs initialize
+plus paginated `tools/list`, keeps only bounded credential-filtered names and
+descriptions, drains but never retains stderr, and kills the child. HTTP and
+hosted servers are explicitly `unsupported` when Prelude has no owner auth;
+that is different from a successful empty list. Tool inventory has a five
+minute TTL and never runs per key. Current Claude/Codex help has no
+server-level Enable/Disable verb, so no such action is offered. Prelude's 0600 `borrow/` staging files are the deliberate
 exception and are never search input.
 
 Each agent has its own invocation syntax. `opencode` needs a subcommand

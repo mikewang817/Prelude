@@ -5,6 +5,65 @@ use crate::exec::which;
 use crate::item::Kind;
 use crate::paths;
 
+pub fn mcp() -> i32 {
+    // An explicit diagnostic may pay for authoritative owner CLI health.
+    let _ = crate::cache::refresh_named("mcp");
+    let servers = crate::cache::read_cached("mcp");
+    let now = crate::frecency::now() as u64;
+    let mut ok = true;
+    let mut seen = std::collections::BTreeSet::new();
+    println!("\n{CYAN}Prelude doctor · MCP{RESET}\n");
+    if servers.is_empty() {
+        println!("  {YELLOW}✗{RESET} no MCP servers reported by installed Agent CLIs\n");
+        return 1;
+    }
+    for server in &servers {
+        let owner = server.get("agent");
+        let name = server.get("name");
+        let duplicate = !seen.insert((owner.to_string(), name.to_lowercase()));
+        let health_at = server.get("health_checked_at").parse::<u64>().unwrap_or(0);
+        let tools_at = server.get("tools_checked_at").parse::<u64>().unwrap_or(0);
+        let health_stale = health_at == 0 || now.saturating_sub(health_at) > 120;
+        let tools_status = server.get("tools_status");
+        let tools_stale = !matches!(tools_status, "unsupported" | "disabled")
+            && (tools_at == 0 || now.saturating_sub(tools_at) > 600);
+        let healthy = server.get("health") == "ok";
+        let transport_known = matches!(server.get("transport"), "stdio" | "http" | "sse" | "hosted");
+        let retained_definition = !server.get("def").is_empty();
+        let mark = if healthy && !health_stale && !tools_stale && !duplicate
+            && transport_known && !retained_definition {
+            format!("{GREEN}✓{RESET}")
+        } else {
+            ok = false;
+            format!("{YELLOW}✗{RESET}")
+        };
+        println!(
+            "  {mark} {owner:<8} {name}  {DIM}{} · {} · tools {}{RESET}",
+            server.get("transport"), server.get("health"), tools_status,
+        );
+        for issue in [
+            duplicate.then_some("duplicate owner/name definition"),
+            health_stale.then_some("health snapshot is stale or missing"),
+            tools_stale.then_some("tool inventory is stale or missing"),
+            (!transport_known).then_some("transport is unknown"),
+            retained_definition.then_some("complete definition was retained — privacy violation"),
+        ].into_iter().flatten() {
+            println!("      {YELLOW}{issue}{RESET}");
+        }
+        if !healthy {
+            println!("      {YELLOW}health requires attention: {}{RESET}", server.get("health"));
+        }
+        if server.get("sensitive") == "true" {
+            println!("      {DIM}private definition fields are omitted from retained data{RESET}");
+        }
+        if server.get("portable") == "false" {
+            println!("      {DIM}owner-account only; no transferable local definition{RESET}");
+        }
+    }
+    println!();
+    if ok { 0 } else { 1 }
+}
+
 pub fn run() -> i32 {
     let mut ok = true;
     let mut check = |label: String, good: bool, detail: &str| {
@@ -86,11 +145,15 @@ pub fn run() -> i32 {
     let mcps: Vec<&str> = mcp_rows.iter().map(|i| i.title.as_str()).collect();
     let unhealthy = mcp_rows.iter().filter(|server| server.get("health") != "ok").count();
     let private = mcp_rows.iter().filter(|server| server.get("sensitive") == "true").count();
+    let tools_ok = mcp_rows.iter().filter(|server| server.get("tools_status") == "ok").count();
+    let tools_failed = mcp_rows.iter().filter(|server| server.get("tools_status") == "failed").count();
+    let tools_pending = mcp_rows.iter().filter(|server| server.get("tools_status") == "pending").count();
     println!("\n  {CYAN}agents{RESET}");
     println!("    {DIM}skills:{RESET} {skills} unique · {divergent} divergent · {unknown} unhashed");
     println!("    {DIM}skill privacy:{RESET} {sensitive} copies contain redacted credential-like lines");
     println!("    {DIM}mcp servers:{RESET} {}", if mcps.is_empty() { "none".into() } else { mcps.join("  ") });
     println!("    {DIM}mcp health:{RESET} {unhealthy} need attention · {private} definitions keep private fields out of cache");
+    println!("    {DIM}mcp tools:{RESET} {tools_ok} inventoried · {tools_failed} failed · {tools_pending} pending");
     let clis: Vec<&str> = ["claude", "codex", "pi", "cursor-agent", "opencode", "gemini"]
         .iter().copied().filter(|c| which(c).is_some()).collect();
     println!("    {DIM}CLIs on PATH:{RESET} {}", clis.join("  "));
