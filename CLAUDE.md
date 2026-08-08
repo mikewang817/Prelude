@@ -42,7 +42,17 @@ they are sitting in.
 
 **Latency is the product.** fzf re-invokes the binary on *every keystroke*
 through a transform binding, so startup cost is paid hundreds of times per
-session. Be sceptical of new dependencies. `bench` must stay under 40ms.
+session. Be sceptical of new dependencies. `bench` must stay under 40ms; it
+sits around 15 on a quiet machine, and every millisecond of that is a
+subprocess. Per keystroke the binary costs about 2ms, of which 1.6 is the
+kernel's fork and exec — there is nothing left to win there, so measure
+`gather` and leave the helpers alone.
+
+**A launch costs whatever its slowest subprocess costs.** The `FAST` sources
+run on threads and are waited for together, so the floor is the slowest one
+and the local work underneath it is free. That is the only shape worth
+optimising for: shaving a source that is not the slowest changes nothing,
+and the profile has to be re-read after every win because the floor moves.
 
 **Two keys: Enter is the primary action, Ctrl+K is the panel.** Raycast has
 a third — the secondary action on its own key — and Prelude keeps the
@@ -90,7 +100,13 @@ opens the browser, while `^K` offers `Insert URL` for a conversation.
 
 **Sources degrade to nothing.** A source that fails, or finds nothing,
 returns an empty list. Never blocks, never panics, never prints. Anything
-slower than ~25ms belongs behind the cache tier.
+slower than ~25ms belongs behind the cache tier. And a source that can see
+it will find nothing should not pay to find that out: `docker ps` costs the
+same 14ms whether or not a daemon answers, because the cost is the CLI
+starting, so `containers` resolves the socket the daemon would listen on and
+does not ask when it is not there. Being *unsure* costs a launch 14ms —
+anything that cannot be resolved falls through to the subprocess, because
+the failure to avoid is a missing row, not a slow one.
 
 **Never index or transmit credentials.** `secrets.rs` filters history and
 clipboard. Route any new source that reads user data through it.
@@ -166,6 +182,37 @@ for two thousand rows if you take the maximum.
 waiting on a process while its pipe fills deadlocks past 64KB; `ps -Ao`
 emits ~74KB. Keep stderr too: discarding it turned every agent failure into
 a permanent, silent "asking…".
+
+**Asking `ps` for `comm=` doubles the cost of the process list**, because the
+kernel has to be asked for each process's argument block one at a time to
+recover argv[0] — 21ms against 10ms for eight hundred and fifty processes,
+and for years that was the single largest cost in a launch. It was being
+paid for all of them to display two dozen: `procs` takes the fields that come
+free out of the process table and reads argv[0] itself, through the same
+sysctl, for the handful of rows that survive the filter.
+
+Three things about that are load-bearing. It must be **argv[0], not
+`proc_pidpath`** — an agent CLI is routinely a script, so the executable
+path reports `pi` and `claude` as `node`, which are the two rows a launcher
+for agents must not mislabel. The buffer must be **`KERN_ARGMAX`, not a
+guess** — argc and the executable path are followed by *padding* before argv
+begins, four kilobytes of it for a Chrome-style helper, and a buffer too
+small to reach past it reads as a process with no arguments and silently
+falls back. And `/bin/ps` is **setuid root** while we are not, so another
+user's process answers EINVAL: those fall back to `proc_pidpath`, which is
+readable for anything and is why the ordering cannot be swapped.
+
+**A cache and the source that presents it must not both be put in the
+list.** `finish` keeps the first of a duplicate pair, and the raw `fleet`
+rows went in first — so every agent in the launcher showed a blank row while
+the live state `running::live` had just computed was thrown away, and
+`prelude fleet` was the only place the fleet worked. A cache with a presenter
+in front of it belongs to the presenter.
+
+**The gather deadline is measured from the start of a gather**, not from
+where the local work happens to have finished. Measured from the end, the
+real bound was that work *plus* the deadline — sixty milliseconds against a
+budget of forty, and nothing said so.
 
 ## Agents
 

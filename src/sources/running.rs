@@ -355,10 +355,19 @@ fn cwd_of_agents() -> std::collections::HashMap<String, String> {
 /// millisecond. A run whose process has gone is dropped rather than shown.
 pub fn live() -> Vec<Item> {
     let now = now();
-    let panes = panes();
-    crate::cache::read_cached("fleet")
+    // Which runs still exist is a `kill(pid, 0)` each and settles the common
+    // case — nothing running — before tmux is asked anything. `list-panes` is
+    // a subprocess, and spawning one to decorate an empty list is the whole
+    // cost of this source on a machine with no agents on it.
+    let runs: Vec<Item> = crate::cache::read_cached("fleet")
         .into_iter()
         .filter(|it| alive(it.get("pid")))
+        .collect();
+    if runs.is_empty() {
+        return Vec::new();
+    }
+    let panes = panes();
+    runs.into_iter()
         .map(|mut it| {
             // Two clocks, one meaning. The pane's is the more direct when
             // there is one; the session file is the one that exists

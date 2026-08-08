@@ -323,12 +323,6 @@ pub fn all() -> Vec<Item> {
 /// Without this the 500+ sessions here would swamp everything else.
 pub const IN_MAIN_LIST: usize = 15;
 
-pub fn recent() -> Vec<Item> {
-    let mut v = crate::cache::read_cached("sessions");
-    v.truncate(IN_MAIN_LIST);
-    v
-}
-
 /// The newest conversation this agent had, if there is one.
 ///
 /// The cache is written newest-first, so this is the first match. It is what
@@ -389,21 +383,29 @@ pub fn start_cmd(agent: &str, cwd: Option<&str>, prompt: Option<&str>) -> String
 ///
 /// Restricted to names we know are skills — otherwise every `/Users/...`
 /// path in a message would look like an invocation.
-pub fn skill_usage(known: &[String]) -> std::collections::HashMap<String, (u32, f64)> {
+pub fn skill_usage(
+    known: &[String],
+    sessions: &[Item],
+) -> std::collections::HashMap<String, (u32, f64)> {
     let mut out: std::collections::HashMap<String, (u32, f64)> = Default::default();
     if known.is_empty() {
         return out;
     }
-    for it in crate::cache::read_cached("sessions") {
+    // Lowercased once. The inner loop runs for every session times every
+    // skill — six hundred by however many you have written — so a marker
+    // built inside it is thousands of allocations to compare a dozen
+    // strings that never change.
+    let markers: Vec<String> = known.iter().map(|n| format!("/{}", n.to_lowercase())).collect();
+    for it in sessions {
         let hay = format!("{} {}", it.title, it.get("opening")).to_lowercase();
         if !hay.contains('/') {
             continue;
         }
         let ts = it.get("ts").parse::<f64>().unwrap_or(0.0);
-        for name in known {
+        for (name, marker) in known.iter().zip(&markers) {
             // Scan for the marker anywhere: CJK text has no spaces, so the
             // invocation is often glued to the words around it.
-            if hay.contains(&format!("/{}", name.to_lowercase())) {
+            if hay.contains(marker.as_str()) {
                 let e = out.entry(name.to_lowercase()).or_insert((0, 0.0));
                 e.0 += 1;
                 e.1 = e.1.max(ts);

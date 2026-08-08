@@ -97,41 +97,63 @@ pub fn refresh_named(name: &str) -> bool {
     false
 }
 
-const EXTERNAL_DEADLINE: Duration = Duration::from_millis(50);
+/// The whole of `gather`, not the part of it left after the local sources
+/// have run.
+///
+/// It used to be measured from the moment the local work finished, which
+/// meant the real bound was that work *plus* this — around sixty
+/// milliseconds against a budget of forty. Anchoring it at the start makes
+/// the number mean what `bench` asserts: a launch takes this long at worst,
+/// whatever any subprocess is doing.
+const EXTERNAL_DEADLINE: Duration = Duration::from_millis(40);
 
 pub fn gather() -> Vec<Item> {
+    let deadline = std::time::Instant::now() + EXTERNAL_DEADLINE;
     // Kick the subprocess-backed sources off first so they overlap with the
-    // cheap local ones instead of adding to them.
-    let handles: Vec<_> = FAST
-        .iter()
-        .map(|(name, f)| {
-            let name = *name;
-            let f = *f;
-            (name, std::thread::spawn(move || {
-                let items = f();
-                write_cached(name, &items);
-                items
-            }))
-        })
-        .collect();
+    // cheap local ones instead of adding to them. Each reports through the
+    // channel as it finishes, so nothing is polled and no one waits on a
+    // source that is already done.
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, (name, f)) in FAST.iter().enumerate() {
+        let (name, f, tx) = (*name, *f, tx.clone());
+        std::thread::spawn(move || {
+            let items = f();
+            write_cached(name, &items);
+            // The receiver is gone once the deadline passes; the cache write
+            // above is what that straggler was still worth.
+            let _ = tx.send((i, items));
+        });
+    }
+    drop(tx);
 
     let mut items = Vec::with_capacity(2600);
     // Search providers, fixed Quicklinks and scope commands belong in global
     // search, but the empty-query home filters them back out.
     items.extend(crate::compute::quicklink_items());
     items.extend(crate::compute::scope_commands());
+
+    // Read once, then hand down. Sessions is six hundred rows of JSON that
+    // the recent list, the skill ranking and the agent summary all want, and
+    // the MCP list is wanted twice — between them they were most of the
+    // local half of a gather, spent parsing the same two files over.
+    let sessions = read_cached("sessions");
+    let mcp = read_cached("mcp");
     for (name, _) in SLOW {
-        // Sessions are numerous enough to swamp the list; only the newest
-        // few go in, and `s:` searches the rest.
-        if *name == "sessions" {
-            items.extend(crate::sources::sessions::recent());
-        } else {
-            items.extend(read_cached(name));
-        }
         if stale(name) {
             spawn_self(&["_refresh", name]);
         }
     }
+    items.extend(read_cached("ports"));
+    // Sessions are numerous enough to swamp the list; only the newest
+    // few go in, and `s:` searches the rest.
+    items.extend(sessions.iter().take(crate::sources::sessions::IN_MAIN_LIST).cloned());
+    items.extend(mcp.iter().cloned());
+    // The `fleet` cache is deliberately *not* extended here, unlike its three
+    // neighbours. It records who is running, not what they are doing, and
+    // `running::live` below is what turns it into rows. Both went in, the
+    // cached one first — and `finish` keeps the first of a duplicate pair, so
+    // every run in the launcher showed a blank row while the live state it
+    // had just computed was thrown away.
 
     // Pure file/CPU work — microseconds each, just run them.
     items.extend(crate::sources::project::scripts());
@@ -141,7 +163,8 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::user::ssh());
     items.extend(crate::sources::user::snippets());
     items.extend(crate::sources::user::clips());
-    items.extend(crate::sources::agents::skills());
+    let skills = crate::sources::agents::skills_with(&sessions);
+    items.extend(skills.iter().cloned());
 
     // Questions agents are blocked on. A directory read of a handful of small
     // files, and the most urgent thing the launcher can show.
@@ -155,20 +178,22 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::machine::apps());
     items.extend(crate::sources::machine::system());
     items.extend(crate::sources::agents::configs());
-    items.extend(crate::sources::agents::summary());
-    items.extend(read_cached("mcp"));
+    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions));
 
-    let deadline = std::time::Instant::now() + EXTERNAL_DEADLINE;
-    for (name, h) in handles {
+    // Collected by index rather than in arrival order: `finish` keeps the
+    // first of any duplicate pair, so which source got there first must not
+    // decide what the list contains.
+    let mut fast: Vec<Option<Vec<Item>>> = (0..FAST.len()).map(|_| None).collect();
+    while fast.iter().any(Option::is_none) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() && !h.is_finished() {
-            // Missed the deadline — show the last known result rather than
-            // stalling. The straggler keeps running and refreshes the cache
-            // while you read the list, so the next launch is current.
-            items.extend(read_cached(name));
-            continue;
-        }
-        match join_before(h, left) {
+        // Missed the deadline — show the last known result rather than
+        // stalling. The straggler keeps running and refreshes the cache
+        // while you read the list, so the next launch is current.
+        let Ok((i, v)) = rx.recv_timeout(left) else { break };
+        fast[i] = Some(v);
+    }
+    for (i, (name, _)) in FAST.iter().enumerate() {
+        match fast[i].take() {
             Some(v) => items.extend(v),
             None => items.extend(read_cached(name)),
         }
@@ -176,27 +201,19 @@ pub fn gather() -> Vec<Item> {
     finish(items)
 }
 
-fn join_before(h: std::thread::JoinHandle<Vec<Item>>, budget: Duration) -> Option<Vec<Item>> {
-    let start = std::time::Instant::now();
-    while start.elapsed() < budget {
-        if h.is_finished() {
-            return h.join().ok();
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    if h.is_finished() { h.join().ok() } else { None }
-}
-
 /// The agent control centre as data. Sessions deliberately have their own
 /// `sessions` command and `s:` scope; including hundreds of them here made
 /// both the human overview and `prelude agents --json` session listings in
 /// disguise.
 pub fn gather_agents() -> Vec<Item> {
+    let sessions = read_cached("sessions");
+    let mcp = read_cached("mcp");
+    let skills = crate::sources::agents::skills_with(&sessions);
     let mut items = crate::bus::items();
-    items.extend(crate::sources::agents::summary());
+    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions));
     items.extend(crate::sources::running::live());
-    items.extend(crate::sources::agents::skills());
-    items.extend(read_cached("mcp"));
+    items.extend(skills);
+    items.extend(mcp);
     items.extend(crate::sources::agents::configs());
     finish(items)
 }

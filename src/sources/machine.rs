@@ -42,14 +42,28 @@ pub fn ports() -> Vec<Item> {
 
 /// Heaviest processes by CPU. The gap `ports` leaves: sometimes you know the
 /// program is misbehaving but not which port it holds.
+///
+/// Asking `ps` for `comm=` doubles the cost of the whole call — 21ms against
+/// 10ms here, for ~850 processes — because the kernel has to be asked for
+/// each process's argument block one at a time to recover argv[0]. That was
+/// the largest single cost in `gather`, and it was being paid for eight
+/// hundred rows to display two dozen.
+///
+/// So the list is fetched with the fields that come free out of the process
+/// table, and the name is upgraded afterwards for the handful of rows that
+/// survive the filter — the same sysctl, forty times instead of eight
+/// hundred and fifty.
 pub fn procs() -> Vec<Item> {
-    let out = run(&["ps", "-Ao", "pid=,pcpu=,rss=,comm=", "-r"], Duration::from_secs(3));
+    let out = run(&["ps", "-Ao", "pid=,pcpu=,rss=,ucomm=", "-r"], Duration::from_secs(3));
     let mut items = Vec::new();
+    // One buffer for the whole pass. It is virtual until written to, and the
+    // kernel copies only the arguments that exist — a few kilobytes.
+    let mut buf = vec![0u8; arg_max()];
     for line in out.lines().take(40) {
-        // Not splitn(): runs of spaces produce empty fields, and the command
-        // is a path that legitimately contains spaces
-        // ("Google Chrome Helper (Renderer)"), so the tail must stay intact.
-        let Some((pid, cpu, rss, comm)) = split3(line) else { continue };
+        // Not splitn(): runs of spaces produce empty fields, and the name is
+        // a path that legitimately contains spaces ("Input Source Pro"), so
+        // the tail must stay intact.
+        let Some((pid, cpu, rss, ucomm)) = split3(line) else { continue };
         let (Ok(cpu_f), Ok(rss_kb)) = (cpu.parse::<f64>(), rss.parse::<f64>()) else {
             continue;
         };
@@ -57,6 +71,8 @@ pub fn procs() -> Vec<Item> {
         if cpu_f < 0.5 && mb < 200.0 {
             continue;
         }
+        let full = argv0(pid, &mut buf).or_else(|| exe_path(pid));
+        let comm = full.as_deref().unwrap_or(ucomm);
         let name = comm.rsplit('/').next().unwrap_or(comm).to_string();
         let mem = if mb >= 1024.0 {
             format!("{:.1}GB", mb / 1024.0)
@@ -77,6 +93,92 @@ pub fn procs() -> Vec<Item> {
     items
 }
 
+unsafe extern "C" {
+    unsafe fn sysctl(
+        name: *const i32,
+        namelen: u32,
+        oldp: *mut u8,
+        oldlenp: *mut usize,
+        newp: *const u8,
+        newlen: usize,
+    ) -> i32;
+}
+
+const CTL_KERN: i32 = 1;
+const KERN_ARGMAX: i32 = 8;
+const KERN_PROCARGS2: i32 = 49;
+
+/// The largest argument block the kernel will ever hand back, which is how
+/// big the scratch buffer has to be.
+///
+/// It cannot be guessed at. The block is `argc`, the executable path, then
+/// *padding* before argv begins — and the padding is whatever the stack
+/// layout made it, four kilobytes for a Chrome-style helper here. A buffer
+/// too small to reach past it comes back looking like a process with no
+/// arguments, and the row silently falls back to the short name.
+fn arg_max() -> usize {
+    let mib = [CTL_KERN, KERN_ARGMAX];
+    let mut out = 0i32;
+    let mut len = std::mem::size_of::<i32>();
+    let ok = unsafe {
+        sysctl(mib.as_ptr(), 2, (&raw mut out).cast(), &mut len, std::ptr::null(), 0) == 0
+    };
+    if ok && out > 0 { out as usize } else { 256 * 1024 }
+}
+
+/// How a process was invoked, which is what `ps -o comm=` prints.
+///
+/// Not the executable path: an agent CLI is routinely a script, so
+/// `proc_pidpath` would report `pi` and `claude` as `node` — precisely the
+/// two rows a launcher for agents must not mislabel. argv[0] is what the
+/// person typed, and it is what `ps` shows.
+///
+/// `/bin/ps` is setuid root and we are not, so another user's process — most
+/// of the system daemons — answers EINVAL rather than its arguments. Those
+/// fall back to `proc_pidpath`, which is readable for anything and gives the
+/// executable in full; the order matters and cannot be swapped, because
+/// `proc_pidpath` is exactly the answer that turns `pi` into `node`.
+fn argv0(pid: &str, buf: &mut [u8]) -> Option<String> {
+    let pid: i32 = pid.parse().ok()?;
+    let mib = [CTL_KERN, KERN_PROCARGS2, pid];
+    let mut len = buf.len();
+    let ok =
+        unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) == 0 };
+    if !ok || len < 8 {
+        return None;
+    }
+    let block = &buf[..len];
+    if i32::from_ne_bytes(block[..4].try_into().ok()?) < 1 {
+        return None; // no arguments recorded
+    }
+    let rest = &block[4..];
+    let exec_end = rest.iter().position(|b| *b == 0)?;
+    let start = exec_end + rest[exec_end..].iter().take_while(|b| **b == 0).count();
+    let arg = rest.get(start..)?;
+    let end = arg.iter().position(|b| *b == 0).unwrap_or(arg.len());
+    let s = String::from_utf8_lossy(&arg[..end]).into_owned();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The executable behind a pid, readable even for another user's process.
+///
+/// Only ever a fallback — see `argv0`. It reports what was *executed*, so a
+/// script's interpreter, which is the wrong answer for every agent CLI and
+/// the right one for the system daemons that will not show their arguments.
+fn exe_path(pid: &str) -> Option<String> {
+    unsafe extern "C" {
+        unsafe fn proc_pidpath(pid: i32, buffer: *mut u8, buffersize: u32) -> i32;
+    }
+    const PROC_PIDPATHINFO_MAXSIZE: usize = 4 * 1024;
+    let pid: i32 = pid.parse().ok()?;
+    let mut buf = [0u8; PROC_PIDPATHINFO_MAXSIZE];
+    let n = unsafe { proc_pidpath(pid, buf.as_mut_ptr(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
 /// Take the first three whitespace-separated fields, leaving the remainder
 /// untouched.
 fn split3(line: &str) -> Option<(&str, &str, &str, &str)> {
@@ -90,8 +192,55 @@ fn split3(line: &str) -> Option<(&str, &str, &str, &str)> {
     Some((f[0], f[1], f[2], rest.trim_end()))
 }
 
+/// Where the docker daemon listens, when that is a unix socket we can name.
+///
+/// Used only to decide *not* to ask. `docker ps` costs the same 14ms whether
+/// or not a daemon answers it — `docker --version` alone costs 13 — because
+/// the cost is the CLI binary starting rather than the query. Docker Desktop
+/// and OrbStack are both routinely installed and not running, and that is
+/// the case worth not paying for: there is no socket, and no subprocess is
+/// going to find one.
+///
+/// Anything this cannot resolve — a TCP `DOCKER_HOST`, a context layout that
+/// has moved on — returns `None` and the subprocess runs as it always did.
+/// Being unsure must cost a launch 14ms, never a container.
+fn docker_socket() -> Option<std::path::PathBuf> {
+    let unix = |s: &str| s.strip_prefix("unix://").map(std::path::PathBuf::from);
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        // A TCP host is not ours to second-guess; fall through and ask.
+        return unix(&host.to_string_lossy());
+    }
+    let dir = paths::home().join(".docker");
+    let json = |p: std::path::PathBuf| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
+    let ctx = std::env::var("DOCKER_CONTEXT").ok().or_else(|| {
+        json(dir.join("config.json"))?
+            .get("currentContext")?
+            .as_str()
+            .map(str::to_string)
+    });
+    let Some(ctx) = ctx.filter(|c| c != "default") else {
+        return Some(std::path::PathBuf::from("/var/run/docker.sock"));
+    };
+    // Contexts are stored under a hash of their name, so the name has to be
+    // read back out of each one rather than computed.
+    for e in std::fs::read_dir(dir.join("contexts/meta")).ok()?.flatten() {
+        let Some(meta) = json(e.path().join("meta.json")) else { continue };
+        if meta.get("Name").and_then(|n| n.as_str()) != Some(ctx.as_str()) {
+            continue;
+        }
+        return unix(meta.pointer("/Endpoints/docker/Host")?.as_str()?);
+    }
+    None
+}
+
 /// Running containers. Silently empty when the daemon is off.
 pub fn containers() -> Vec<Item> {
+    // Nothing is listening, so nothing can be running.
+    if docker_socket().is_some_and(|s| !s.exists()) {
+        return Vec::new();
+    }
     let out = run(
         &["docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}"],
         Duration::from_secs(3),

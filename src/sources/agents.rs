@@ -75,6 +75,16 @@ pub fn usage_rank(times: u32, last: f64) -> f64 {
 /// once and naming the agents that have it is more useful than either three
 /// duplicate rows or silently dropping two of them.
 pub fn skills() -> Vec<Item> {
+    skills_with(&crate::cache::read_cached("sessions"))
+}
+
+/// The same, for a caller that already holds the session list.
+///
+/// Ranking a skill means counting the conversations that invoked it, and the
+/// session cache is the largest thing `gather` reads. Passing it in is what
+/// keeps a gather from parsing it once for the skills, once for the agent
+/// summary, and once again for the recent list.
+pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
     let mut merged: BTreeMap<String, Skill> = BTreeMap::new();
     for (dir, agent) in skill_dirs() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -111,7 +121,7 @@ pub fn skills() -> Vec<Item> {
         }
     }
     let names: Vec<String> = merged.keys().cloned().collect();
-    let usage = super::sessions::skill_usage(&names);
+    let usage = super::sessions::skill_usage(&names, sessions);
     merged
         .into_iter()
         .map(|(name, rec)| {
@@ -447,7 +457,11 @@ pub fn configs() -> Vec<Item> {
 
 /// One row per installed agent, saying what it holds. The first thing you
 /// see when the launcher opens, because it is the thing most worth seeing.
-pub fn summary() -> Vec<Item> {
+/// Counted from lists the caller has already built rather than gathered
+/// again: this is a tally of the three sources above it, and computing them
+/// a second time to count them made a summary cost more than the thing it
+/// summarises.
+pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item]) -> Vec<Item> {
     use std::collections::BTreeMap;
     let mut per: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut tally = |it: &Item| {
@@ -461,14 +475,8 @@ pub fn summary() -> Vec<Item> {
             }
         }
     };
-    for it in skills() {
-        tally(&it);
-    }
-    for it in crate::cache::read_cached("mcp") {
-        tally(&it);
-    }
-    for it in crate::cache::read_cached("sessions") {
-        tally(&it);
+    for it in skills.iter().chain(mcp).chain(sessions) {
+        tally(it);
     }
     super::sessions::installed()
         .into_iter()
