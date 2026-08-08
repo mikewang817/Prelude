@@ -84,6 +84,7 @@ something you want to proofread.
 | | `Enter` |
 |---|---|
 | **a question an agent asked** | **answers it, and unblocks the agent** |
+| a running agent | goes to its pane |
 | an agent, a skill, a session | onto your prompt, ready to edit |
 | a file or config | opens in an application |
 | an app | launches it |
@@ -384,21 +385,34 @@ would type `˚` into the search box — and it never delivers Cmd to a terminal
 at all. A key that works on one machine and silently does nothing on the next
 is worse than no key.
 
-There is still a **secondary action** — Enter's opposite, per item — but it
-has no key of its own. It is the second entry of the `Ctrl+K` panel, right
-under Enter's, where it is spelled out instead of remembered:
+`Ctrl+K` opens the alternatives to Enter — and only the alternatives.
+**Enter's own action is the header, not a row**, because opening the panel is
+already the statement that you wanted something else:
 
 ```
-▸ Open in editor              Enter
-  Insert the full path        the other one
-  Copy absolute path
-  cd to its folder
+ README.md · file
+ Default: Open it · Enter
+
+ Action › Insert the full path
+          Open with…
+          Open in editor
+          Reveal in Finder
+          Copy path
+          Change default app for .md files…
+          Move it to the Trash…
 ```
 
-The two are opposites: where Enter *does* something, the other one hands you
-the text; where Enter hands you text, the other one does the thing.
+**Every label says whether it acts or hands you text.** `Open in editor`
+opens it; `Insert cd command` puts a command on your prompt; `Insert login
+command` does not pretend you are logged in. That distinction is the whole
+of the launcher's safety model, so it belongs in the words rather than in
+something you have to remember.
 
-| | `Enter` | the other one |
+There is still a **secondary action** — Enter's opposite, per item — where it
+adds a real choice, since it has no portable key of its own. Richer kinds
+name their alternatives specifically instead:
+
+| | `Enter` | its opposite |
 |---|---|---|
 | a command | insert it | run it |
 | an agent | insert it | start it |
@@ -406,7 +420,11 @@ the text; where Enter hands you text, the other one does the thing.
 | an app | launch it | insert its name |
 | a port | insert the kill | show what is using it |
 | a result | copy it | insert it |
-| a session | resume it | cd to where it ran |
+
+**The panel stays open when it makes sense to.** Copying and reading details
+return you to the list; opening, inserting and navigating finish the job.
+`Esc` steps back one level — out of a submenu to the actions, out of the
+actions to your search.
 
 Keys are spelled out rather than drawn as glyphs. A row of symbols is only
 legible to someone who already knows what they mean.
@@ -461,16 +479,52 @@ en:你好            →  Hello               g rust async  →  opens Google
 
 | Kind | Actions |
 |---|---|
-| **question** | Answer "go ahead" · Answer "no" · Go to it, zoomed · cd to its project |
-| **port** | Insert kill · Kill now · Show what's using it · Copy pid |
-| **process** | Insert kill · Kill now · Show full command · Copy pid |
-| **container** | Shell into · Follow logs · Stop · Restart |
-| **skill / mcp** | Lend it to another agent for one run · Copy it there for good · Insert name · Show description · Open in editor · Delete one agent's copy |
-| **file** | Insert path · Open in `$EDITOR` · Copy absolute path |
-| **snippet** | Insert and fill blanks · Edit snippets file |
+| **question** | Answer “go ahead” · Answer “no” · Show conversation context · Go to agent full-screen |
+| **agent** | Resume latest session · Ask it a one-off question · Open settings |
+| **running agent** | Send a message… · Show last response · Go to pane full-screen · **End agent…** |
+| **skill** | Run with claude · Prepare one-off run with pi · Install in pi · Read instructions · Open SKILL.md in editor · **Delete a copy…** |
+| **mcp** | Prepare one-off use with codex · Insert install command · Insert login command · **Insert remove command…** |
+| **file** | Open with… · Open in editor · Reveal in Finder · Copy path · Change default app for .json files… · **Move it to the Trash…** |
+| **port / process** | Copy PID · **Kill process…** |
+| **container** | Insert follow-logs command · Insert restart command · **Insert stop command** |
 
 That is the difference between a command picker and a launcher: a port is not
 text to insert, it is something you kill or inspect.
+
+**There is no generic tail.** Nothing is appended to a kind merely because it
+could be constructed — a calculator result had `Run in the shell below` on it,
+which offered to execute `424.81`, and an agent row had `Ask an agent about
+this`, which handed claude the word "pi". Each kind opts into the actions that
+answer a real question about it, and a two-line panel is the honest answer for
+a number rather than a failure.
+
+**Destructive actions are red, last, and confirm when they cannot be undone.**
+Ending a live agent loses the conversation in it; killing a process is not
+reversible; deleting is. So the first two ask, with Cancel selected by
+default, while stopping a container — which `docker start` undoes — is merely
+red. Nothing that bites sits near the top, where a mis-aimed Enter lands.
+
+**Deleting always means the Trash, never `unlink`.** A skill is often the only
+copy and often not in git, so it is moved rather than removed, a name already
+there is never overwritten, and `$HOME`, the root and the system directories
+are refused however the row got here.
+
+**Where an agent has its own CLI, Prelude uses it.** `Insert login command`,
+`Insert install command` and `Insert remove command` hand you
+`claude mcp …` or `codex mcp …` rather than editing `~/.claude.json` — the
+agent knows its own format, that file holds far more than MCP servers, and a
+command on your prompt is this launcher's own form of confirmation. Installing
+a server whose environment holds an API key is refused for both, because
+`mcp add` takes the definition inline and there is no version of that which
+keeps the key out of your shell history.
+
+**The panel knows where you opened it from.** Over an agent's input box it
+drops resume, lending and one-off shell commands, which would land in the
+conversation as prose; what stays local — opening settings, opening an editor,
+revealing in Finder — runs in the popup instead of being typed into the chat.
+
+The reasoning for every entry, and for what was deliberately left out, is in
+[docs/ACTIONS.md](docs/ACTIONS.md).
 
 ## One surface for every agent
 
@@ -527,7 +581,10 @@ out to have a flag for taking one it does not own, for a single run:
 ```
 
 Borrowing installs nothing and leaves nothing behind. You get the command,
-you press Enter, and the loan ends when that process does.
+you press Enter, and the loan ends when that process does. `Install in pi`
+is the other half, for when the loan should have been a move — and for MCP
+servers it hands you that agent's own `mcp add`, rather than editing its
+config file on its behalf.
 
 **Delete one you are done with.** A skill merged across four agents is four
 directories behind one row, so `^K` offers them one at a time — "delete it"
