@@ -11,14 +11,14 @@ cargo build --release
 cargo test                 # 42 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
-./target/release/prelude _dump     # empty-query agent home, for diffing layout
-./target/release/prelude _dump-root # searchable root commands
-./target/release/prelude _dump-all  # complete catalogue behind scopes
+./target/release/prelude _dump       # empty-query agent home
+./target/release/prelude _dump-root  # searchable root commands
+./target/release/prelude _dump-all   # complete catalogue behind scopes
 ```
 
-`_dump`, `_dump-root`, `_dump-all`, `_footer`, `_preview`, `_bind`, `_dynamic`, `_copy`, `_runhere`,
-`_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`, `_lend-mcp`,
-`_actions` are internal entry points. They
+`_dump`, `_dump-root`, `_dump-all`, `_footer`, `_preview`, `_bind`, `_dynamic`,
+`_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`,
+`_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
 
@@ -56,9 +56,10 @@ and the profile has to be re-read after every win because the floor moves.
 
 **Two keys: Enter is the primary action, Ctrl+K is the panel.** Raycast has
 a third — the secondary action on its own key — and Prelude keeps the
-*action* but not the key: it is the second entry of the panel, under Enter's.
-Neither action is a fixed verb; both are per-item, and they are opposites —
-where one acts, the other hands you text. A test asserts they never coincide.
+action but not the key: where useful, it is the first selectable row below
+Enter's non-selectable header. Neither action is a fixed verb; both are
+per-item, and they are opposites — where one acts, the other hands you text.
+A test asserts they never coincide.
 
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
@@ -136,6 +137,13 @@ and clearing restores the home. Keep `home.txt`, the root-command `list.txt`
 and the complete scoped item cache on one gathered snapshot and one layout —
 a scope must never gather a source on each keystroke. `a:` excludes Session
 because `s:` owns the hundreds of old conversations.
+
+**A provider is a command until it has an argument.** Exact `g` and `google`
+show one Search Google row; Enter changes the query to `g ` without closing
+fzf, and only `g term` becomes a Link. Scope commands use the same
+`complete-query` mode (`f` → `f:`). Do not represent an incomplete provider
+as Link: its footer, actions and Enter would all claim a URL exists when it
+does not.
 
 **fzf matches against displayed text.** A row computed *from* the query can
 never fuzzy-match it, so `is_special()` recognizes intent and must not
@@ -269,10 +277,11 @@ comes from climbing the process tree — an agent's tool call runs `sh -c`, so
 the agent is a grandparent, not a parent. That is why the interface is four
 words with no configuration.
 
-Four things are pinned by tests, each already a bug. `Kind::Msg` sits at 1100
-because frecency adds up to 60 and a ten-point band was not a band at all —
-a claude row picked daily floated above a question blocked on you. `resolve`
-must not widen an exact project name into a substring match, and `say`
+Four things are pinned by tests, each already a bug. `Kind::Msg` sits at 1010
+because a question explicitly waiting on a person must lead the 1000-point
+Agent band; `cache::by_rank` now compares kind before frecency, so use records
+cannot lift an agent above it. `resolve` must not widen an exact project name
+into a substring match, and `say`
 refuses on anything but exactly one hit: a message in the wrong conversation
 reads as the human's own words. The flag split stops at the first non-flag
 word, so a question containing `--no-verify` keeps it. And a question is
@@ -307,11 +316,12 @@ providers). Quicklink writes are atomic and never overwrite a keyword;
 generated blocks are marked so removing one preserves hand-written
 `quicklinks.toml` comments and search templates byte-for-byte, and URLs that
 look credential-bearing are refused rather than indexed. Outside Prelude's
-config and caches, copying or deleting a skill are the only writes to user
-files, and neither is a default action.
+config and caches, only explicit actions write user files: installing a skill
+copy, or moving a selected file, application or skill copy to the Trash. None
+is a default action.
 
-Deleting a target is built so that being wrong is
-survivable rather than so that it cannot happen. It moves the directory to
+Deleting a skill copy is built so that being wrong is survivable rather than
+so that it cannot happen. It moves the directory to
 `~/.Trash` — never `unlink`, never `remove_dir_all` — uniquifying the name
 rather than overwriting what is already in there. `ui::confirm` puts Cancel
 first so a stray Enter cancels. And `is_skill_dir` refuses anything that is

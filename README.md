@@ -6,9 +6,10 @@ reach you from.
 Press one key. A search box appears with your agents, skills and MCP servers.
 Type a name to search that root, or open an explicit scope for project scripts,
 shell history, ports, processes, apps, clipboard and the other machine-wide
-sources. A selected command is **typed onto your prompt** for review.
+sources. Commands are **typed onto your prompt** for review; files, folders,
+apps and links open directly in their owning macOS application.
 
-You press Enter to actually run it.
+Enter performs the default stated in the footer.
 
 ```
 ╭─ Prelude ────────────────────────────────────────────────────────────╮
@@ -46,7 +47,7 @@ on:
 
 ```
 ╭─ Prelude ────────────────────────────────────────────────────────────╮
-│ ⌕                                                            1/2447  │
+│ ⌕                                                            1/25    │
 │ ▸ claude · api-gateway asks · asked 4m ago · The migration drops… asking you │
 │   claude · docs        · waiting 12m · work:2.1 · fix the limiter    running │
 │   cnipa-ooa            · claude, shared · used 8× · 1d ago             skill │
@@ -123,7 +124,8 @@ another. Side by side when the window is wide enough for two, stacked below
 about 170 columns, because an agent's TUI starts wrapping its own output
 much under eighty.
 
-`^K` always states the current default as its first entry, and
+`^K` states the current Enter default in a non-selectable header; the rows
+under it are alternatives rather than a repetition of Enter.
 `PRELUDE_CLASSIC_ENTER=1` restores insert-everything.
 
 ## Install
@@ -142,10 +144,10 @@ exec zsh
 
 Press **Ctrl-R**. Run `prelude doctor` to check the setup.
 
-> Ctrl-R replaces zsh's incremental history search, which moves to Ctrl-S.
-> Prelude is a superset of it. Override with `PRELUDE_KEY='^T'` set before the
-> `eval` line. Ctrl-Space is deliberately not used: macOS binds it to
-> "Select the previous input source" and the OS eats it first.
+> Ctrl-R replaces zsh's incremental history search, which moves to Ctrl-S;
+> Prelude's full history is under `h:`. Override with `PRELUDE_KEY='^T'` set
+> before the `eval` line. Ctrl-Space is deliberately not used: macOS binds it
+> to "Select the previous input source" and the OS eats it first.
 
 Two more, both optional and both one line:
 
@@ -398,6 +400,7 @@ already the statement that you wanted something else:
           Open in editor
           Reveal in Finder
           Copy path
+          Create Quicklink…
           Change default app for .md files…
           Move it to the Trash…
 ```
@@ -418,7 +421,7 @@ name their alternatives specifically instead:
 | an agent | insert it | start it |
 | a file | open it | insert its path |
 | a folder | open it in Finder | insert its path |
-| a URL | open it in the browser | open it in the browser |
+| a URL | open it in the browser | insert the URL |
 | an app | launch it | insert its name |
 | a port | insert the kill | show what is using it |
 | a result | copy it | insert it |
@@ -432,14 +435,14 @@ Keys are spelled out rather than drawn as glyphs. A row of symbols is only
 legible to someone who already knows what they mean.
 
 ```
-⏎ open in editor        ^K actions   esc close     ← on a file
-⏎ run it with an agent  ^K actions   esc close     ← on a skill
+⏎ open it               ^K actions   esc close     ← on a file
+⏎ hand it to an agent   ^K actions   esc close     ← on a skill
 ```
 
 A launcher whose header is a row of shortcuts has already failed to have an
 obvious default. `^O` (run here), `^X` (run in the shell), `^Y` (copy) and
 `^P` (detail pane) still work if you learned them; they are simply no longer
-advertised, and all of them are in `^K`.
+advertised. Their useful item-specific equivalents are named in `^K`.
 
 Open the launcher itself with `^R`.
 
@@ -476,23 +479,22 @@ rules that keep computed rows from being filtered out by fzf.
 
 ## What it searches
 
-| Source | Where it comes from |
-|---|---|
-| **Project scripts** | `package.json`, `Makefile`, `justfile`, `Cargo.toml`, `pyproject.toml`, `docker-compose.yml` — found by walking up from `$PWD`, with the runner picked from your lockfile |
-| **Ports** | Listening TCP ports — "what's on :3000, kill it" |
-| **Processes** | Heaviest by CPU and memory |
-| **Containers** | Running Docker containers |
-| **Clipboard** | The last things you copied |
-| **Snippets** | `snippets.toml`, with `{{placeholder}}` blanks |
-| **Agent skills** | Merged across Claude Code, Codex, pi, opencode |
-| **MCP servers** | Merged across every agent that has any |
-| **Apps** | Every installed `.app` |
-| **SSH hosts** | `~/.ssh/config` |
-| **Files** | The current project, plus an indexed set of roots via `f:name` |
-| **History** | Deduped, newest first |
-| **Folders** | zoxide's database, or `cd` targets mined from history |
-| **Git** | Branches read straight off `.git/refs` |
-| **`$PATH`** | Every executable, ranked lowest |
+| Source | Open it | Where it comes from |
+|---|---|---|
+| **Agent control centre** | `a:` | Agents, running agents, skills, MCP and config |
+| **Sessions** | `s:` | Conversations from Claude Code, Codex and pi |
+| **Project** | `proj:` | Scripts from `package.json`, Makefile, justfile, Cargo, Python and Compose; current files and Git |
+| **Files** | `f:` | The current project, plus the roots built by `prelude index` |
+| **Clipboard** | `c:` | The last things you copied |
+| **History** | `h:` | Deduped, newest first |
+| **Apps** | `app:` | Every installed `.app` |
+| **Commands** | `cmd:` | `$PATH` executables and system commands |
+| **Folders** | `dir:` | zoxide, or `cd` targets mined from history |
+| **SSH hosts** | `ssh:` | `~/.ssh/config` |
+| **Snippets** | `snip:` | `snippets.toml`, with `{{placeholder}}` blanks |
+| **Ports / processes** | `port:` / `proc:` | Listening TCP ports and the heaviest processes |
+| **Containers** | `docker:` | Running Docker containers |
+| **MCP / config** | `mcp:` / `cfg:` | Agent integrations and settings |
 
 Plus rows computed from what you type: web addresses, arithmetic, unit and
 currency conversion, date arithmetic, on-device translation, and quicklinks.
@@ -547,7 +549,7 @@ gh prelude          → GitHub search
 
 ## The action panel
 
-`^K` gives a result verbs appropriate to *what it is*, not just "insert":
+`^K` gives each result verbs appropriate to *what it is*, not just "insert":
 
 | Kind | Actions |
 |---|---|
@@ -556,7 +558,7 @@ gh prelude          → GitHub search
 | **running agent** | Send a message… · Show last response · Go to pane full-screen · **End agent…** |
 | **skill** | Run with claude · Prepare one-off run with pi · Install in pi · Read instructions · Open SKILL.md in editor · **Delete a copy…** |
 | **mcp** | Prepare one-off use with codex · Insert install command · Insert login command · **Insert remove command…** |
-| **file** | Open with… · Open in editor · Reveal in Finder · Copy path · Change default app for .json files… · **Move it to the Trash…** |
+| **file** | Open with… · Open in editor · Reveal in Finder · Copy path · Create Quicklink… · Change default app… · **Move it to the Trash…** |
 | **port / process** | Copy PID · **Kill process…** |
 | **container** | Insert follow-logs command · Insert restart command · **Insert stop command** |
 
@@ -642,13 +644,13 @@ Sessions do not fill the empty-query home. `s:` shows the newest conversations
 and searches all of them.
 
 **Lend a skill or an MCP server to an agent that lacks it.** Prelude knows
-which agents have a skill, so it knows which do not — and every agent turns
-out to have a flag for taking one it does not own, for a single run:
+which agents have a capability and which do not. Where the receiving CLI has
+a one-run flag, Prelude offers the lighter option before permanent install:
 
 ```
 ▸ my-skill    skill · claude, shared · missing: codex, pi
-     ^K  →  Use it in pi, just this run       ← nothing installed
-            Copy it to codex / Copy it to pi  ← keep it for good
+     ^K  →  Prepare one-off run with pi       ← nothing installed
+            Install in codex / Install in pi  ← keep it for good
 
 ▸ node_repl   mcp · codex · ✔ connected
      ^K  →  Lend it to claude for one run
@@ -671,8 +673,9 @@ happen to have it:
   Delete codex's copy…             to the Trash, after confirming
 ```
 
-This is the only destructive thing Prelude does to your files, and it is
-built so that being wrong is survivable rather than so that it cannot happen:
+Files and applications can also be moved to the Trash from their own panels.
+Skill deletion needs a stricter guard because one merged row can represent
+several directories, so it is built to make a wrong choice survivable:
 
 - **It goes to the Trash, never to `unlink`.** A skill is somebody's work,
   often the only copy and often not in git. Drag it back out if you were
@@ -694,9 +697,10 @@ built so that being wrong is survivable rather than so that it cannot happen:
 | pi | — | `--skill` |
 | opencode | — | — |
 
-A dash means no such flag exists, so nothing is offered — `Copy it to …` is
-the answer there. Two cases refuse on purpose: a **claude.ai-hosted** server
-has no definition to lend, because its credentials live with the Claude
+A dash means no such flag exists, so no one-run action is offered; permanent
+`Install in …` may still be available. Two cases refuse on purpose: a
+**claude.ai-hosted** server has no definition to lend, because its credentials
+live with the Claude
 account rather than on this machine; and a server whose env holds an API key
 is never handed to codex, whose only form is inline, where the key would end
 up in your shell history. claude gets a `0600` file in Prelude's cache
@@ -724,17 +728,16 @@ agents actually installed.
 **Jump to any agent config** — `CLAUDE.md`, `AGENTS.md`, `settings.json`,
 `config.toml`, `.mcp.json` — as a first-class row.
 
-
-
-Prelude reads skills and MCP servers from every agent CLI you have installed
-and merges them into one list. A skill present in several agents is shown
-once, labelled with which agents have it, rather than duplicated or silently
+Prelude inventories skills and MCP servers across every installed agent and
+merges them into one list. A skill present in several agents is shown once,
+labelled with which agents have it, rather than duplicated or silently
 deduped.
 
 Skills come from `~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`,
-`~/.pi/agent/skills` and `~/.config/opencode/skills`; MCP servers from
-`~/.codex/config.toml`, `~/.claude.json` and any project-local `.mcp.json`.
-`prelude doctor` prints the inventory.
+`~/.pi/agent/skills` and `~/.config/opencode/skills`. MCP inventory and health
+come from each agent's own CLI (`claude mcp list`, `codex mcp list --json`),
+which includes hosted servers and real connection state. `prelude doctor`
+prints the inventory.
 
 ## It learns
 
@@ -771,12 +774,12 @@ broken.
 
 ```
 $ prelude bench
-gather: 2364 items  min 20.4ms  median 22.1ms  max 28.6ms
+gather: 2459 items  min 24.6ms  median 25.0ms  max 25.2ms
 budget: 40ms  ->  OK
 ```
 
-Startup is ~1.7ms, which matters because fzf re-invokes the binary on every
-keystroke to decide what to show.
+The per-keystroke helpers take roughly 2–3ms on the same machine. That matters
+because fzf re-invokes the binary whenever the query changes.
 
 Sources are tiered by cost:
 
