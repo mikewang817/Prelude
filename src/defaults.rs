@@ -184,6 +184,26 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         (Run, Host::Shell) => Act(Verb::CdThere),
         (Run, Host::Agent) => InsertText(Text::AbsolutePath),
 
+        // A task is an object — a record, not a command line — so at a shell
+        // it acts. Which act is honest depends on whether anything is
+        // actually doing it: a task whose run is in a pane is being worked on
+        // right now, and going there is the same answer an active Session
+        // gives for the same reason. With nobody on it there is nothing to go
+        // to, and the whole of a task is its record, so opening it *is*
+        // showing that record.
+        //
+        // The address is not the store's to know — a pane outlives nothing and
+        // the record outlives everything — so `cache::attach_runs` joins it on
+        // at gather time, matching `Task.run_id` against the live `Run.run_id`.
+        // `actions.rs` gates its `zoom` row on the same key.
+        (Task, Host::Shell) if !item.get("pane").is_empty() => Act(Verb::JumpTo),
+        (Task, Host::Shell) => Act(Verb::RunHere),
+        // Mid-conversation the id is the useful half. `prelude task progress
+        // t123 "…"` is what an agent does with one, and a task id is short
+        // enough to hand over as a word and unique enough to be worth
+        // handing over rather than describing.
+        (Task, Host::Agent) => InsertText(Text::Name),
+
         (Session, _) => Act(Verb::ResumeSession),
         // At a shell this is a command line like any other, and the reason
         // to hand it over rather than run it is not safety — `claude` is
@@ -240,6 +260,10 @@ pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
         Agent => Act(Verb::RunInShell),
         // Primary goes there; the secondary tells you where "there" is.
         Run => InsertText(Text::AbsolutePath),
+        // Primary shows the record, or goes to whoever is doing it; the
+        // secondary hands over the one string that names it everywhere else —
+        // in a message, in a dependency, on another agent's command line.
+        Task => InsertText(Text::Name),
         // Primary kills or acts; the secondary shows you what you would hit.
         Port | Proc => Act(Verb::Inspect),
         // Primary does something to the object, so the secondary yields text.
@@ -323,6 +347,14 @@ fn name(item: &Item, d: Default_) -> &'static str {
     if d == Default_::Act(Verb::JumpTo) && item.kind == Kind::Session {
         return "Go to active agent";
     }
+    if item.kind == Kind::Task {
+        match d {
+            Default_::Act(Verb::JumpTo) => return "Go to the agent doing it",
+            Default_::Act(Verb::RunHere) => return "Show its record and history",
+            Default_::InsertText(Text::Name) => return "Insert the task id",
+            _ => {}
+        }
+    }
     if d == Default_::Act(Verb::CdThere) && item.kind == Kind::Session
         && !item.get("active_run").is_empty()
     {
@@ -383,6 +415,12 @@ pub fn text_for(it: &Item, what: Text) -> String {
             Kind::App => it.title.clone(),
             Kind::Link => it.get("url").to_string(),
             Kind::Mcp => it.get("name").to_string(),
+            // Never the title: two tasks called "fix the build" are two
+            // tasks, and only the id says which.
+            Kind::Task => match it.get("task_id") {
+                "" => it.cmd.clone(),
+                id => id.to_string(),
+            },
             _ => it.cmd.clone(),
         },
         // An instruction rather than a bare path: the point is for the

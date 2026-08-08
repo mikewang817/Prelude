@@ -45,6 +45,13 @@ pub fn list(json: bool) -> i32 {
 /// `prelude fleet --status`: called every few seconds by tmux, so it must
 /// never pay for subprocesses itself — cached identities, live states, and
 /// a detached refresh when the cache has aged. Exactly the launcher's deal.
+///
+/// The asking count is `bus::pending()` and nothing else, which is what makes
+/// the new message states show up here for free: a question that was
+/// withdrawn or that has passed its deadline is no longer pending, so the bar
+/// stops shouting about it without this function learning a new word. A bar
+/// that keeps counting a question nobody can answer any more is a bar people
+/// stop reading.
 pub fn status() -> i32 {
     if crate::cache::stale("fleet") {
         crate::cache::spawn_self(&["_refresh", "fleet"]);
@@ -106,6 +113,7 @@ const REFIND_EVERY: u32 = 3;
 /// `prelude watch`: the daemon. Loops forever; end it with ^C or kill.
 pub fn watch() -> i32 {
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tick: u32 = 0;
     eprintln!("prelude: watching — you will be notified when an agent stops and waits");
     loop {
@@ -126,7 +134,33 @@ pub fn watch() -> i32 {
         // Wholesale replacement: a pid that has gone is forgotten, so the
         // same pid number reused later is a fresh run, not a suppressed one.
         seen = now;
+        expired(&mut announced);
         std::thread::sleep(TICK);
+    }
+}
+
+/// Say once when a question runs out of time.
+///
+/// The whole reason the bus exists is that a decision nobody made is
+/// expensive, and a deadline passing is exactly that: the agent has stopped
+/// waiting and the work is stalled, which is *more* worth a banner than an
+/// agent merely going quiet — silence is a guess, this is a fact. Once per
+/// question, because a notification that repeats every five seconds is a
+/// notification people turn off.
+///
+/// The set is rebuilt against what is still on disk, so a swept message is
+/// forgotten rather than remembered forever by a daemon that runs for days.
+fn expired(announced: &mut std::collections::HashSet<String>) {
+    let msgs = crate::bus::all();
+    let ids: std::collections::HashSet<String> = msgs.iter().map(|m| m.id.clone()).collect();
+    announced.retain(|id| ids.contains(id));
+    for m in msgs.iter().filter(|m| m.state() == crate::bus::State::Expired) {
+        if announced.insert(m.id.clone()) {
+            let head = format!("{} — question expired", m.label());
+            let body = crate::width::dtrunc(&crate::width::flatten(&m.text), 140);
+            crate::bus::post(&head, &body);
+            println!("{head} — {body}");
+        }
     }
 }
 

@@ -4,10 +4,11 @@
 use crate::exec::shq;
 use crate::item::{Item, Kind};
 use crate::paths;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-fn skill_dirs() -> Vec<(std::path::PathBuf, &'static str)> {
+pub(crate) fn skill_dirs() -> Vec<(std::path::PathBuf, &'static str)> {
     let h = paths::home();
     vec![
         (h.join(".claude/skills"), "claude"),
@@ -38,6 +39,34 @@ struct Skill {
 /// Where each agent keeps its copy of a skill, off the row.
 pub fn copies_of(it: &Item) -> Vec<(String, String)> {
     serde_json::from_str(it.get("copies")).unwrap_or_default()
+}
+
+/// Every directory this row stands for, once each and in discovery order.
+///
+/// `dir` is only ever the first copy found, which is all borrowing and
+/// copying ever needed and not enough to *act on all of them*: a skill merged
+/// across four agents is four directories behind one row, and an "open all
+/// copies" that quietly opened one would look like it had failed. This is
+/// that target, made explicit — the copy list, backed by the hashed copies so
+/// a row written before one of the two fields existed still answers
+/// completely, and never a comma-joined agent list masquerading as an agent.
+pub fn copy_paths(item: &Item) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    let hashed = crate::capability::copies(item).into_iter().map(|copy| (copy.agent, copy.dir));
+    for (agent, dir) in copies_of(item).into_iter().chain(hashed) {
+        if !dir.is_empty() && seen.insert(dir.clone()) {
+            out.push((agent, dir));
+        }
+    }
+    if out.is_empty() {
+        let dir = item.get("dir");
+        let agent = item.get("agent").split(',').next().unwrap_or_default().trim();
+        if !dir.is_empty() {
+            out.push((agent.to_string(), dir.to_string()));
+        }
+    }
+    out
 }
 
 /// What one invocation is worth.
@@ -143,22 +172,14 @@ pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
             };
             let agents = rec.agents.join(", ");
             let missing = missing_agents(&agents);
-            let known: Vec<&str> = rec.copy_info.iter()
+            let unique: std::collections::BTreeSet<&str> = rec.copy_info.iter()
                 .map(|copy| copy.fingerprint.as_str())
                 .filter(|hash| !hash.is_empty())
                 .collect();
-            let unique: std::collections::BTreeSet<&str> = known.iter().copied().collect();
-            let integrity = if known.len() != rec.copy_info.len() {
-                "unknown"
-            } else if rec.copy_info.len() <= 1 {
-                "single"
-            } else if rec.copy_info.iter().any(|copy| copy.sensitive_files > 0) {
-                "private-unknown"
-            } else if unique.len() == 1 {
-                "identical"
-            } else {
-                "divergent"
-            };
+            // The five states live in `capability`, because the row, the
+            // Quick Look matrix and `doctor skills` must not each hold their
+            // own idea of what "identical" means.
+            let integrity = crate::capability::integrity(&rec.copy_info);
             let mut notes = Vec::new();
             if integrity == "divergent" {
                 notes.push("divergent copies".to_string());
@@ -196,13 +217,37 @@ pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
         .collect()
 }
 
+/// May a previously cached record stand in for walking this tree again?
+///
+/// Two independent questions, and they have to stay independent.
+///
+/// *Is the tree unchanged* is the stamp: a cheap metadata walk that skips the
+/// expensive one. *Is the record complete* is `capability::RECORD`, an
+/// explicit schema version, because the walk is exactly what an unchanged
+/// stamp skips — so a field added after a cache was written would never once
+/// be computed for a Skill nobody edits, and would read as zero for ever.
+///
+/// That second question used to be asked as `copy.modified > 0`, which is a
+/// value the filesystem chooses rather than a version we control. A tree whose
+/// newest mtime is at or before the epoch hashes to `modified == 0` and a
+/// perfectly good fingerprint, so the gate rejected the record it had just
+/// written — re-walking and re-hashing that whole tree on every refresh, for
+/// ever, at a cost that grows with the tree. A derived value cannot be a
+/// sentinel.
+fn reusable(current_record: bool, copy: &crate::capability::SkillCopy, stamp: &str) -> bool {
+    current_record && !stamp.is_empty() && copy.stamp == stamp && !copy.fingerprint.is_empty()
+}
+
 /// Full Skill-tree fingerprints. This is a background cache source: scripts,
 /// references and symlinks are part of a capability, so hashing only
 /// `SKILL.md` would call divergent copies identical.
 pub fn skill_hashes() -> Vec<Item> {
-    let previous: std::collections::HashMap<String, crate::capability::SkillCopy> =
+    let previous: std::collections::HashMap<String, (bool, crate::capability::SkillCopy)> =
         crate::cache::read_cached("skill-hashes").iter()
-            .map(|item| (item.get("dir").to_string(), crate::capability::copy_from_item(item)))
+            .map(|item| {
+                let current = crate::capability::is_current_record(item);
+                (item.get("dir").to_string(), (current, crate::capability::copy_from_item(item)))
+            })
             .collect();
     let mut out = Vec::new();
     for (root, agent) in skill_dirs() {
@@ -214,10 +259,8 @@ pub fn skill_hashes() -> Vec<Item> {
         }) {
             let path = dir.to_string_lossy().into_owned();
             let stamp = crate::capability::skill_stamp(&dir);
-            let copy = match previous.get(&path).filter(|copy| {
-                !stamp.is_empty() && copy.stamp == stamp && !copy.fingerprint.is_empty()
-            }) {
-                Some(copy) => copy.clone(),
+            let copy = match previous.get(&path).filter(|(current, copy)| reusable(*current, copy, &stamp)) {
+                Some((_, copy)) => copy.clone(),
                 None => {
                     let mut copy = crate::capability::hash_skill(agent, &dir);
                     copy.stamp = stamp;
@@ -313,36 +356,73 @@ pub fn is_skill_dir(p: &std::path::Path) -> bool {
         .any(|d| d == parent)
 }
 
-/// Pull name/description out of a SKILL.md YAML header.
-fn frontmatter(p: &std::path::Path, fallback: &str) -> (String, String) {
-    let Ok(text) = std::fs::read_to_string(p) else {
-        return (fallback.to_string(), String::new());
-    };
+/// What a SKILL.md header actually says, before any fallback is applied.
+///
+/// The display path below answers with the folder name when a header is
+/// missing a `name:`, which is right for a row and useless for validation:
+/// "there is no header" and "there is a header with no name" are different
+/// faults with different fixes. Both come off this one parser, because two
+/// parsers over one file eventually disagree — and that disagreement shows up
+/// as a row rendering one name beside a diagnostic complaining about another.
+pub(crate) struct Front {
+    /// The file opens with `---`.
+    pub opened: bool,
+    /// …and the block is closed again.
+    pub closed: bool,
+    pub name: Option<String>,
+    pub desc: Option<String>,
+}
+
+pub(crate) fn parse_front(text: &str) -> Front {
+    // An editor that writes a UTF-8 BOM puts three bytes in front of the `---`,
+    // and a header test spelled `starts_with("---")` then says the file has no
+    // frontmatter at all — for a file every agent parses without complaint. The
+    // launcher row would fall back to the folder name and `doctor skills` would
+    // report a working Skill as broken. Stripping it changes nothing for any
+    // other input: `trim_start_matches` on a string that does not start with
+    // the BOM returns that same string.
+    let text = text.trim_start_matches('\u{feff}');
+    let mut front = Front { opened: false, closed: false, name: None, desc: None };
     let mut lines = text.lines();
     if !lines.next().is_some_and(|l| l.starts_with("---")) {
-        return (fallback.to_string(), String::new());
+        return front;
     }
-    let (mut name, mut desc) = (fallback.to_string(), String::new());
+    front.opened = true;
     let mut in_desc = false;
     for line in lines {
         if line.starts_with("---") {
+            front.closed = true;
             break;
         }
         if let Some(v) = line.strip_prefix("name:") {
-            name = v.trim().trim_matches(['\'', '"']).to_string();
+            front.name = Some(v.trim().trim_matches(['\'', '"']).to_string());
             in_desc = false;
         } else if let Some(v) = line.strip_prefix("description:") {
-            desc = v.trim().trim_matches(['\'', '"']).to_string();
+            front.desc = Some(v.trim().trim_matches(['\'', '"']).to_string());
             in_desc = true;
         } else if in_desc && line.starts_with([' ', '\t']) {
             // folded continuation line
-            desc.push(' ');
-            desc.push_str(line.trim());
+            if let Some(desc) = front.desc.as_mut() {
+                desc.push(' ');
+                desc.push_str(line.trim());
+            }
         } else {
             in_desc = false;
         }
     }
-    (name, crate::width::flatten(&desc))
+    front
+}
+
+/// Pull name/description out of a SKILL.md YAML header, for display.
+fn frontmatter(p: &std::path::Path, fallback: &str) -> (String, String) {
+    let Ok(text) = std::fs::read_to_string(p) else {
+        return (fallback.to_string(), String::new());
+    };
+    let front = parse_front(&text);
+    (
+        front.name.unwrap_or_else(|| fallback.to_string()),
+        crate::width::flatten(&front.desc.unwrap_or_default()),
+    )
 }
 
 /// MCP servers, with the status each agent actually reports.
@@ -707,6 +787,404 @@ pub fn configs() -> Vec<Item> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Effective configuration
+// ---------------------------------------------------------------------------
+
+/// How an Agent CLI answers "what settings is a run actually operating under".
+///
+/// `configs()` above lists *files*, and a file is not an answer. Every one of
+/// these CLIs layers several sources — a home config, a project config,
+/// environment variables, flags on the command line — so reading one of them
+/// off disk and calling the result effective would be Prelude inventing
+/// capability information. This is the same rule the MCP sources already
+/// follow: ask the owner, or say you cannot.
+///
+/// The four installed CLIs were asked, and they do not agree:
+///
+/// **codex** has `codex doctor --json`, documented as "Emit a redacted
+/// machine-readable report" and covering "installation, config, auth, and
+/// runtime health". Its `checks["config.load"]` is genuinely *resolved* rather
+/// than read: `codex doctor --json -c model="o3-fake-test"` reports
+/// `"model": "o3-fake-test"`, and the same command run from another directory
+/// reports that directory as `cwd`. That is an effective-config reporter.
+///
+/// **opencode** has `opencode debug config`, whose own help says "show
+/// resolved configuration". It is directory-sensitive: a project holding an
+/// `opencode.json` sees that file's `model` and `instructions` merged into the
+/// object. Its values are the dangerous half — a `provider` block routinely
+/// holds an API key — so only key *names* and a short allowlist of scalars are
+/// carried out of it.
+///
+/// **claude** has no resolved-settings command at all. `claude config` is not
+/// a subcommand: the CLI takes `config` as a *prompt* and starts answering it.
+/// `claude doctor` reports the installation — version, package manager, update
+/// channel — and no settings. The one thing that does report effective
+/// configuration is `claude auto-mode config`, "Print the effective auto mode
+/// config as JSON: your settings where set, defaults otherwise", and it covers
+/// the auto-mode classifier alone. It is worth reporting as exactly that.
+///
+/// **pi** has `pi config`, which opens a TUI and has no non-interactive form
+/// (`--json` is refused: "Unknown option --json"). Nothing else prints
+/// settings. So pi gets no answer, said out loud, in the same voice its
+/// per-provider login already uses.
+///
+/// None of these reports the configuration of *another process*. See
+/// `RUN_SCOPE`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Effective {
+    /// `codex doctor --json` → `checks["config.load"]` and
+    /// `checks["sandbox.helpers"]`.
+    CodexDoctorJson,
+    /// `opencode debug config` → the merged config object for the directory.
+    OpencodeDebugConfig,
+    /// `claude auto-mode config` → the auto-mode classifier's effective rules.
+    ClaudeAutoMode,
+    /// The CLI has no non-interactive resolved-settings command.
+    None,
+}
+
+/// Why none of this is per-Run, said once so every caller says it the same way.
+///
+/// A Run's effective configuration is its agent's layered files *plus* the
+/// flags it was started with *plus* the environment it inherited, and the last
+/// two are exactly what Prelude may not keep: a full process command line can
+/// hold a credential, which is why `running.rs` extracts a hint and throws the
+/// rest away. Re-running the CLI in a Run's directory would answer a different
+/// question — what a run started there *now* would resolve — and presenting
+/// that as the Run's own configuration would be a guess wearing evidence's
+/// clothes. No installed CLI reports another process's resolved settings, so
+/// this evidence is agent-level and says so.
+pub const RUN_SCOPE: &str = "agent-level, not run-level · no installed Agent CLI reports the \
+                             resolved configuration of another process, and a Run's own flags and \
+                             environment are never retained";
+
+/// One key and one value that survived the credential filter.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigFact {
+    pub key: String,
+    pub value: String,
+}
+
+/// What one Agent CLI said about its own effective configuration, and when.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigEvidence {
+    pub agent: String,
+    /// Exactly what was asked, so the answer can be checked by hand. Absent
+    /// when there was nothing to ask.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// How far the answer reaches: `directory`, `subsystem` or `none`. Never
+    /// `run` — see `RUN_SCOPE`.
+    pub scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
+    /// The CLI's own word for the state of its configuration load, where it
+    /// has one. Never Prelude's opinion of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<ConfigFact>,
+    /// The honest limitation, always present.
+    pub note: String,
+    /// Set when the CLI was asked and did not answer usefully.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trouble: Option<String>,
+}
+
+pub fn effective_kind(agent: &str) -> Effective {
+    match agent {
+        "codex" => Effective::CodexDoctorJson,
+        "opencode" => Effective::OpencodeDebugConfig,
+        "claude" => Effective::ClaudeAutoMode,
+        _ => Effective::None,
+    }
+}
+
+fn effective_command(kind: Effective) -> Option<&'static [&'static str]> {
+    match kind {
+        Effective::CodexDoctorJson => Some(&["codex", "doctor", "--json"]),
+        Effective::OpencodeDebugConfig => Some(&["opencode", "debug", "config"]),
+        Effective::ClaudeAutoMode => Some(&["claude", "auto-mode", "config"]),
+        Effective::None => None,
+    }
+}
+
+/// Ask one Agent CLI. A subprocess, and for codex a network round trip — this
+/// belongs to `doctor agents` and to explicit commands, never to `gather`, a
+/// cache source or the per-keystroke helper.
+pub fn effective_config(agent: &str) -> ConfigEvidence {
+    let kind = effective_kind(agent);
+    let text = match effective_command(kind) {
+        // `codex doctor` performs provider reachability and a websocket
+        // handshake before it prints, which is why this one gets a minute.
+        Some(argv) if kind == Effective::CodexDoctorJson => {
+            crate::exec::run(argv, Duration::from_secs(60))
+        }
+        Some(argv) => crate::exec::run(argv, Duration::from_secs(30)),
+        None => String::new(),
+    };
+    let mut evidence = read_effective(kind, agent, &text);
+    if kind != Effective::None {
+        evidence.checked_at = Some(crate::frecency::now() as u64);
+    }
+    evidence
+}
+
+/// The keys of `checks["config.load"].details` worth carrying, named exactly.
+///
+/// An allowlist rather than a filter, because the same object also holds
+/// `enabled feature flags` — a single value listing thirty-nine flag names,
+/// hundreds of characters long — and the two keys differ only by word order.
+/// `feature flags enabled` is the count.
+const CODEX_CONFIG_KEYS: &[&str] = &[
+    "CODEX_HOME",
+    "config.toml",
+    "config.toml parse",
+    "cwd",
+    "model",
+    "model provider",
+    "mcp servers",
+    "feature flags enabled",
+    "feature flag overrides",
+];
+
+/// Sandbox and approval policy are configuration a run operates under just as
+/// much as the model is, and codex resolves them the same way.
+const CODEX_SANDBOX_KEYS: &[&str] =
+    &["approval policy", "filesystem sandbox", "network sandbox"];
+
+/// The opencode keys whose *values* may be shown. Everything else in that
+/// object is reported by name only: `provider` holds API keys, `mcp` holds
+/// commands, environments and headers, and `username` is an account identity —
+/// the same thing `doctor`'s login probe already refuses to print.
+const OPENCODE_VALUE_KEYS: &[&str] =
+    &["model", "small_model", "theme", "share", "autoupdate"];
+
+/// Turn what a CLI printed into evidence. Pure, so the real output of all four
+/// CLIs can be pinned by tests without any of them being installed.
+pub fn read_effective(kind: Effective, agent: &str, text: &str) -> ConfigEvidence {
+    let mut evidence = ConfigEvidence {
+        agent: agent.to_string(),
+        command: effective_command(kind).map(|argv| argv.join(" ")),
+        scope: match kind {
+            Effective::CodexDoctorJson | Effective::OpencodeDebugConfig => "directory",
+            Effective::ClaudeAutoMode => "subsystem",
+            Effective::None => "none",
+        },
+        checked_at: None,
+        status: None,
+        facts: Vec::new(),
+        note: match kind {
+            Effective::CodexDoctorJson =>
+                "`codex doctor --json` resolves config.toml, CODEX_HOME and `-c` overrides, so this \
+                 is what a codex run started in this directory would use — not what a Run already \
+                 going was started with"
+                    .into(),
+            Effective::OpencodeDebugConfig =>
+                "`opencode debug config` shows the merged configuration for this directory — not \
+                 that of a Run already going; provider, MCP and account values are named but never \
+                 printed"
+                    .into(),
+            Effective::ClaudeAutoMode =>
+                "claude exposes no resolved-settings command — `claude config` is not a subcommand \
+                 and would run `config` as a prompt, and `claude doctor` reports the installation. \
+                 `claude auto-mode config` is the only effective-config reporter it has, and it \
+                 covers the auto-mode classifier alone"
+                    .into(),
+            Effective::None =>
+                "effective configuration unknown · pi's only configuration surface is `pi config`, \
+                 an interactive TUI with no non-interactive form — so nothing is claimed here"
+                    .into(),
+        },
+        trouble: None,
+    };
+    if kind == Effective::None {
+        return evidence;
+    }
+    if text.trim().is_empty() {
+        evidence.trouble = Some(format!(
+            "`{}` printed nothing",
+            evidence.command.clone().unwrap_or_default()
+        ));
+        return evidence;
+    }
+    match kind {
+        Effective::CodexDoctorJson => read_codex(&mut evidence, text),
+        Effective::OpencodeDebugConfig => read_opencode(&mut evidence, text),
+        Effective::ClaudeAutoMode => read_claude_auto_mode(&mut evidence, text),
+        Effective::None => {}
+    }
+    evidence
+}
+
+fn read_codex(evidence: &mut ConfigEvidence, text: &str) {
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(text) else {
+        evidence.trouble = Some("`codex doctor --json` printed no JSON".into());
+        return;
+    };
+    let checks = report.get("checks");
+    let Some(load) = checks.and_then(|checks| checks.get("config.load")) else {
+        evidence.trouble =
+            Some("`codex doctor --json` reported no config.load check, so nothing was resolved".into());
+        return;
+    };
+    evidence.status = load.get("status").and_then(|s| s.as_str()).map(str::to_string);
+    for (source, keys) in [
+        (load.get("details"), CODEX_CONFIG_KEYS),
+        (checks.and_then(|c| c.get("sandbox.helpers")).and_then(|c| c.get("details")), CODEX_SANDBOX_KEYS),
+    ] {
+        let Some(details) = source.and_then(|d| d.as_object()) else { continue };
+        for key in keys {
+            if let Some(value) = details.get(*key).and_then(|v| v.as_str()) {
+                push_fact(&mut evidence.facts, key, value);
+            }
+        }
+    }
+    if evidence.facts.is_empty() {
+        evidence.trouble =
+            Some("`codex doctor --json` named none of the configuration keys this understands".into());
+    }
+}
+
+fn read_opencode(evidence: &mut ConfigEvidence, text: &str) {
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(text) else {
+        evidence.trouble = Some("`opencode debug config` printed no JSON".into());
+        return;
+    };
+    let Some(object) = config.as_object() else {
+        evidence.trouble = Some("`opencode debug config` printed no configuration object".into());
+        return;
+    };
+    // Names, not values. A key called `apiKey` is dropped even as a name,
+    // because the safest thing to say about it is nothing.
+    let mut names: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !name.starts_with('$') && !crate::secrets::looks_secret(name))
+        .collect();
+    names.sort_unstable();
+    if !names.is_empty() {
+        push_fact(&mut evidence.facts, "defines", &crate::width::dtrunc(&names.join(", "), 96));
+    }
+    for key in OPENCODE_VALUE_KEYS {
+        let Some(value) = object.get(*key) else { continue };
+        let shown = match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            // An object or an array under one of these keys is a shape this
+            // allowlist was not written for; naming it is enough.
+            _ => continue,
+        };
+        push_fact(&mut evidence.facts, key, &shown);
+    }
+    if evidence.facts.is_empty() {
+        evidence.trouble = Some("`opencode debug config` resolved to an empty configuration".into());
+    }
+}
+
+fn read_claude_auto_mode(evidence: &mut ConfigEvidence, text: &str) {
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(text) else {
+        evidence.trouble = Some("`claude auto-mode config` printed no JSON".into());
+        return;
+    };
+    let Some(object) = config.as_object() else {
+        evidence.trouble = Some("`claude auto-mode config` printed no configuration object".into());
+        return;
+    };
+    // Counts, never the rules. An auto-mode rule is free prose a person wrote,
+    // so it is the one thing in that object that could hold anything at all.
+    for key in ["allow", "soft_deny", "hard_deny", "environment"] {
+        if let Some(rules) = object.get(key).and_then(|v| v.as_array()) {
+            push_fact(
+                &mut evidence.facts,
+                &format!("auto-mode {} rules", key.replace('_', "-")),
+                &rules.len().to_string(),
+            );
+        }
+    }
+    if evidence.facts.is_empty() {
+        evidence.trouble =
+            Some("`claude auto-mode config` named no rule set this understands".into());
+    }
+}
+
+/// The gate every reported value passes, and the reason this can be shown at
+/// all.
+///
+/// Rejects rather than truncates: a value too long to be a setting is most
+/// likely a blob, and the first eighty characters of a blob is still eighty
+/// characters of it. Control characters go the same way — a report is a line
+/// of text, and anything carrying newlines or escapes is not one.
+fn push_fact(facts: &mut Vec<ConfigFact>, key: &str, raw: &str) {
+    if crate::secrets::looks_secret(key) {
+        return;
+    }
+    let value = paths::tilde(raw.trim());
+    let unsafe_value = value.is_empty()
+        || value.chars().count() > 120
+        || value.chars().any(char::is_control)
+        || crate::secrets::looks_secret(&value)
+        || crate::secrets::looks_secret_material(&format!("{key}={value}"))
+        || looks_like_a_blob(&value);
+    if unsafe_value {
+        return;
+    }
+    facts.push(ConfigFact { key: key.to_string(), value });
+}
+
+/// Twenty unbroken alphanumerics mixing letters and digits, which is a token
+/// and not a setting.
+///
+/// `secrets::looks_secret` stays the filter every value goes through; this is
+/// a stricter one on top of it, for the one kind of output where credentials
+/// live by design. The shared filter recognises `sk-` followed by twenty
+/// *unbroken* alphanumerics, and every current provider key is segmented
+/// instead — `sk-proj-…`, `sk-ant-…`, `sk_live_…` — so the prefix rule misses
+/// the body it was written for. Length and shape catch it whatever the prefix
+/// turns out to be next year.
+///
+/// The digit requirement is what keeps real settings: a model id is
+/// `claude-sonnet-4-5-20250929`, whose longest unbroken run is eight
+/// characters, and a long camel-case config key is letters alone.
+fn looks_like_a_blob(value: &str) -> bool {
+    value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|run| {
+            run.len() >= 20
+                && run.bytes().any(|b| b.is_ascii_digit())
+                && run.bytes().any(|b| b.is_ascii_alphabetic())
+        })
+}
+
+/// One rendering, so the table and `--json` cannot describe the same evidence
+/// differently.
+pub fn evidence_lines(evidence: &ConfigEvidence) -> Vec<String> {
+    let mut lines = Vec::new();
+    match (&evidence.command, evidence.checked_at) {
+        (Some(command), Some(at)) => lines.push(format!(
+            "effective config · `{command}` · asked {}",
+            super::user::ago(at as f64)
+        )),
+        (Some(command), None) => lines.push(format!("effective config · `{command}`")),
+        (None, _) => {}
+    }
+    if let Some(status) = &evidence.status {
+        lines.push(format!("  it calls its own configuration load {status}"));
+    }
+    for fact in &evidence.facts {
+        lines.push(format!("  {}: {}", fact.key, fact.value));
+    }
+    // The limitation, always, and always last: it is the sentence that stops
+    // the facts above it being read as more than they are. `RUN_SCOPE` itself
+    // is said once per report rather than once per agent — four copies of one
+    // paragraph is how a caveat stops being read at all — and each note ends
+    // by naming the same boundary in its own CLI's terms.
+    lines.push(evidence.note.clone());
+    lines
+}
+
 /// One row per installed agent, saying what it holds. The first thing you
 /// see when the launcher opens, because it is the thing most worth seeing.
 /// Counted from lists the caller has already built rather than gathered
@@ -757,4 +1235,292 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
                 .put("run_ids", serde_json::to_string(&run_ids).unwrap_or_default())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::SkillCopy;
+
+    #[test]
+    fn every_copy_of_a_merged_skill_is_reachable_from_the_row() {
+        let copies = vec![
+            ("claude", "/s/claude/deploy"),
+            ("shared", "/s/shared/deploy"),
+            ("claude", "/s/claude/deploy"),
+        ];
+        let copy_info = vec![
+            SkillCopy { agent: "shared".into(), dir: "/s/shared/deploy".into(), ..Default::default() },
+            SkillCopy { agent: "codex".into(), dir: "/s/codex/deploy".into(), ..Default::default() },
+        ];
+        let row = Item::new("/deploy", Kind::Skill)
+            .put("agent", "claude, shared, codex")
+            .put("dir", "/s/claude/deploy")
+            .put("copies", serde_json::to_string(&copies).unwrap())
+            .put("copy_info", serde_json::to_string(&copy_info).unwrap());
+        assert_eq!(
+            copy_paths(&row),
+            vec![
+                ("claude".to_string(), "/s/claude/deploy".to_string()),
+                ("shared".to_string(), "/s/shared/deploy".to_string()),
+                ("codex".to_string(), "/s/codex/deploy".to_string()),
+            ],
+            "one entry per directory, in discovery order, and the hashed copies fill any gap",
+        );
+
+        // A row from before either list existed still opens its one copy —
+        // and never with the comma-joined agent column as an agent name.
+        let bare = Item::new("/solo", Kind::Skill)
+            .put("agent", "claude, codex")
+            .put("dir", "/s/claude/solo");
+        assert_eq!(copy_paths(&bare), vec![("claude".to_string(), "/s/claude/solo".to_string())]);
+        assert!(copy_paths(&Item::new("/none", Kind::Skill)).is_empty());
+    }
+
+    #[test]
+    fn one_parser_answers_both_the_row_and_the_diagnostic() {
+        let text = "---\nname: deploy\ndescription: ships it\n  carefully\n---\nbody\n";
+        let front = parse_front(text);
+        assert!(front.opened && front.closed);
+        assert_eq!(front.name.as_deref(), Some("deploy"));
+        assert_eq!(front.desc.as_deref(), Some("ships it carefully"));
+
+        let none = parse_front("# no header\n");
+        assert!(!none.opened && !none.closed);
+        assert!(none.name.is_none() && none.desc.is_none());
+
+        // Present but empty is not absent: the row falls back to the folder
+        // name, the diagnostic still has to say the header declares nothing.
+        let empty = parse_front("---\nname:\n---\n");
+        assert_eq!(empty.name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_not_a_missing_header() {
+        let body = "---\nname: deploy\ndescription: ships it\n---\nbody\n";
+        let front = parse_front(&format!("\u{feff}{body}"));
+        assert!(front.opened && front.closed, "agents parse this file; so must we");
+        assert_eq!(front.name.as_deref(), Some("deploy"));
+        assert_eq!(front.desc.as_deref(), Some("ships it"));
+
+        // Nothing else moves: for every other input the BOM-stripped parse is
+        // the parse it always was.
+        for text in [body, "# no header\n", "", "---\n", "-- not quite\n", "\n---\nname: x\n---\n"] {
+            let plain = parse_front(text);
+            let marked = parse_front(&format!("\u{feff}{text}"));
+            assert_eq!(
+                (plain.opened, plain.closed, plain.name, plain.desc),
+                (marked.opened, marked.closed, marked.name, marked.desc),
+                "input {text:?}",
+            );
+        }
+    }
+
+    /// What each Agent CLI on this machine actually prints when asked for its
+    /// effective configuration, pinned so nothing here starts inferring a
+    /// setting nobody reported.
+    #[test]
+    fn effective_config_is_read_from_what_the_cli_said() {
+        // codex: `codex doctor --json`, abridged to the two checks read.
+        let codex = r#"{
+          "schemaVersion": 1, "overallStatus": "ok", "codexVersion": "0.147.0",
+          "checks": {
+            "config.load": { "status": "ok", "summary": "config loaded", "details": {
+              "CODEX_HOME": "/Users/mike/.codex",
+              "config.toml": "/Users/mike/.codex/config.toml",
+              "config.toml parse": "ok",
+              "cwd": "/Users/mike/App/Prelude",
+              "model": "gpt-5.6-terra",
+              "model provider": "openai",
+              "mcp servers": "2",
+              "feature flags enabled": "39",
+              "feature flag overrides": "none",
+              "enabled feature flags": "shell_tool, view_image, unified_exec, shell_snapshot, code_mode_host, terminal_resize_reflow, sqlite, hooks, enable_request_compression, multi_agent, apps, tool_search_always_defer_mcp_tools, tool_suggest, plugins, in_app_browser"
+            }},
+            "sandbox.helpers": { "status": "ok", "details": {
+              "approval policy": "OnRequest",
+              "filesystem sandbox": "restricted",
+              "network sandbox": "restricted",
+              "execve wrapper helper": "/Users/mike/.codex/tmp/arg0/codex-arg0i24IeM/codex-execve-wrapper"
+            }}
+          }}"#;
+        let evidence = read_effective(Effective::CodexDoctorJson, "codex", codex);
+        assert_eq!(evidence.scope, "directory");
+        assert_eq!(evidence.status.as_deref(), Some("ok"));
+        assert_eq!(evidence.trouble, None);
+        let fact = |key: &str| {
+            evidence.facts.iter().find(|f| f.key == key).map(|f| f.value.clone())
+        };
+        assert_eq!(fact("model").as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(fact("approval policy").as_deref(), Some("OnRequest"));
+        assert_eq!(fact("cwd").as_deref(), Some("~/App/Prelude"), "paths are shown the way every other report shows them");
+        // The two keys differ only by word order, and one of them is a list
+        // hundreds of characters long. Only the count is carried.
+        assert_eq!(fact("feature flags enabled").as_deref(), Some("39"));
+        assert!(fact("enabled feature flags").is_none(), "the flag list is not a setting worth a report");
+        assert!(fact("execve wrapper helper").is_none(), "an allowlist, not a filter");
+
+        // opencode: `opencode debug config`, whose help calls it resolved.
+        let opencode = r#"{"$schema":"https://opencode.ai/config.json","model":"anthropic/claude-x",
+          "share":"manual","agent":{},"mode":{},"plugin":[],"command":{},"username":"mike",
+          "provider":{"anthropic":{"options":{"apiKey":"sk-ant-0123456789abcdefghij"}}}}"#;
+        let evidence = read_effective(Effective::OpencodeDebugConfig, "opencode", opencode);
+        let fact = |key: &str| evidence.facts.iter().find(|f| f.key == key).map(|f| f.value.clone());
+        assert_eq!(fact("model").as_deref(), Some("anthropic/claude-x"));
+        assert_eq!(fact("share").as_deref(), Some("manual"));
+        assert!(fact("provider").is_none(), "named, never printed");
+        assert!(fact("username").is_none(), "an account identity is not a setting");
+        let defines = fact("defines").unwrap_or_default();
+        assert!(defines.contains("provider") && defines.contains("username"), "{defines}");
+        assert!(!defines.contains("$schema"), "{defines}");
+
+        // claude: one subsystem, reported as one subsystem.
+        let claude = r#"{"allow":[1,2,3],"soft_deny":[1],"hard_deny":[],"environment":[1,2]}"#;
+        let evidence = read_effective(Effective::ClaudeAutoMode, "claude", claude);
+        assert_eq!(evidence.scope, "subsystem");
+        let fact = |key: &str| evidence.facts.iter().find(|f| f.key == key).map(|f| f.value.clone());
+        assert_eq!(fact("auto-mode allow rules").as_deref(), Some("3"));
+        assert_eq!(fact("auto-mode hard-deny rules").as_deref(), Some("0"));
+        assert!(evidence.note.contains("auto-mode classifier alone"));
+
+        // pi: nothing to ask, and it says so instead of reading a file.
+        let evidence = read_effective(Effective::None, "pi", "");
+        assert_eq!(evidence.scope, "none");
+        assert_eq!(evidence.command, None, "an answer nobody can reproduce is not evidence");
+        assert_eq!(evidence.trouble, None, "not a fault — pi simply has no such command");
+        assert!(evidence.note.starts_with("effective configuration unknown ·"));
+
+        // Asked, and no usable answer, is a third thing again.
+        assert!(read_effective(Effective::CodexDoctorJson, "codex", "").trouble.is_some());
+        assert!(read_effective(Effective::CodexDoctorJson, "codex", "not json").trouble.is_some());
+        assert!(read_effective(Effective::OpencodeDebugConfig, "opencode", "{}").trouble.is_some());
+    }
+
+    /// Effective configuration is where an agent's credentials live. Nothing
+    /// that looks like one may reach a report a person pastes into an issue,
+    /// and neither may an unbounded blob.
+    #[test]
+    fn effective_config_never_carries_a_credential() {
+        let codex = r#"{"checks":{"config.load":{"status":"ok","details":{
+            "model":"gpt-5.6-terra",
+            "config.toml":"/Users/mike/.codex/config.toml",
+            "cwd":"https://user:hunter2@example.com/checkout",
+            "model provider":"sk-proj-0123456789abcdefghijklmno",
+            "mcp servers":"2"
+        }}}}"#;
+        let evidence = read_effective(Effective::CodexDoctorJson, "codex", codex);
+        let rendered = format!(
+            "{}{}",
+            serde_json::to_string(&evidence).unwrap(),
+            evidence_lines(&evidence).join("\n")
+        );
+        for leak in ["hunter2", "sk-proj-0123456789abcdefghijklmno"] {
+            assert!(!rendered.contains(leak), "{leak} reached the report:\n{rendered}");
+        }
+        assert!(rendered.contains("gpt-5.6-terra"), "and the safe facts still arrive");
+
+        // Rejected, not truncated: the first eighty characters of a blob are
+        // still eighty characters of it.
+        let mut facts = Vec::new();
+        push_fact(&mut facts, "model", &"x".repeat(200));
+        push_fact(&mut facts, "apiKey", "plainly-harmless-looking");
+        push_fact(&mut facts, "cwd", "one line\nand another");
+        push_fact(&mut facts, "auth_token", "aaaaaaaaaaaaaaaaaaaaaaaa");
+        push_fact(&mut facts, "model", "sk_live_9Xy2Qa7Bc4De6Fg8Hi0Jk");
+        assert!(facts.is_empty(), "{facts:?}");
+
+        // And the settings that *look* like blobs are still shown, or the gate
+        // would quietly empty the report it exists to make safe.
+        let mut facts = Vec::new();
+        for keep in ["claude-sonnet-4-5-20250929", "gpt-5.6-terra", "~/.codex/config.toml", "OnRequest"] {
+            push_fact(&mut facts, "model", keep);
+        }
+        assert_eq!(facts.len(), 4, "{facts:?}");
+
+        // An opencode config is mostly credentials, and only names escape it.
+        let opencode = r#"{"provider":{"openai":{"options":{"apiKey":"sk-0123456789abcdefghijkl"}}},
+            "mcp":{"x":{"environment":{"GITHUB_TOKEN":"ghp_0123456789abcdefghijkl"}}},
+            "model":"openai/gpt-5"}"#;
+        let evidence = read_effective(Effective::OpencodeDebugConfig, "opencode", opencode);
+        let rendered = serde_json::to_string(&evidence).unwrap();
+        assert!(!rendered.contains("sk-0123456789") && !rendered.contains("ghp_"), "{rendered}");
+        assert!(rendered.contains("openai/gpt-5"));
+    }
+
+    /// The claim is agent-level, and every rendering of it says so. A Run's
+    /// own flags and environment are exactly what Prelude does not keep, so
+    /// there is no honest way to answer this per Run.
+    #[test]
+    fn effective_config_never_claims_to_be_per_run() {
+        for kind in [
+            Effective::CodexDoctorJson,
+            Effective::OpencodeDebugConfig,
+            Effective::ClaudeAutoMode,
+            Effective::None,
+        ] {
+            let evidence = read_effective(kind, "a", "{}");
+            assert_ne!(evidence.scope, "run");
+            let lines = evidence_lines(&evidence).join("\n");
+            assert!(lines.contains(&evidence.note), "the limitation is always rendered");
+            // Every answer that exists names the boundary in its own words,
+            // and the paragraph that explains why is said once per report.
+            if evidence.command.is_some() {
+                assert!(
+                    evidence.note.contains("not what a Run already going")
+                        || evidence.note.contains("not that of a Run already going")
+                        || evidence.scope == "subsystem",
+                    "{}", evidence.note,
+                );
+            }
+        }
+        assert!(RUN_SCOPE.starts_with("agent-level, not run-level"));
+    }
+
+    #[test]
+    fn a_pre_epoch_tree_is_hashed_once_and_then_reused() {
+        let root = std::env::temp_dir().join(format!("prelude-epoch-skill-{}", std::process::id()));
+        // Cleared going in as well as coming out, so a previous run that
+        // panicked cannot make this one fail for a different reason.
+        let _ = std::fs::remove_dir_all(&root);
+        let skill = root.join("ancient");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: ancient\ndescription: d\n---\n").unwrap();
+        // `touch -t 197001010000` west of Greenwich, as a fixture: an mtime at
+        // or before the epoch, which `mtime()` reports as 0.
+        let epoch = std::fs::FileTimes::new()
+            .set_accessed(std::time::SystemTime::UNIX_EPOCH)
+            .set_modified(std::time::SystemTime::UNIX_EPOCH);
+        for path in [skill.join("SKILL.md"), skill.clone()] {
+            std::fs::File::options().read(true).open(&path).unwrap().set_times(epoch).unwrap();
+        }
+
+        let mut copy = crate::capability::hash_skill("claude", &skill);
+        let stamp = crate::capability::skill_stamp(&skill);
+        copy.stamp = stamp.clone();
+        assert_eq!(copy.modified, 0, "an epoch mtime is a real answer, not a failure");
+        assert!(!copy.fingerprint.is_empty(), "and the tree was read completely");
+
+        // The second pass, exactly as `skill_hashes` performs it: write the
+        // record, read it back, ask whether it may stand.
+        let item = crate::capability::cache_item(&copy);
+        let back = crate::capability::copy_from_item(&item);
+        assert!(
+            reusable(crate::capability::is_current_record(&item), &back, &stamp),
+            "a record must satisfy the gate it was just written by, or this tree is re-hashed for ever",
+        );
+
+        // A record from before the version field is recomputed — once: the
+        // rewrite carries the current version, so the next pass reuses it.
+        let mut legacy = item.clone();
+        legacy.data.remove("record");
+        assert!(!reusable(crate::capability::is_current_record(&legacy), &back, &stamp));
+
+        // And the tree itself is still what decides the rest.
+        assert!(!reusable(true, &back, "fnv1a64-v1:0000000000000000"), "an edited tree");
+        assert!(!reusable(true, &back, ""), "an unreadable tree");
+        let mut unhashed = back.clone();
+        unhashed.fingerprint.clear();
+        assert!(!reusable(true, &unhashed, &stamp), "a record with no fingerprint");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

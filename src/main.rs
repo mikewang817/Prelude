@@ -14,6 +14,7 @@ mod compute;
 mod control;
 mod defaults;
 mod doctor;
+mod events;
 mod exec;
 mod fleet;
 mod frecency;
@@ -30,6 +31,7 @@ mod render;
 mod runhere;
 mod secrets;
 mod sources;
+mod task;
 mod translate_build;
 mod tty;
 mod ui;
@@ -54,7 +56,11 @@ fn main() -> ExitCode {
         ["paste"] => ui::search(ui::resolve_pane(None)),
         ["paste", pane] => ui::search(ui::resolve_pane(Some(pane))),
         ["doctor"] => doctor::run(),
-        ["doctor", "mcp"] => doctor::mcp(),
+        // The specialized reports. Each one is a report and nothing else;
+        // `--repair` is a separate door that asks about each finding on its
+        // own, and `--json` is there so an agent reads fields rather than a
+        // rendered table.
+        ["doctor", rest @ ..] => doctor::dispatch(rest),
         ["bench"] => bench(),
         ["fleet"] => fleet::list(false),
         ["fleet", "--json"] => fleet::list(true),
@@ -73,11 +79,41 @@ fn main() -> ExitCode {
                 eprintln!("prelude: ask what?");
                 return ExitCode::from(2);
             }
+            let opts = match bus::parse_opts(&flags) {
+                Ok(opts) => opts,
+                Err(e) => {
+                    eprintln!("prelude: {e}");
+                    return ExitCode::from(2);
+                }
+            };
             let wait = flag_value(&flags, "--timeout").and_then(|v| v.parse().ok());
-            bus::ask(&text, wait.unwrap_or(bus::DEFAULT_WAIT), flags.contains(&"--no-wait"))
+            bus::ask_with(&text, wait.unwrap_or(bus::DEFAULT_WAIT), flags.contains(&"--no-wait"), opts)
         }
-        ["tell", rest @ ..] if !rest.is_empty() => bus::tell(&rest.join(" ")),
-        ["say", target, rest @ ..] if !rest.is_empty() => bus::say(target, &rest.join(" ")),
+        ["tell", rest @ ..] if !rest.is_empty() => {
+            let (flags, text) = split_flags(rest);
+            match bus::parse_opts(&flags) {
+                Ok(opts) => bus::tell_with(&text, opts),
+                Err(e) => { eprintln!("prelude: {e}"); 2 }
+            }
+        }
+        // The flags come before the recipient, not after it: `split_flags`
+        // stops at the first non-flag word, and that word is the target. A
+        // dashed word later on belongs to the message.
+        ["say", rest @ ..] if !rest.is_empty() => {
+            let (flags, text) = split_flags(rest);
+            let (target, body) = match text.split_once(' ') {
+                Some((target, body)) => (target.to_string(), body.to_string()),
+                None => (text.clone(), String::new()),
+            };
+            if target.is_empty() || body.is_empty() {
+                eprintln!("prelude: say to whom, and what? — prelude say WHO TEXT");
+                return ExitCode::from(2);
+            }
+            match bus::parse_opts(&flags) {
+                Ok(opts) => bus::say_with(&target, &body, opts),
+                Err(e) => { eprintln!("prelude: {e}"); 2 }
+            }
+        }
         ["answer", id, rest @ ..] if !rest.is_empty() => bus::answer(id, &rest.join(" ")),
         ["answer-of", id] => bus::answer_of(id),
         ["reply"] => bus::reply(),
@@ -87,6 +123,20 @@ fn main() -> ExitCode {
             rest.contains(&"--human"),
         ),
         ["drain"] => bus::drain(),
+
+        // The rest of a message's life. Withdrawing one, pointing it
+        // somewhere else, handing over the work itself, and reading the whole
+        // exchange back — each a plain word with its text last, like the four
+        // above.
+        ["cancel", id, rest @ ..] => bus::cancel(id, &rest.join(" ")),
+        ["reassign", id, target] => bus::reassign(id, target),
+        ["handoff", target, task, rest @ ..] => bus::handoff(target, task, &rest.join(" ")),
+        ["thread", id, rest @ ..] => bus::thread_cmd(id, rest.contains(&"--json")),
+
+        // The same door, for work rather than for messages: an agent opens a
+        // task, reports against it, and finishes it, and the record outlives
+        // the process that was doing it.
+        ["task", rest @ ..] => task::cli(rest),
 
         ["agents", rest @ ..] => json_dump(cache::gather_agents(), rest.contains(&"--json")),
         ["sessions", rest @ ..] => {
@@ -292,7 +342,9 @@ HUMANS
   prelude fleet --status one short line for a tmux status bar
   prelude watch          notify the moment an agent stops and waits for you
   prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
-  prelude doctor mcp     MCP transport, health, tools and privacy diagnostics
+  prelude doctor agents|sessions|skills|mcp
+                         what is wrong with the agent side of the machine
+                         --json for fields · --repair asks about each finding
 
   Inside search:  : lists scopes · a: agents · s: sessions · f: files
                   c: clipboard · h: history · g TERM searches Google
@@ -307,6 +359,38 @@ AGENTS  (run these from inside a conversation; see `prelude init agent`)
   prelude inbox [--json] messages left for you · --all includes handled ones
                          --human shows questions waiting on a person instead
   prelude drain          mark your inbox collected
+
+  prelude cancel ID [WHY]  withdraw a question you no longer need answered
+  prelude handoff WHO TASK [NOTE]  give another agent the work, keeping the id
+                         the result comes back to you when they finish it
+  prelude reassign ID WHO  point a message at a different agent instead
+  prelude thread ID [--json]  the whole exchange a message belongs to
+
+  on ask, tell and say:  --attach=PATH  a file for them to read, not a copy
+                         --expires=N    seconds after which a question stops
+                         --task=ID --run=ID --session=ID --reply-to=ID
+
+  prelude task start TITLE   open a task · the new id goes to stdout
+                         --project P --agent A --run R --session S
+                         --needs ID,ID  --message ID  --prompt-ref REF
+                         a task with --needs starts queued, not working
+  prelude task progress ID NOTE   say what you are doing
+  prelude task wait     ID [NOTE] you are blocked on somebody else
+  prelude task done     ID [RESULT]
+  prelude task fail     ID [REASON]
+  prelude task cancel   ID [REASON]
+                         NOTE, RESULT and REASON are prose to the end of the
+                         line: put flags before them, and as --name=value
+  prelude task assign   ID AGENT  hand it over, keeping the id and history
+  prelude task retry    ID        a fresh task, with an edge back to this one
+                         only of a finished task · cancel a live one first
+  prelude task ack      ID        dismiss a finished task from the agent home
+                         the record, its result and its history all stay
+  prelude task list [--all] [--json]   open tasks · --all includes finished
+  prelude task show ID  [--json]  the record and everything said about it
+                         --json prints the whole record on every verb, so
+                         T=$(prelude task start \"…\") wants no flag at all
+
   prelude answer ID TEXT answer a question someone else is blocked on
   prelude answer-of ID   collect the answer to a --no-wait question
   prelude fleet --json   who else is running, and which of them are stuck
@@ -391,6 +475,7 @@ fn copy_line(line: &str) -> i32 {
         Link => it.get("url"),
         File | Find => it.get("path"),
         Clip => it.get("full"),
+        Task => it.get("task_id"),
         _ => "",
     };
     let text = if by_kind.is_empty() { it.cmd.clone() } else { by_kind.to_string() };
@@ -460,6 +545,45 @@ fn winsize_cols(fd: i32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    /// Run this test again in a child process with a data directory of its
+    /// own, and return `true` in the parent, which then has nothing left to do.
+    ///
+    /// `std::env::set_var` beside a concurrent read is documented undefined
+    /// behaviour, and `cargo test` is one process full of concurrent readers
+    /// on other threads — subprocesses included, since a child inherits
+    /// whatever the environment happens to be mid-write. A *child's*
+    /// environment is shared with nobody: `Command` builds it before the child
+    /// exists. So this is the door for the handful of tests whose subject
+    /// resolves `paths::data()` itself and cannot be handed a root.
+    fn in_a_child(test: &str) -> bool {
+        const MARK: &str = "PRELUDE_TEST_PRIVATE_DATA";
+        if std::env::var_os(MARK).is_some() {
+            // We are the child. Its whole environment was built for it.
+            return false;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "prelude-test-child-{}-{}",
+            std::process::id(),
+            test.replace(':', "-")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private data directory");
+        let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env("XDG_DATA_HOME", &root)
+            .env(MARK, "1")
+            .output()
+            .expect("run the test in a child process");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            out.status.success(),
+            "{test} failed in its own process:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        true
+    }
+
     #[test]
     fn arithmetic() {
         for (q, want) in [
@@ -1002,6 +1126,209 @@ mod tests {
         );
     }
 
+    /// A Task is an object, and its id is the one string every other verb
+    /// takes. So at a shell it acts — goes to whoever is doing it, or shows
+    /// the record when nobody is — and hands you the id instead; in a
+    /// conversation, where there is no prompt to paste onto, the two are the
+    /// other way round.
+    #[test]
+    fn a_task_acts_at_a_shell_and_is_an_id_in_a_conversation() {
+        use crate::defaults::{describe, on_enter, on_secondary, text_for, Default_, Host, Text, Verb};
+        use crate::item::{Item, Kind};
+
+        let idle = Item::new("prelude task show t1", Kind::Task)
+            .title("migrate legacy_users")
+            .put("task_id", "t1")
+            .put("state", "queued");
+        // Nobody is doing it, so there is nothing to go to and the whole of
+        // the task is its record.
+        assert_eq!(on_enter(&idle, Host::Shell), Default_::Act(Verb::RunHere));
+        assert_eq!(describe(&idle, Host::Shell), "Show its record and history");
+        assert_eq!(
+            on_secondary(&idle, Host::Shell),
+            Some(Default_::InsertText(Text::Name)),
+            "the opposite of acting is handing over the text",
+        );
+
+        // A task whose run is in a pane is being worked on right now, and
+        // going there is the same answer an active Session gives.
+        let live = idle.clone().put("pane", "%4").put("addr", "work:2.1");
+        assert_eq!(on_enter(&live, Host::Shell), Default_::Act(Verb::JumpTo));
+        assert_eq!(describe(&live, Host::Shell), "Go to the agent doing it");
+
+        // In a conversation the id is the useful half, and it is the id —
+        // never the title, because two tasks may share one.
+        for it in [&idle, &live] {
+            assert_eq!(on_enter(it, Host::Agent), Default_::InsertText(Text::Name));
+            assert_eq!(describe(it, Host::Agent), "Insert the task id");
+            assert_eq!(text_for(it, Text::Name), "t1");
+            // Enter already hands over the text, so an inserting secondary
+            // would be the same keystroke twice.
+            assert_eq!(on_secondary(it, Host::Agent), None);
+        }
+    }
+
+    /// The Task panel offers what `task.rs` will actually accept.
+    ///
+    /// `task::retry` refuses a live task outright — retrying one that is
+    /// still running is two agents on one job — and `done`, `cancel` and
+    /// `assign` all refuse a finished one. Offering a verb and then
+    /// explaining it away is worse than not offering it.
+    #[test]
+    fn the_task_panel_offers_only_the_verbs_that_would_work() {
+        use crate::actions::{actions_for, actions_for_host, is_destructive, needs_confirming};
+        use crate::defaults::Host;
+        use crate::item::{Item, Kind};
+        let ids = |it: &Item| -> Vec<String> {
+            actions_for(it).iter().map(|(id, ..)| id.to_string()).collect()
+        };
+
+        let open = Item::new("prelude task show t1", Kind::Task)
+            .title("migrate legacy_users")
+            .put("task_id", "t1")
+            .put("state", "working");
+        let live = ids(&open);
+        assert!(live.contains(&"task-done".to_string()), "{live:?}");
+        assert!(live.contains(&"task-cancel".to_string()), "{live:?}");
+        assert!(!live.contains(&"task-retry".to_string()), "a live task cannot be retried: {live:?}");
+        // Nothing running, so there is no pane row to offer.
+        assert!(!live.contains(&"zoom".to_string()), "{live:?}");
+        // Ending the work is red, asks first, and comes last.
+        assert!(is_destructive(Kind::Task, "task-cancel"));
+        assert!(needs_confirming(Kind::Task, "task-cancel").is_some());
+        assert_eq!(live.last().map(String::as_str), Some("task-cancel"), "{live:?}");
+        // …and nothing here pretends a record is a command line.
+        assert!(!live.contains(&"run".to_string()) && !live.contains(&"runhere".to_string()));
+
+        let done = open.clone().put("state", "done");
+        let finished = ids(&done);
+        assert!(finished.contains(&"task-retry".to_string()), "{finished:?}");
+        assert!(!finished.contains(&"task-done".to_string()), "{finished:?}");
+        assert!(!finished.contains(&"task-cancel".to_string()), "{finished:?}");
+        assert!(!finished.iter().any(|id| id.starts_with("handoff:") || id == "menu:handoff"));
+
+        // A live run gives it somewhere to go, beyond Enter's own row.
+        let attached = open.clone().put("pane", "%4").put("addr", "work:2.1");
+        assert!(ids(&attached).contains(&"zoom".to_string()), "{:?}", ids(&attached));
+
+        // Over an agent's input box the useful thing is the reference, not
+        // the launcher's verbs: nothing here changes the task.
+        let in_chat: Vec<String> = actions_for_host(&open, Host::Agent)
+            .iter().map(|(id, ..)| id.to_string()).collect();
+        assert!(in_chat.contains(&"task-context".to_string()), "{in_chat:?}");
+        assert!(in_chat.contains(&"copy".to_string()), "{in_chat:?}");
+        assert!(
+            !in_chat.iter().any(|id| id.starts_with("task-done") || id.starts_with("task-cancel")),
+            "{in_chat:?}",
+        );
+    }
+
+    /// Handing work over refuses on anything but exactly one recipient, so
+    /// the panel addresses a *run* rather than an agent name: two claudes in
+    /// two projects are two different answers to "hand it to claude".
+    #[test]
+    fn a_handoff_names_one_run_and_never_the_run_already_doing_it() {
+        use crate::item::{Item, Kind};
+        let run = |agent: &str, project: &str, pane: &str, id: &str| {
+            Item::new("x", Kind::Run)
+                .put("agent", agent)
+                .put("project", project)
+                .put("pane", pane)
+                .put("pid", "7")
+                .put("addr", format!("work:{project}"))
+                .put("run_id", id)
+        };
+        let runs = vec![
+            run("claude", "api-gateway", "%4", "claude:4:1"),
+            run("claude", "docs", "%5", "claude:5:1"),
+            run("codex", "docs", "", "codex:6:1"),
+        ];
+        let task = Item::new("prelude task show t1", Kind::Task)
+            .put("task_id", "t1")
+            .put("run_id", "claude:4:1");
+        let options = crate::actions::handoff_targets(&runs, &task);
+        let ids: Vec<&str> = options.iter().map(|(id, ..)| id.as_str()).collect();
+        assert!(!ids.contains(&"handoff:%4"), "the run already doing it: {ids:?}");
+        assert_eq!(ids, ["handoff:%5", "handoff:7"], "{ids:?}");
+        // The label says which of the two claudes, because the id cannot.
+        assert_eq!(options[0].1, "claude · docs");
+        // A run with no pane is still addressable: `bus::resolve` matches a
+        // bare pid exactly.
+        assert_eq!(options[1].1, "codex · docs");
+    }
+
+    /// Resuming with a borrowed capability exists only where the Agent has a
+    /// one-run flag for it. Three of the eight pairings have none, and a
+    /// command assembled for one of those fails after the launcher has
+    /// already closed — the same rule `fork_cmd` follows.
+    #[test]
+    fn resuming_with_a_capability_is_absent_where_the_agent_cannot() {
+        use crate::item::{Item, Kind};
+        let session = |agent: &str| {
+            Item::new(format!("{agent} --resume abc"), Kind::Session)
+                .title("a conversation")
+                .put("agent", agent)
+                .put("id", "abc")
+                .put("session_id", format!("{agent}:abc"))
+        };
+        let ids = |agent: &str| -> Vec<String> {
+            crate::actions::actions_for(&session(agent))
+                .iter().map(|(id, ..)| id.to_string()).collect()
+        };
+        // claude can take both; codex has no skill flag; pi has no MCP flag;
+        // opencode has neither.
+        assert!(ids("claude").contains(&"session-skill".to_string()));
+        assert!(ids("claude").contains(&"session-mcp".to_string()));
+        assert!(!ids("codex").contains(&"session-skill".to_string()), "{:?}", ids("codex"));
+        assert!(ids("codex").contains(&"session-mcp".to_string()));
+        assert!(ids("pi").contains(&"session-skill".to_string()));
+        assert!(!ids("pi").contains(&"session-mcp".to_string()), "{:?}", ids("pi"));
+        assert!(!ids("opencode").contains(&"session-skill".to_string()));
+        assert!(!ids("opencode").contains(&"session-mcp".to_string()));
+        // Never against a live Run: that is the competing resume the whole
+        // active-Session rule exists to stop.
+        let active: Vec<String> = crate::actions::actions_for(&session("claude").put("active_run", "claude:7:1"))
+            .iter().map(|(id, ..)| id.to_string()).collect();
+        assert!(!active.contains(&"session-skill".to_string()), "{active:?}");
+        assert!(!active.contains(&"session-mcp".to_string()), "{active:?}");
+        // The readable export sits beside the authoritative raw one.
+        let with_file: Vec<String> = crate::actions::actions_for(&session("claude").put("file", "/tmp/abc.jsonl"))
+            .iter().map(|(id, ..)| id.to_string()).collect();
+        assert!(with_file.contains(&"session-export".to_string()));
+        assert!(with_file.contains(&"session-export-md".to_string()));
+    }
+
+    /// "Open all copies" is only a distinct action when there is more than
+    /// one. With a single copy `Open` already is that, and a panel whose
+    /// fifth row repeats its fourth teaches you not to read it.
+    #[test]
+    fn open_all_copies_appears_only_where_there_is_more_than_one() {
+        use crate::item::{Item, Kind};
+        let ids = |it: &Item| -> Vec<String> {
+            crate::actions::actions_for(it).iter().map(|(id, ..)| id.to_string()).collect()
+        };
+        let one = Item::new("/demo", Kind::Skill)
+            .title("demo")
+            .put("name", "demo")
+            .put("dir", "/x/.claude/skills/demo")
+            .put("file", "/x/.claude/skills/demo/SKILL.md")
+            .put("copies", r#"[["claude","/x/.claude/skills/demo"]]"#);
+        assert!(!ids(&one).contains(&"open-copies".to_string()), "{:?}", ids(&one));
+
+        let two = one.clone().put(
+            "copies",
+            r#"[["claude","/x/.claude/skills/demo"],["codex","/x/.codex/skills/demo"]]"#,
+        );
+        let both = ids(&two);
+        assert!(both.contains(&"open-copies".to_string()), "{both:?}");
+        assert_eq!(crate::sources::agents::copy_paths(&two).len(), 2);
+        // It sits with the other ways of looking at the skill, above
+        // anything that deletes one.
+        let open_at = both.iter().position(|id| id == "open-copies").unwrap();
+        assert!(both[open_at..].iter().all(|id| !id.starts_with("rm:") && id != "menu:rm")
+            || both.iter().position(|id| id.starts_with("rm:") || id == "menu:rm").unwrap() > open_at);
+    }
+
     /// External objects are passed as arguments, never shell syntax. Spaces
     /// in an application or path therefore remain inside one argument.
     #[test]
@@ -1179,6 +1506,10 @@ mod tests {
                     .put("desc", "d")
                     .put("missing", "codex")
                     .put("copies", r#"[["claude","/tmp/d"]]"#)
+                    // A Task row is nothing without its id, and its verbs
+                    // divide on whether the work is still open.
+                    .put("task_id", "t1")
+                    .put("state", "working")
             })
             .collect()
     }
@@ -1696,12 +2027,21 @@ mod tests {
         assert!(session.get("rank").parse::<f64>().unwrap() > 10_000.0);
         assert!(session.fields[0].contains("pinned · archived"));
 
-        sessions[0].data.insert("active_run".into(), "claude:7:1".into());
         assert!(filter_search(sessions.clone(), "").is_empty());
-        assert_eq!(filter_search(sessions.clone(), "is:active").len(), 1);
         assert_eq!(filter_search(sessions.clone(), "is:archived").len(), 1);
         assert_eq!(filter_search(sessions.clone(), "is:all Native").len(), 1);
-        assert_eq!(filter_search(sessions, "is:pinned My").len(), 0); // archived stays hidden
+        assert_eq!(filter_search(sessions.clone(), "is:pinned My").len(), 0); // archived stays hidden
+
+        sessions[0].data.insert("active_run".into(), "claude:7:1".into());
+        assert_eq!(
+            filter_search(sessions.clone(), "").len(),
+            1,
+            "an archived conversation somebody has resumed is visible again, and `s:` \
+             must say so too — it was on the home and missing from the one scope for \
+             finding every conversation",
+        );
+        assert_eq!(filter_search(sessions.clone(), "is:active").len(), 1);
+        assert_eq!(filter_search(sessions, "is:archived").len(), 1);
     }
 
     #[test]
@@ -1863,7 +2203,7 @@ mod tests {
             .put("archived", "true")
             .put("active_run", "claude:7:1");
         let graph = crate::control::Snapshot::from_items(&[run], &[session], &[], &[], &[]);
-        assert_eq!(graph.schema, 2);
+        assert_eq!(graph.schema, 3);
         let claude = graph.agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(claude.runs, ["claude:7:1"]);
         assert_eq!(claude.sessions, ["claude:s1"]);
@@ -1872,6 +2212,157 @@ mod tests {
         assert_eq!(graph.sessions[0].native_title.as_deref(), Some("native"));
         assert!(graph.sessions[0].pinned && graph.sessions[0].archived);
         assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
+    }
+
+    /// One rule for the Run→Task edge, in both places it is read.
+    ///
+    /// `control` used to close over `task::all()` — every task ever created —
+    /// while the Quick Look for the same Run listed `running::tasks_of`, which
+    /// is the open ones. After `prelude task done` the two disagreed: the
+    /// panel dropped the line and `control --json` still carried it.
+    ///
+    /// This is the one test in the suite that cannot be handed a root. Both
+    /// halves of the rule it checks — `control::Snapshot::from_items` and
+    /// `running::tasks_of` — resolve the store themselves through
+    /// `paths::data()`, which is `$XDG_DATA_HOME`, and giving either of them a
+    /// root is a change to `control.rs` and `task.rs`. So it runs in a child
+    /// process instead: `Command::env` builds an environment that belongs to
+    /// the child alone, which is the one way to point `$XDG_DATA_HOME`
+    /// somewhere without writing this process's own environment while other
+    /// tests are reading it on other threads.
+    #[test]
+    fn a_run_carries_the_same_tasks_in_the_graph_as_in_its_quick_look() {
+        use crate::item::{Item, Kind};
+        use crate::task::New;
+        if in_a_child("tests::a_run_carries_the_same_tasks_in_the_graph_as_in_its_quick_look") {
+            return;
+        }
+        let run_id = "claude:7:1";
+        let store = crate::task::store();
+        let still = store
+            .start(New { title: "still going".into(), run: run_id.into(), ..Default::default() })
+            .expect("open a task");
+        let over = store
+            .start(New { title: "already over".into(), run: run_id.into(), ..Default::default() })
+            .expect("open a task");
+        store.done(&over.id, "").expect("finish it");
+
+        let run = Item::new("kill 7", Kind::Run)
+            .put("agent", "claude")
+            .put("run_id", run_id)
+            .put("pid", "7");
+        let graph = crate::control::Snapshot::from_items(std::slice::from_ref(&run), &[], &[], &[], &[]);
+        let from_quick_look: Vec<String> = crate::sources::running::tasks_of(run_id)
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        assert_eq!(from_quick_look, [still.id.clone()][..], "a finished task is not being done");
+        assert_eq!(
+            graph.runs[0].tasks, from_quick_look,
+            "the graph's Run edge is the one the panel shows"
+        );
+        // The finished one is history, and history is not lost — it is simply
+        // not something a live process is still doing.
+        assert!(graph.tasks.iter().any(|task| task.id == over.id && task.state == "done"));
+        assert!(graph.tasks.iter().any(|task| task.id == still.id));
+    }
+
+    /// A confirmed MCP name is read off a command line, and what is written
+    /// there is the sanitised key — never the display name.
+    #[test]
+    fn a_hosted_server_finds_the_run_that_borrowed_it_under_its_sanitised_key() {
+        use crate::item::{Item, Kind};
+        let run = Item::new("kill 7", Kind::Run)
+            .put("agent", "claude")
+            .put("run_id", "claude:7:1")
+            .put("pid", "7")
+            // `lend::Mcp::key` — the staged file's name and codex's dotted
+            // path segment. This is the only spelling a process ever carries.
+            .put("run_mcp", "claude_ai_Gmail");
+        let server = Item::new("claude mcp get gmail", Kind::Mcp)
+            .put("agent", "claude")
+            .put("name", "claude.ai Gmail")
+            .put("capability_id", "mcp:claude.ai gmail")
+            .put("portable", "true");
+        let graph = crate::control::Snapshot::from_items(&[run], &[], &[], &[server], &[]);
+        assert_eq!(
+            graph.mcp[0].runs, ["claude:7:1"],
+            "a display name and a key are the same server"
+        );
+    }
+
+    /// `Dismiss it` answers a question, and a cancelled task never asked one.
+    #[test]
+    fn a_cancelled_task_is_not_offered_a_dismissal_it_was_never_asking_for() {
+        use crate::actions::actions_for_host;
+        use crate::defaults::Host;
+        use crate::item::{Item, Kind};
+        let task = |state: &str| {
+            Item::new("prelude task show t1", Kind::Task)
+                .title("a job")
+                .put("task_id", "t1")
+                .put("state", state)
+        };
+        let labels = |state: &str| -> Vec<String> {
+            actions_for_host(&task(state), Host::Shell)
+                .into_iter()
+                .map(|(_, label, _)| label)
+                .collect()
+        };
+        for state in ["done", "failed"] {
+            assert!(
+                labels(state).iter().any(|label| label == "Dismiss it"),
+                "{state} arrives while nobody is looking and is worth acknowledging"
+            );
+        }
+        assert!(
+            !labels("cancelled").iter().any(|label| label == "Dismiss it"),
+            "cancelling is the decision — `task::awaiting_review` excludes it for the same reason"
+        );
+        // Everything else a finished task offers is unchanged.
+        assert!(labels("cancelled").iter().any(|label| label == "Try it again"));
+        assert!(!labels("working").iter().any(|label| label == "Dismiss it"));
+    }
+
+    /// "Resume with a skill…" means one the Agent does not have.
+    #[test]
+    fn the_resume_with_pickers_offer_only_what_the_agent_does_not_own() {
+        use crate::actions::{borrowable_servers, borrowable_skills};
+        use crate::item::{Item, Kind};
+        let skill = |name: &str, owners: &str| {
+            Item::new(format!("/{name}"), Kind::Skill)
+                .put("name", name)
+                .put("agent", owners)
+                .put("dir", format!("/skills/{name}"))
+        };
+        let skills =
+            [skill("deploy", "claude"), skill("review", "codex, pi"), skill("notes", "shared")];
+        let offered = |agent: &str| -> Vec<String> {
+            borrowable_skills(&skills, agent).into_iter().map(|(_, name, _)| name).collect()
+        };
+        assert_eq!(offered("claude"), ["review", "notes"], "claude already has deploy");
+        assert_eq!(offered("codex"), ["deploy", "notes"]);
+        // `~/.agents/skills` is a location, not an Agent — `missing_agents`
+        // reports a Skill that lives only there as missing from every one of
+        // them — so a shared Skill stays borrowable for all of them.
+        assert!(offered("pi").contains(&"notes".to_string()));
+        // Nothing known about the host means nothing is excluded.
+        assert_eq!(offered("").len(), skills.len());
+
+        let server = |name: &str, owner: &str, portable: &str| {
+            Item::new(format!("{owner} mcp get {name}"), Kind::Mcp)
+                .put("name", name)
+                .put("agent", owner)
+                .put("portable", portable)
+        };
+        let servers = [
+            server("node_repl", "claude", "true"),
+            server("chatcut", "codex", "true"),
+            server("claude.ai Gmail", "claude", "false"),
+        ];
+        let names: Vec<String> =
+            borrowable_servers(&servers, "claude").into_iter().map(|(_, name, _)| name).collect();
+        assert_eq!(names, ["chatcut"], "its own server, and an unlendable one, are not choices");
     }
 
     #[test]

@@ -133,8 +133,39 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
             .into_iter()
             .map(|(agent, dir)| (format!("rm:{agent}"), agent, crate::paths::tilde(&dir)))
             .collect(),
+        // Who a task can be handed to: whoever is running right now.
+        "handoff" => handoff_targets(&crate::sources::running::live(), it),
         _ => Vec::new(),
     }
+}
+
+/// The live runs a task can be handed over to, as `apply` ids.
+///
+/// A separate function from `agent_options` so the rule can be tested against
+/// a fleet rather than against whatever this machine happens to be running.
+///
+/// The id carries the *address*, not the agent name. `bus::handoff` refuses
+/// anything but exactly one resolved recipient — two claudes in two projects
+/// are two different targets, and handing work to "claude" when there are two
+/// of them is the ambiguity that rule exists to stop. A pane address is
+/// unique; a bare pid is what `bus::resolve` matches when there is no pane.
+/// And the run already doing this task is not a handoff.
+pub fn handoff_targets(runs: &[Item], it: &Item) -> Vec<(String, String, String)> {
+    runs.iter()
+        .filter(|run| run.get("run_id") != it.get("run_id") || it.get("run_id").is_empty())
+        .filter_map(|run| {
+            let address = match (run.get("pane"), run.get("pid")) {
+                ("", "") => return None,
+                ("", pid) => pid.to_string(),
+                (pane, _) => pane.to_string(),
+            };
+            Some((
+                format!("handoff:{address}"),
+                format!("{} · {}", run.get("agent"), run.get("project")),
+                run.get("addr").to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Add a verb to the panel: as one row when there is a choice to make, or as
@@ -169,6 +200,20 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             if crate::sources::sessions::fork_cmd(it.get("agent"), it.get("id")).is_some() {
                 v.push(a("session-fork", "Fork conversation", "new Session with this context"));
             }
+            // Resuming with something the Agent does not own, for one run.
+            // Absent for the agents with no one-run syntax, on exactly the
+            // rule `fork_cmd` follows above: a command assembled for those
+            // would look right on the prompt and fail after the launcher had
+            // closed. And never against a live Run, for the same reason
+            // `Resume now` is not offered there — it would start a competitor.
+            if it.get("active_run").is_empty() && !it.get("id").is_empty() {
+                if crate::lend::can_borrow_skill(it.get("agent")) {
+                    v.push(a("session-skill", "Resume with a skill…", "for this run only"));
+                }
+                if crate::lend::can_borrow_mcp(it.get("agent")) {
+                    v.push(a("session-mcp", "Resume with an MCP server…", "for this run only"));
+                }
+            }
             if it.get("pinned") == "true" {
                 v.push(a("session-unpin", "Unpin conversation", "return to recency order"));
             } else {
@@ -190,6 +235,9 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             }
             if !it.get("file").is_empty() {
                 v.push(a("session-export", "Export raw conversation", "private Prelude exports folder"));
+                // The other half: the raw JSONL is what you hand back to the
+                // agent that wrote it, and this is what you send to a person.
+                v.push(a("session-export-md", "Export portable transcript", "readable Markdown · redacted"));
                 v.push(a("reveal-finder", "Reveal native session file", it.get("file")));
             }
             v.push(a("copy", "Copy session ID", it.get("id")));
@@ -277,6 +325,62 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             v.push(a("copy", "Copy question", ""));
             v
         }
+        // A task in someone else's conversation is a reference, not a
+        // workflow. Marking work done or cancelling it out of an agent's
+        // input box would be the launcher acting on the person's behalf in a
+        // window they are only passing through; what is actually wanted here
+        // is to *mention* it — the id, or enough of the record for the agent
+        // to know what is being talked about.
+        Kind::Task if host == crate::defaults::Host::Agent => {
+            let mut v = vec![a("task-context", "Insert its context", "one line the agent can act on")];
+            v.push(a("details", "Show its record locally", it.get("state")));
+            v.push(a("copy", "Copy task id", it.get("task_id")));
+            v
+        }
+        // The work itself. Enter shows the record, or goes to whoever is
+        // doing it; everything that *changes* the task is here, and the one
+        // that ends it is last and red.
+        Kind::Task => {
+            let finished = matches!(it.get("state"), "done" | "failed" | "cancelled");
+            let mut v = Vec::new();
+            if !finished {
+                // The verb is the decision and the recipient is a parameter
+                // of it, so many agents collapse into a submenu.
+                with_options(&mut v, it, "handoff", "Hand off to {}", "Hand off to…",
+                             "keeps the id, the title and the history");
+                v.push(a("task-done", "Mark it done…", "with a result, if there is one"));
+            } else {
+                // A finished task is on the home because nobody has said they
+                // have seen it, so the first thing to offer is saying so.
+                // Nothing is lost by it — the record, its result and its whole
+                // event trail stay exactly where they were, and `task show`
+                // and `task list --all` still find it. It is not destructive
+                // and does not ask, because there is nothing to take back.
+                //
+                // Done and Failed only. `task::awaiting_review` deliberately
+                // excludes Cancelled — cancelling *is* the decision, taken
+                // from a panel that asked first — so a cancelled task never
+                // asked for anything, and "stops it asking" against one was an
+                // offer to silence a question nobody had been asked.
+                if matches!(it.get("state"), "done" | "failed") {
+                    v.push(a("task-ack", "Dismiss it", "keeps the record · stops it asking"));
+                }
+                // `task::retry` refuses a live task outright — retrying one
+                // that is still running is two agents on one job — so it is
+                // offered exactly where it works rather than offered and
+                // then explained away.
+                v.push(a("task-retry", "Try it again", "a new task, with an edge back to this one"));
+            }
+            if !it.get("pane").is_empty() {
+                v.push(a("zoom", "Go to its pane full-screen", it.get("addr")));
+            }
+            v.push(a("task-history", "Show its event history", "what was said about it, in order"));
+            v.push(a("copy", "Copy task id", it.get("task_id")));
+            if !finished {
+                v.push(a("task-cancel", "Cancel it…", "stops the work · retry opens a new task"));
+            }
+            v
+        }
         Kind::Config => open_actions(it.kind, it.get("path"), &editor),
         Kind::Port => vec![
             a("copy", "Copy PID", it.get("pid")),
@@ -334,6 +438,14 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             }
             if !target.is_empty() {
                 v.push(a("open", "Open SKILL.md in editor", &target));
+            }
+            // …and where there is more than one copy, all of them. With one
+            // copy `Open` above already is this, and a row that opens the
+            // same directory twice under two names teaches you not to read
+            // the panel.
+            let copies = crate::sources::agents::copy_paths(it);
+            if copies.len() > 1 {
+                v.push(a("open-copies", "Open all copies", format!("{} directories", copies.len())));
             }
             // Last, and one entry per agent that actually has a copy. A
             // skill merged across four agents is four separate decisions —
@@ -600,7 +712,11 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
 /// is red but not confirmed, because `docker start` exists; killing a
 /// process is both, because nothing brings it back.
 pub fn is_destructive(kind: Kind, id: &str) -> bool {
-    matches!(id, "killrun" | "stop" | "trash" | "session-trash" | "mcpremove" | "quicklink-remove")
+    matches!(
+        id,
+        "killrun" | "stop" | "trash" | "session-trash" | "mcpremove" | "quicklink-remove"
+            | "task-cancel"
+    )
         || id.starts_with("rm:")
         || id.starts_with("sync:")
         || matches!(id, "menu:rm" | "menu:sync")
@@ -611,6 +727,13 @@ pub fn is_destructive(kind: Kind, id: &str) -> bool {
 pub fn needs_confirming(kind: Kind, id: &str) -> Option<(&'static str, &'static str)> {
     match id {
         "killrun" => Some(("End it", "the conversation in it is lost")),
+        // Red *and* confirmed, though `retry` exists. Retry is not an undo:
+        // it opens a *new* task with a new id, and everything already
+        // pointing at this one — a message's `--task`, another task's
+        // `--needs`, the event trail — stays pointed at a cancelled record.
+        // It is also the only action here that stops work an agent may be
+        // doing right now, from a fuzzy list, on one keystroke.
+        "task-cancel" => Some(("Cancel it", "retry opens a new task; this id stays cancelled")),
         "run" if matches!(kind, Kind::Port | Kind::Proc) => {
             Some(("Kill it", "the process does not come back"))
         }
@@ -681,6 +804,82 @@ fn mcp_matrix_lines(it: &Item) -> Vec<String> {
     lines.push("public definition diff".into());
     lines.extend(crate::capability::mcp_definition_diff(it));
     lines
+}
+
+/// One choice out of a list, as its own picker rather than a `menu:` submenu.
+///
+/// The `menu:` mechanism builds its options while the panel is being drawn,
+/// which is right when the options are already on the row and wrong when
+/// finding them means reading every skill directory on the machine. These are
+/// built only once somebody has chosen the verb.
+///
+/// `(key, name, detail)`, and the key comes back. Padded by display width,
+/// because a skill named in CJK is twice as wide as its character count.
+/// The Skills a Session's Agent could be handed for one run — which is every
+/// Skill it does not already have.
+///
+/// Borrowing is defined as taking a capability the Agent does not own, and the
+/// picker used to filter on nothing but "has a directory and a name": a claude
+/// Session was offered a one-run borrow of claude's own nine Skills, which is
+/// a nine-row question with no answer in it. The row it would have chosen does
+/// nothing that typing `/name` into the conversation would not.
+pub(crate) fn borrowable_skills(skills: &[Item], agent: &str) -> Vec<(String, String, String)> {
+    skills
+        .iter()
+        .filter(|skill| !skill.get("dir").is_empty() && !skill.get("name").is_empty())
+        .filter(|skill| !owned_by(skill.get("agent"), agent))
+        .map(|skill| {
+            (
+                skill.get("dir").to_string(),
+                skill.get("name").to_string(),
+                skill.get("agent").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The same rule for MCP servers, plus the one it already had: a server with
+/// no transferable local definition — an account-hosted one — has nothing to
+/// lend, so it is not a choice either.
+pub(crate) fn borrowable_servers(servers: &[Item], agent: &str) -> Vec<(String, String, String)> {
+    servers
+        .iter()
+        .filter(|server| !server.get("name").is_empty() && server.get("portable") != "false")
+        .filter(|server| !owned_by(server.get("agent"), agent))
+        .map(|server| {
+            (
+                format!("{}\u{1}{}", server.get("agent"), server.get("name")),
+                server.get("name").to_string(),
+                server.get("agent").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Does `agent` already own a capability whose owner list is `owners`?
+///
+/// `owners` is the comma-joined `agent` field a Skill or MCP row carries.
+/// `shared` is not an answer to this: `~/.agents/skills` is a location rather
+/// than an agent, and `missing_agents` says as much by reporting a skill that
+/// lives only there as missing from every one of them — so a shared skill is
+/// still something claude may be handed for one run.
+fn owned_by(owners: &str, agent: &str) -> bool {
+    !agent.is_empty() && owners.split(',').map(str::trim).any(|owner| owner == agent)
+}
+
+fn pick_one(title: &str, choices: &[(String, String, String)]) -> Option<String> {
+    if choices.is_empty() {
+        return None;
+    }
+    let feed: String = choices
+        .iter()
+        .map(|(key, name, detail)| {
+            let name = crate::width::pad_to(&crate::width::dtrunc(name, 28), 28, false);
+            let tail = if detail.is_empty() { String::new() } else { format!("{DIM}· {detail}{RESET}") };
+            format!("{name}{tail}{SEP}{key}\n")
+        })
+        .collect();
+    ui::pick_raw(feed.trim_end(), title, "Choose › ", "Choose  Enter   ·   Back  Esc", "")
 }
 
 fn first_nonempty(it: &Item, keys: &[&str]) -> String {
@@ -783,8 +982,11 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
 }
 
 fn stays_in_panel(id: &str) -> bool {
-    matches!(id, "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcp-tools" | "mcpcompare")
-        || id.starts_with("diff:")
+    matches!(
+        id,
+        "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcp-tools"
+            | "mcpcompare" | "task-history"
+    ) || id.starts_with("diff:")
 }
 
 pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
@@ -975,6 +1177,60 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 Err(e) => { ui::note(&e, paste); return 2; }
             }
         }
+        // One-run borrowing, applied to a conversation instead of a fresh
+        // start. The picker is here rather than in `agent_options` because
+        // building it means reading every skill directory or the MCP cache,
+        // and the panel must not pay that to draw a row nobody chose.
+        "session-skill" => {
+            let skills = crate::sources::agents::skills();
+            let choices = borrowable_skills(&skills, it.get("agent"));
+            if choices.is_empty() {
+                ui::note(&format!("{} already has every skill on this machine", it.get("agent")), paste);
+                return 0;
+            }
+            let Some(dir) = pick_one(" resume with which skill ", &choices) else { return 130 };
+            let Some((_, name, _)) = choices.iter().find(|(d, ..)| *d == dir) else { return 2 };
+            match crate::sources::sessions::resume_with_skill_cmd(
+                it.get("agent"), it.get("id"), std::path::Path::new(&dir), name,
+            ) {
+                Ok(command) => ui::emit("RUN", &command, paste),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
+        "session-mcp" => {
+            let servers = crate::cache::read_cached("mcp");
+            let choices = borrowable_servers(&servers, it.get("agent"));
+            if choices.is_empty() {
+                ui::note(
+                    &format!("{} already owns every portable MCP server here", it.get("agent")),
+                    paste,
+                );
+                return 0;
+            }
+            let Some(key) = pick_one(" resume with which MCP server ", &choices) else { return 130 };
+            let Some(server) = servers.iter().find(|server| {
+                format!("{}\u{1}{}", server.get("agent"), server.get("name")) == key
+            }) else {
+                return 2;
+            };
+            match crate::sources::sessions::resume_with_mcp_cmd(it.get("agent"), it.get("id"), server) {
+                Ok(command) => ui::emit("RUN", &command, paste),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
+        // The readable half of the export pair. The raw JSONL beside it is
+        // the authoritative one and is what goes back to an agent; this is
+        // what goes to a person.
+        "session-export-md" => match crate::sources::sessions::export_transcript(it) {
+            Ok(path) => {
+                let shown = crate::paths::tilde(&path.to_string_lossy());
+                match crate::openwith::reveal_now(&path.to_string_lossy()) {
+                    Ok(()) => ui::note(&format!("exported to {shown}"), paste),
+                    Err(e) => ui::note(&format!("exported to {shown} ({e})"), paste),
+                }
+            }
+            Err(e) => { ui::note(&e, paste); return 2; }
+        },
         "session-export" => match crate::sources::sessions::export_raw(it) {
             Ok(path) => {
                 if let Err(e) = crate::openwith::reveal_now(&path.to_string_lossy()) {
@@ -1038,6 +1294,122 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         _ if id.starts_with("run:") => {
             let agent = &id[4..];
             ui::emit("RUN", &format!("{agent} {}", shq(&it.cmd)), paste);
+        }
+        // Everything a task offers, in one place. `task::*` returns a
+        // `Result` and prints nothing, so each of these says what happened
+        // through `ui::note` rather than through a stdout the widget is
+        // reading as its own protocol.
+        "task-done" => {
+            let Some(result) = ui::prompt_line(" result (optional) ") else { return 130 };
+            match crate::task::done(it.get("task_id"), &result) {
+                Ok(task) => ui::note(&format!("task {} done", task.id), paste),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
+        // Already confirmed above, by `needs_confirming`, with Cancel first.
+        "task-cancel" => match crate::task::cancel(it.get("task_id"), "") {
+            Ok(task) => ui::note(&format!("task {} cancelled", task.id), paste),
+            Err(e) => { ui::note(&e, paste); return 2; }
+        },
+        // Idempotent in the store, so a row that went stale in somebody's
+        // terminal cannot do anything worse than agree with itself.
+        "task-ack" => match crate::task::ack(it.get("task_id")) {
+            Ok(task) => ui::note(&format!("task {} dismissed — the record stays", task.id), paste),
+            Err(e) => { ui::note(&e, paste); return 2; }
+        },
+        "task-retry" => match crate::task::retry(it.get("task_id")) {
+            Ok(task) => ui::note(&format!("opened {} — a fresh attempt, queued", task.id), paste),
+            Err(e) => { ui::note(&e, paste); return 2; }
+        },
+        "task-history" => {
+            let id = it.get("task_id");
+            let lines: Vec<String> = crate::events::for_task(id)
+                .into_iter()
+                .map(|event| {
+                    let detail = event.detail.unwrap_or_default();
+                    format!(
+                        "{} {}{}",
+                        crate::width::pad_to(&crate::sources::user::ago(event.ts as f64), 12, false),
+                        event.kind,
+                        if detail.is_empty() { String::new() } else { format!("  {detail}") },
+                    )
+                })
+                .collect();
+            let lines = if lines.is_empty() {
+                vec!["nothing has been said about this task yet".to_string()]
+            } else {
+                lines
+            };
+            return crate::runhere::show_text(&format!("task {id} · {}", it.title), &lines);
+        }
+        // Enough for the agent to know which piece of work is meant, and
+        // nothing it would have to be told twice. Never the cwd of a task
+        // that has none, and never a result that was redacted into a marker.
+        "task-context" => {
+            let context = match crate::task::get(it.get("task_id")) {
+                Some(task) => {
+                    let mut line = format!(
+                        "task {} · {} — {}",
+                        task.id,
+                        task.state.as_str(),
+                        task.title
+                    );
+                    for (label, value) in [
+                        ("agent", task.agent.as_str()),
+                        ("project", task.project.as_str()),
+                        ("result", task.result.as_deref().unwrap_or_default()),
+                        ("reason", task.reason.as_deref().unwrap_or_default()),
+                    ] {
+                        if !value.is_empty() {
+                            line.push_str(&format!(" · {label}: {value}"));
+                        }
+                    }
+                    line
+                }
+                None => format!("task {} · {}", it.get("task_id"), it.title),
+            };
+            ui::emit("INSERT", &crate::width::flatten(&context), paste);
+        }
+        // Handing work over types into somebody else's conversation and
+        // presses Enter for them, so it runs through the same window
+        // `askagent:` uses: the answer is the point, and its stdout must not
+        // reach the shell widget as protocol.
+        _ if id.starts_with("handoff:") => {
+            let target = &id[8..];
+            let task_id = it.get("task_id");
+            if task_id.is_empty() {
+                ui::note("that row carries no task id", paste);
+                return 2;
+            }
+            let Some(note) = ui::prompt_line(" note for them (optional) ") else { return 130 };
+            let me = std::env::current_exe().unwrap_or_default();
+            let mut cmd = format!(
+                "{} handoff {} {}",
+                shq(&me.to_string_lossy()),
+                shq(target),
+                shq(task_id)
+            );
+            if !note.trim().is_empty() {
+                cmd.push(' ');
+                cmd.push_str(&shq(note.trim()));
+            }
+            return crate::runhere::run_cmd(&cmd);
+        }
+        // A skill merged across four agents is four directories, and an
+        // "open all" that quietly opened the first would look like a failure.
+        "open-copies" => {
+            let copies = crate::sources::agents::copy_paths(it);
+            let mut failed = Vec::new();
+            for (agent, dir) in &copies {
+                if let Err(e) = crate::openwith::open_now(dir, None) {
+                    failed.push(format!("{agent}: {e}"));
+                }
+            }
+            if !failed.is_empty() {
+                ui::note(&failed.join(" · "), paste);
+                return 2;
+            }
+            ui::note(&format!("opened {} copies", copies.len()), paste);
         }
         "jump" => return ui::act_jump(it, paste, false),
         "zoom" => return ui::act_jump(it, paste, true),
@@ -1406,6 +1778,8 @@ fn copy_text(it: &Item) -> String {
         Kind::Mcp => it.get("name"),
         Kind::Link => it.get("url"),
         Kind::File | Kind::Find | Kind::App => it.get("path"),
+        // The id, never the title: it is what every other verb takes.
+        Kind::Task => it.get("task_id"),
         _ => "",
     };
     if by_kind.is_empty() { it.cmd.clone() } else { by_kind.to_string() }

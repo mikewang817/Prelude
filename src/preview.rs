@@ -11,6 +11,14 @@ use crate::item::{Item, Kind};
 use crate::paths::tilde;
 use std::io::Write;
 
+/// How many of a Task's events the panel renders.
+///
+/// The tail, because that is where a task's story ends and the reason anybody
+/// opened this is what happened last. Generous enough to hold a whole ordinary
+/// task — opened, started, a few notes, finished — and small enough that a
+/// task with hundreds of retries costs the same as one with four.
+const HISTORY_SHOWN: usize = 40;
+
 pub fn show(it: &Item) {
     if image_path(it).is_some_and(show_image) {
         return;
@@ -122,6 +130,33 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// Where a finished task stands with the person it was done for.
+///
+/// Three answers, and the empty one matters as much as the others: a task that
+/// is still running has nothing to be dismissed yet, and a label with "not
+/// applicable" after it is a line nobody needed. A finished task past its
+/// review window has stopped appearing on the home by itself, so saying it is
+/// still there would be a lie — it is simply undismissed history.
+///
+/// `Done | Failed`, not `finished()`. A cancelled task never asked for
+/// attention in the first place — `task::awaiting_review` excludes it because
+/// cancelling *is* the decision — so "dismissed · not yet" against one was the
+/// panel reporting that a question nobody had been asked was still
+/// outstanding. The action panel gates `Dismiss it` on the same two states.
+fn dismissable(task: &crate::task::Task) -> bool {
+    matches!(task.state, crate::task::State::Done | crate::task::State::Failed)
+}
+
+fn dismissal(task: &crate::task::Task) -> String {
+    let now = crate::bus::now();
+    match task.acked_at {
+        Some(ts) => crate::sources::user::ago(ts as f64),
+        None if crate::task::awaiting_review(task, now) => "not yet · still on the home".into(),
+        None if dismissable(task) => "not yet".into(),
+        None => String::new(),
+    }
+}
+
 /// Render the same detail view as text so the action panel can page it and
 /// then return to the actions instead of closing the launcher.
 pub fn text(it: &Item) -> String {
@@ -130,6 +165,29 @@ pub fn text(it: &Item) -> String {
     fn kv(out: &mut Vec<String>, k: &str, v: &str) {
         if !v.is_empty() {
             out.push(format!("{DIM}{k:<16}{RESET}{v}"));
+        }
+    }
+    /// A block of label/value pairs whose labels do not all fit the fixed
+    /// sixteen columns above — "installed for this agent" is twenty-four.
+    ///
+    /// The column is measured once over the whole block and passed to every
+    /// row, for the same reason the list's columns are: two rows that each
+    /// measure themselves land in different places. Empty values are dropped
+    /// rather than printed as a label with nothing after it — "nothing says
+    /// so" is not a fact worth a line.
+    fn kv_block(out: &mut Vec<String>, pairs: &[(&'static str, String)]) {
+        let width = pairs
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(label, _)| crate::width::dwidth(label))
+            .max()
+            .unwrap_or(0)
+            + 2;
+        for (label, value) in pairs {
+            if value.is_empty() {
+                continue;
+            }
+            out.push(format!("{DIM}{}{RESET}{value}", crate::width::pad_to(label, width, false)));
         }
     }
 
@@ -163,23 +221,28 @@ pub fn text(it: &Item) -> String {
         // tells you what it asked. One capture for the selected pane, not
         // for all eighty of them.
         Kind::Run => {
-            kv(&mut out, "agent", it.get("agent"));
-            kv(&mut out, "project", &tilde(it.get("cwd")));
-            kv(&mut out, "at", it.get("addr"));
-            kv(&mut out, "state", it.get("state"));
-            kv(&mut out, "pid", it.get("pid"));
-            kv(&mut out, "run", it.get("run_id"));
-            let started = it.get("started").parse::<f64>().unwrap_or(0.0);
-            kv(&mut out, "started", &crate::sources::user::ago(started));
-            kv(&mut out, "session", it.get("session_native_id"));
-            let matched = match it.get("session_match") {
-                "explicit" => "explicit resume id",
-                "cwd-latest" => "only run in this project",
-                "ambiguous" => "ambiguous: several runs share this project",
-                "requested-missing" => "requested id not present in the session cache",
-                _ => "",
-            };
-            kv(&mut out, "matched", matched);
+            // One source for the effective context, shared with `prelude
+            // fleet` and the control table. This view used to build its own
+            // key/value block, which is how two readings of one run start
+            // disagreeing about which session it is in.
+            let mut pairs = crate::sources::running::effective_context(it);
+            // The three identifiers the shared context leaves out, because
+            // they are addresses rather than facts about the work — and this
+            // is the view somebody reaches for in order to go there. They sit
+            // before the last thing the run said, which is always the final
+            // pair and reads as the end of the block.
+            let before_last = pairs.len().saturating_sub(1);
+            for (n, pair) in [
+                ("at", it.get("addr").to_string()),
+                ("pid", it.get("pid").to_string()),
+                ("run", it.get("run_id").to_string()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                pairs.insert(before_last + n, pair);
+            }
+            kv_block(&mut out, &pairs);
             // What it last said, from its conversation file — which exists
             // whether or not it is in a terminal Prelude can see into. The
             // pane's screen is better when there is one, since it shows the
@@ -207,6 +270,130 @@ pub fn text(it: &Item) -> String {
                 }
             }
         }
+        // The record, and then everything anybody said about it. A task row
+        // carries only what a list column can hold; this is where the
+        // dependencies, the timestamps, the result and the edges live — and
+        // the store is the authority for all of them, so it is read here
+        // rather than reconstructed from the row.
+        Kind::Task => {
+            let id = it.get("task_id");
+            let record = crate::task::get(id);
+            let ago = |ts: u64| crate::sources::user::ago(ts as f64);
+            match &record {
+                Some(task) => {
+                    // Which dependencies are still in the way is the question;
+                    // listing the ids and leaving the reader to look each one
+                    // up is the row's answer, not this one's.
+                    //
+                    // One `get` per dependency, not two. Quick Look is bound
+                    // to a preview window that re-runs on every keystroke and
+                    // every cursor move, and this used to read each record
+                    // once for its label and once again to decide whether it
+                    // counted as unfinished — two hundred dependencies were
+                    // four hundred file opens, per key.
+                    let mut states: Vec<(&str, Option<crate::task::State>)> =
+                        Vec::with_capacity(task.deps.len());
+                    let mut known: std::collections::HashMap<&str, Option<crate::task::State>> =
+                        std::collections::HashMap::new();
+                    for dep in &task.deps {
+                        let state = *known
+                            .entry(dep.as_str())
+                            .or_insert_with(|| crate::task::get(dep).map(|other| other.state));
+                        states.push((dep.as_str(), state));
+                    }
+                    let deps: Vec<String> = states
+                        .iter()
+                        .map(|(dep, state)| match state {
+                            Some(state) if state.finished() => format!("{dep} · {}", state.as_str()),
+                            Some(state) => format!("{dep} · {} · still to do", state.as_str()),
+                            None => format!("{dep} · no such task · still to do"),
+                        })
+                        .collect();
+                    let unfinished = states
+                        .iter()
+                        .filter(|(_, state)| !state.is_some_and(|state| state.finished()))
+                        .count();
+                    let needs = match (deps.is_empty(), unfinished) {
+                        (true, _) => String::new(),
+                        (false, 0) => deps.join("\n"),
+                        (false, n) => format!("{n} still unfinished\n{}", deps.join("\n")),
+                    };
+                    kv_block(&mut out, &[
+                        ("title", task.title.clone()),
+                        ("id", task.id.clone()),
+                        ("state", task.state.as_str().to_string()),
+                        ("project", task.project.clone()),
+                        ("where", tilde(&task.cwd)),
+                        ("agent", task.agent.clone()),
+                        ("run", task.run.clone().unwrap_or_default()),
+                        ("session", task.session.clone().unwrap_or_default()),
+                        ("message", task.message.clone().unwrap_or_default()),
+                        ("prompt", task.prompt_ref.clone().unwrap_or_default()),
+                        ("retry of", task.retry_of.clone().unwrap_or_default()),
+                        ("opened", ago(task.created_at)),
+                        ("started", task.started_at.map(ago).unwrap_or_default()),
+                        ("last touched", ago(task.updated_at)),
+                        ("finished", task.finished_at.map(ago).unwrap_or_default()),
+                        // Whether anybody has said they have seen how it went.
+                        // Acknowledgement is an explicit act, never inferred
+                        // from this very panel having been opened — so the
+                        // line reads the same however long you look at it.
+                        ("dismissed", dismissal(task)),
+                        ("result", task.result.clone().unwrap_or_default()),
+                        ("reason", task.reason.clone().unwrap_or_default()),
+                    ]);
+                    if !needs.is_empty() {
+                        out.push(String::new());
+                        out.push(format!("{DIM}needs{RESET}"));
+                        out.extend(needs.lines().map(str::to_string));
+                    }
+                }
+                // The store is the authority, so a row whose record has been
+                // swept says exactly that rather than re-displaying the row.
+                None => {
+                    kv_block(&mut out, &[
+                        ("title", it.title.clone()),
+                        ("id", id.to_string()),
+                        ("state", it.get("state").to_string()),
+                        ("project", it.get("project").to_string()),
+                        ("agent", it.get("agent").to_string()),
+                    ]);
+                    out.push(String::new());
+                    out.push("no record under that id — it has been finished and swept".into());
+                }
+            }
+            // Newest last, the way a conversation reads, and the way every
+            // other list in this file is ordered — and bounded, the way
+            // `transcript_tail` bounds a conversation. A long-running task
+            // accumulates events without limit, and this is a preview: it is
+            // re-rendered on every keystroke while Quick Look is open, and
+            // nobody scrolls back through five hundred lines of it to reach
+            // the record above.
+            let mut history = crate::events::for_task(id);
+            let total = history.len();
+            if total > HISTORY_SHOWN {
+                history.drain(..total - HISTORY_SHOWN);
+            }
+            if !history.is_empty() {
+                out.push(String::new());
+                out.push(format!("{DIM}history{RESET}"));
+                if total > history.len() {
+                    out.push(format!(
+                        "{DIM}{} earlier events · prelude task show {id} --json has them all{RESET}",
+                        total - history.len(),
+                    ));
+                }
+                for event in history {
+                    let detail = event.detail.unwrap_or_default();
+                    out.push(format!(
+                        "{} {}{}",
+                        crate::width::pad_to(&crate::sources::user::ago(event.ts as f64), 12, false),
+                        event.kind,
+                        if detail.is_empty() { String::new() } else { format!("  {detail}") },
+                    ));
+                }
+            }
+        }
         Kind::Skill => {
             kv(&mut out, "agents", it.get("agent"));
             kv(&mut out, "integrity", it.get("integrity"));
@@ -225,11 +412,27 @@ pub fn text(it: &Item) -> String {
                     } else {
                         String::new()
                     };
+                    // When each copy was last touched. Two copies with
+                    // different fingerprints say they have diverged; only the
+                    // dates say which way round to replace them.
+                    let when = match crate::sources::user::ago(copy.modified as f64) {
+                        when if when.is_empty() => String::new(),
+                        when => format!(" · {when}"),
+                    };
                     out.push(format!(
-                        "{:<10} {} · {} files · {} bytes{}",
-                        copy.agent, hash, copy.files, copy.bytes, warning
+                        "{} {} · {} files · {} bytes{when}{warning}",
+                        crate::width::pad_to(&copy.agent, 10, false), hash, copy.files, copy.bytes,
                     ));
                     out.push(format!("           {}", tilde(&copy.dir)));
+                    // A broken link is a copy that will not work and an
+                    // escaping one is a copy that cannot be copied
+                    // completely; both are worth a line where a hash is not.
+                    // Worded by `capability::link_faults`, which is also what
+                    // `doctor skills` will say — two descriptions of one
+                    // condition eventually disagree about it.
+                    for fault in crate::capability::link_faults(&copy) {
+                        out.push(format!("           {RED}⚠ {}{RESET}", fault.detail));
+                    }
                 }
             }
             if !it.get("desc").is_empty() {
@@ -368,6 +571,16 @@ pub fn text(it: &Item) -> String {
                 kv(&mut out, "active", it.get("active_state"));
                 kv(&mut out, "run", it.get("active_run"));
                 kv(&mut out, "at", it.get("active_addr"));
+                // Archiving hides a conversation; it does not close it. A row
+                // that says "archived" and is visible anyway has a reason,
+                // and the reason belongs here rather than in a bug report.
+                if it.get("archived") == "true" {
+                    out.push(format!(
+                        "{DIM}{:<16}{RESET}{}",
+                        "note",
+                        "archived, but something resumed it — it is listed again until that run ends",
+                    ));
+                }
             }
             if !it.get("opening").is_empty() {
                 out.push(String::new());

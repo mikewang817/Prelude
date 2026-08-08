@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     /// A question an agent has put to you and is blocked on.
     Msg,
+    /// A piece of work an agent was asked to do, which outlives the process
+    /// doing it.
+    Task,
     Agent,
     /// An agent process alive right now, as opposed to a session file.
     Run,
@@ -56,6 +59,23 @@ impl Kind {
             // and the rest of the cluster, spanning twenty-five points, did
             // not survive it at all.
             Msg => 1010,
+            // Between the question and the agents, because a Task is what a
+            // Run is *for*. A Run is a process and a Session is a transcript;
+            // both end when the machine reboots and neither can say what it
+            // was doing. The Task is the thing that is still outstanding, so
+            // it leads the agents that might work on it and the runs already
+            // trying to — a run you can restart, an unfinished task is the
+            // work itself. Only a question explicitly blocked on a person
+            // outranks it.
+            //
+            // Five points, on the same reasoning as `Msg`'s ten: these
+            // numbers are only ever compared to each other, and `cache::
+            // by_rank` settles the band before it looks at a score. Ordering
+            // *within* the band is `task::rank_of` — failed above completed
+            // above waiting above working above queued — and where Milestone
+            // 7's Agent Home wants Task and Run states interleaved it says so
+            // itself, because one band cannot.
+            Task => 1005,
             // Agents occupy their own band, far enough above everything
             // else that learned ranking cannot lift another kind past them.
             // They are what this launcher is for; everything else is one
@@ -98,6 +118,7 @@ impl Kind {
         use Kind::*;
         match self {
             Msg => (RED, "asking you"),
+            Task => (YELLOW, "task"),
             Agent => (GREEN, "agent"),
             Run => (GREEN, "running"),
             Session => (MAGENTA, "session"),
@@ -129,8 +150,8 @@ impl Kind {
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
-            Msg, Agent, Run, Session, Config, Search, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
-            Clip, Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
+            Msg, Task, Agent, Run, Session, Config, Search, Translate, Calc, Port, Proc, Link, Find, Container,
+            Snippet, Clip, Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }
 }

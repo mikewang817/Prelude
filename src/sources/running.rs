@@ -23,8 +23,21 @@
 //! `kill(pid, 0)` per row: syscalls, not subprocesses. So that half runs live
 //! on every gather, and the state you read is the state now rather than the
 //! state when the cache was written.
+//!
+//! **A run's effective context is split the same way, on the same rule: pay
+//! where the fact is stable.** Which capabilities a process explicitly
+//! borrowed can only be read from its argument vector, which exists once, in
+//! the cached half — and the arguments themselves are never kept, only the
+//! capability *name*, because `--mcp-config` can be a whole server definition
+//! with an API key in it. The branch changes under a run and costs two file
+//! reads, so it is taken live. The model and the tasks attached to a run cost
+//! a bounded file read each and are wanted only when somebody looks at one
+//! run, so `effective_context` reads them on the explicit path and gather
+//! never pays for them at all.
 
 use crate::item::{Item, Kind};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long an agent has to go quiet before it is probably waiting on you.
@@ -77,6 +90,118 @@ pub fn classify(dead: bool, silent: u64, turn: Option<Turn>) -> State {
     }
 }
 
+/// What an agent's own event says it is doing — or nothing, for a kind that
+/// makes no claim about it.
+///
+/// Deliberately partial. `task.queue` records that work was accepted, not
+/// that anybody started it, and `task.assign` describes a task rather than
+/// the process; reading either as a state would be exactly the invention the
+/// plan forbids. A finished task is the interesting one: the run is alive and
+/// has nothing left it was asked to do, which is the definition of waiting on
+/// you.
+fn reported_state(kind: &str) -> Option<State> {
+    match kind {
+        "task.start" | "task.progress" | "task.retry" => Some(State::Working),
+        "task.wait" | "task.done" | "task.fail" | "task.cancel" => Some(State::Waiting),
+        _ => None,
+    }
+}
+
+/// The same state machine with the evidence priority the plan states:
+/// a structured Agent event, then conversation evidence, then the clocks.
+///
+/// `event` is the newest thing the run said about itself and `activity` the
+/// newest clock reading for it — a pane redraw or a session-file append.
+/// The event wins only while it is *also* the newest thing that happened: one
+/// from ten minutes ago describes a run that has since written to its session
+/// file four hundred times, and honouring it would pin a working agent at
+/// "waiting" for as long as it stayed quiet about its task. Older than the
+/// clock, or a kind that asserts nothing, and this is `classify` unchanged.
+///
+/// A run with no clock at all — a batch run, or one with neither a pane nor a
+/// conversation file — has nothing to compare against, and comparing against
+/// zero is not a comparison: any event ever recorded against it would outrank
+/// the epoch and pin it, for the rest of its life, with no reading that could
+/// ever overtake it. That is how `codex exec` came to be reported as stuck,
+/// which is precisely what CLAUDE.md says must never happen. An unwatchable
+/// run is therefore spoken for only by a *recent* statement: `QUIET` is the
+/// same window silence is judged by, so a run says what it is doing on the
+/// cadence it would otherwise be judged silent on, or it is left alone.
+pub fn classify_reported(
+    dead: bool,
+    silent: u64,
+    turn: Option<Turn>,
+    event: Option<(&str, u64)>,
+    activity: Option<u64>,
+) -> State {
+    if dead {
+        return State::Dead;
+    }
+    if let Some((kind, at)) = event {
+        let speaks_for_it = match activity {
+            Some(activity) => at >= activity,
+            None => now().saturating_sub(at) <= QUIET,
+        };
+        if speaks_for_it {
+            if let Some(state) = reported_state(kind) {
+                return state;
+            }
+        }
+    }
+    classify(dead, silent, turn)
+}
+
+/// How much of the end of the event log a gather reads.
+///
+/// `events::all()` parses the file whole, which is right for `prelude task
+/// show` and wrong here: at the log's 512KB cap that is nine milliseconds, a
+/// quarter of the launch budget, spent to find records that are by
+/// construction in the last few lines of an append-only file. Sixty-four
+/// kilobytes is around eight hundred events — every run on the machine
+/// several times over — for a tenth of the cost.
+const EVENT_TAIL_BYTES: u64 = 64 * 1024;
+
+/// Where `events.rs` keeps the log. It owns the format and the writing; this
+/// only ever reads the tail of it. Naming the path twice is the price of not
+/// parsing half a megabyte on the launch path, and the failure mode if it
+/// ever moves is the one every source here has: nothing is found, the clocks
+/// carry on, and no one sees an error.
+fn event_log() -> PathBuf {
+    crate::paths::data().join("events.jsonl")
+}
+
+/// The newest structured event for every run that has one, in one pass.
+///
+/// Read backwards, so the first record seen for a run is its newest. Appends
+/// are chronological by construction, which is what makes that true without
+/// comparing timestamps — two events in the same second would otherwise be
+/// resolved by luck. A missing, unreadable or half-written log yields an
+/// empty map: a source degrades to nothing, and the clocks are still there.
+fn latest_events() -> HashMap<String, crate::events::Event> {
+    latest_events_in(&event_log())
+}
+
+/// The same read, against a log this caller names.
+///
+/// `events.rs` and `task.rs` take their root as a parameter for the reason
+/// `sessions.rs` writes down — `$XDG_DATA_HOME` belongs to the whole process
+/// and `cargo test` runs on several threads — and this is that rule applied to
+/// the one path here that reads the log. Production still asks
+/// `paths::data()`; nothing on the gather path changed.
+fn latest_events_in(log: &Path) -> HashMap<String, crate::events::Event> {
+    let mut latest = HashMap::new();
+    let Some(text) = window(&log.to_string_lossy(), true, EVENT_TAIL_BYTES) else {
+        return latest;
+    };
+    for line in text.lines().rev() {
+        let Ok(event) = serde_json::from_str::<crate::events::Event>(line) else { continue };
+        if let Some(run) = event.run.clone() {
+            latest.entry(run).or_insert(event);
+        }
+    }
+    latest
+}
+
 /// How much of the tail of a conversation to read.
 ///
 /// One tool result holding a large file can be tens of kilobytes on its own,
@@ -85,22 +210,45 @@ pub fn classify(dead: bool, silent: u64, turn: Option<Turn>) -> State {
 /// still cheap: a seek and one read per agent, no parsing of the rest.
 const TAIL_BYTES: u64 = 64 * 1024;
 
-/// Read the end of a conversation and say whether the agent is mid-turn.
+/// How much of the *head* of a conversation is worth reading.
 ///
-/// Only the last *message* matters, so entries that carry no message —
-/// attachments, summaries, meta rows — are skipped rather than counted.
-pub fn last_turn(path: &str) -> Option<Turn> {
+/// Only pi needs one, and only for the model — it writes `model_change` when
+/// a session opens and then never again unless the model changes, so the one
+/// structured record of it sits in the first few lines. Far smaller than the
+/// tail because nothing here is looking for a message.
+const HEAD_BYTES: u64 = 8 * 1024;
+
+/// A bounded slice of a file that may be megabytes, from either end.
+///
+/// Session files are not read whole anywhere on a live path: one tool result
+/// holding a large file can be tens of kilobytes on its own, and a
+/// conversation that has run all afternoon is a hundred megabytes. The first
+/// line of a tail window is usually half a record; every reader here parses
+/// line by line and skips what will not parse, so that costs nothing.
+fn window(path: &str, at_end: bool, bytes: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     if path.is_empty() {
         return None;
     }
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
-    let from = len.saturating_sub(TAIL_BYTES);
-    f.seek(SeekFrom::Start(from)).ok()?;
-    let mut buf = Vec::with_capacity(TAIL_BYTES as usize);
-    f.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
+    let mut buf = Vec::new();
+    if at_end {
+        f.seek(SeekFrom::Start(len.saturating_sub(bytes))).ok()?;
+        f.read_to_end(&mut buf).ok()?;
+    } else {
+        buf.resize(bytes.min(len) as usize, 0);
+        f.read_exact(&mut buf).ok()?;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Read the end of a conversation and say whether the agent is mid-turn.
+///
+/// Only the last *message* matters, so entries that carry no message —
+/// attachments, summaries, meta rows — are skipped rather than counted.
+pub fn last_turn(path: &str) -> Option<Turn> {
+    let text = window(path, true, TAIL_BYTES)?;
 
     for line in text.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
@@ -122,6 +270,55 @@ pub fn last_turn(path: &str) -> Option<Turn> {
                 parts.iter().any(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
             });
         return Some(if acting { Turn::Acting } else { Turn::Spoke });
+    }
+    None
+}
+
+/// The model a run is using — but only where the agent's own file records it
+/// as a structured field.
+///
+/// There is no fourth source and there must not be one. A `--model` flag says
+/// what was *asked for*, a config file says what the default would be, and
+/// neither is evidence of what actually answered; a run started against a
+/// model that its account cannot serve is exactly when a person looks. Where
+/// nothing structured says so there is simply no model line.
+///
+/// Three formats, three fields. claude writes `message.model` on every
+/// assistant turn and codex a `turn_context` per turn, so the tail finds
+/// both. pi writes `model_change` once when a session opens, so its record is
+/// at the head — a second bounded read rather than an excuse to read a
+/// hundred-megabyte file.
+pub fn model_of(agent: &str, path: &str) -> Option<String> {
+    if let Some(model) = window(path, true, TAIL_BYTES).and_then(|text| model_in(agent, &text)) {
+        return Some(model);
+    }
+    if agent == "pi" {
+        return window(path, false, HEAD_BYTES).and_then(|text| model_in(agent, &text));
+    }
+    None
+}
+
+fn model_in(agent: &str, text: &str) -> Option<String> {
+    let field = |v: &serde_json::Value, of: &str, key: &str| -> Option<String> {
+        v.get(of)?.get(key)?.as_str().map(str::to_string)
+    };
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let found = match agent {
+            "claude" => field(&v, "message", "model"),
+            "codex" if kind == "turn_context" => field(&v, "payload", "model"),
+            "pi" if kind == "model_change" => {
+                v.get("modelId").and_then(|m| m.as_str()).map(str::to_string)
+            }
+            _ => None,
+        };
+        // A name, not a payload: anything unreasonably long is a field that
+        // has changed meaning underfoot, and a source degrades to nothing
+        // rather than putting it on screen.
+        if let Some(model) = found.filter(|m| !m.is_empty() && m.len() <= 80) {
+            return Some(model);
+        }
     }
     None
 }
@@ -253,6 +450,294 @@ pub(crate) fn requested_session(agent: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+/// What a borrowed capability is called when the flag that named it cannot be
+/// reduced to a name.
+///
+/// Never the path and never the value. A staged `--mcp-config` file is under
+/// Prelude's own cache and says nothing a person wants to read; an inline one
+/// is a server definition with an env block in it. "Something was loaded and
+/// we will not say what" is a fact; the argument is not one we are allowed to
+/// keep.
+const UNNAMED: &str = "an unnamed borrowed capability";
+
+/// Skills and MCP servers this process explicitly took for this one run.
+///
+/// Read from the argument vector and only from there — a capability appears
+/// against a run because that run's own command line named it, never because
+/// the agent happens to have it installed. Those are two different facts and
+/// the whole of Milestone 5 is keeping them apart.
+///
+/// The flags are the ones `lend.rs` writes, per agent: claude `--plugin-dir`
+/// and `--mcp-config`, pi `--skill`, codex `-c mcp_servers.…`. The three
+/// pairings with no flag contribute nothing, exactly as they offer nothing.
+///
+/// Like `requested_session`, this extracts a relation and keeps nothing else.
+pub(crate) fn borrowed_capabilities(agent: &str, args: &[&str]) -> (Vec<String>, Vec<String>) {
+    let (mut skills, mut mcp) = (Vec::new(), Vec::new());
+    match agent {
+        "claude" => {
+            for dir in values_for(args, "--plugin-dir") {
+                skills.push(name_of_path(dir));
+            }
+            for value in values_for(args, "--mcp-config") {
+                mcp.extend(mcp_config_names(value));
+            }
+        }
+        "pi" => {
+            for dir in values_for(args, "--skill") {
+                skills.push(name_of_path(dir));
+            }
+        }
+        "codex" => {
+            for value in values_for(args, "-c") {
+                if let Some(name) = codex_mcp_key(value) {
+                    mcp.push(name);
+                }
+            }
+        }
+        _ => {}
+    }
+    // Set-based, not `dedup()`: that removes only *adjacent* repeats, and the
+    // one command line that repeats a name never repeats it adjacently —
+    // `codex -c mcp_servers.a.command=… -c mcp_servers.b.command=…
+    // -c mcp_servers.a.env=…` is two servers, and used to be recorded as
+    // three capabilities with one of them named twice.
+    for list in [&mut skills, &mut mcp] {
+        let mut seen = std::collections::BTreeSet::new();
+        list.retain(|name| seen.insert(name.clone()));
+    }
+    (skills, mcp)
+}
+
+/// Every value given to `flag`, in either spelling.
+fn values_for<'a>(args: &[&'a str], flag: &str) -> Vec<&'a str> {
+    let equals = format!("{flag}=");
+    let mut out = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(value) = arg.strip_prefix(equals.as_str()) {
+            if !value.is_empty() {
+                out.push(value);
+            }
+        } else if *arg == flag {
+            // Exactly one word, however variadic the flag is. `--mcp-config`
+            // keeps eating bare words until the next option, so a prompt
+            // typed after it would otherwise be read as a second capability
+            // — and a prompt is the one thing that reliably contains
+            // everything.
+            if let Some(value) = args.get(i + 1).filter(|value| !value.starts_with('-')) {
+                out.push(value);
+            }
+        }
+    }
+    out
+}
+
+/// A capability name, from the path a flag pointed at.
+///
+/// The last component is what every agent uses as the name. The path itself
+/// is not kept: it discloses a home directory, and for a Prelude-staged
+/// borrow it is a cache location nobody wants to read.
+fn name_of_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let base = match parts.last() {
+        // `--skill …/name/SKILL.md` names the file, not the skill.
+        Some(last) if last.eq_ignore_ascii_case("SKILL.md") => {
+            parts.get(parts.len().wrapping_sub(2)).copied().unwrap_or("")
+        }
+        Some(last) => last,
+        None => "",
+    };
+    plausible_name(base.strip_suffix(".json").unwrap_or(base))
+}
+
+/// A name we are willing to record, or the admission that there is none.
+///
+/// Bounded and conservative: a capability name is a word, so anything long,
+/// punctuated or credential-shaped is a value that has arrived where a name
+/// was expected and must not be stored as one.
+fn plausible_name(name: &str) -> String {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || " ._-".contains(c))
+        && !crate::secrets::looks_secret(name);
+    if ok { name.to_string() } else { UNNAMED.to_string() }
+}
+
+/// claude's `--mcp-config` takes either a path to a config file or the config
+/// itself, and the inline form is the dangerous one — a complete server
+/// definition, env block included. It is parsed for its server names and then
+/// dropped on the floor.
+fn mcp_config_names(value: &str) -> Vec<String> {
+    if !value.trim_start().starts_with('{') {
+        return vec![name_of_path(value)];
+    }
+    let mut names: Vec<String> = serde_json::from_str::<serde_json::Value>(value.trim())
+        .ok()
+        .and_then(|v| {
+            let servers = v.get("mcpServers")?.as_object()?;
+            Some(servers.keys().map(|name| plausible_name(name)).collect())
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        names = scan_mcp_config_names(value);
+    }
+    if names.is_empty() { vec![UNNAMED.to_string()] } else { names }
+}
+
+/// How far into an inline config the scan below will look for server names.
+///
+/// A server name is at the front of the object by construction, so this is
+/// already far past where one can be; the bound exists so that an argument
+/// that is not a config at all costs a fixed amount rather than its own length.
+const MCP_SCAN_BYTES: usize = 8 * 1024;
+
+/// Server names out of an inline config that will not parse.
+///
+/// `ps` joins the argument vector with spaces and `fleet` splits it back on
+/// them, so an inline `--mcp-config={…}` holding a single space arrives as a
+/// fragment: valid JSON up to the point it was cut, and nothing serde will
+/// accept. That is not an exotic case — Prelude's own `_lend-mcp` emits one
+/// whenever a server's command lives in an application bundle with a space in
+/// its name, and every such run recorded "an unnamed borrowed capability"
+/// instead of the server it had just staged.
+///
+/// So the front of the object is read directly: the `mcpServers` key, the
+/// brace after it, and the quoted keys immediately inside it. Only keys —
+/// anything at a deeper nesting level is a value, and values are where
+/// commands, arguments, headers and env blocks live. Every name still goes
+/// through `plausible_name`, so a fragment that cuts mid-string, an escaped
+/// character or anything credential-shaped is recorded as unnamed rather than
+/// stored. The fragment itself is never retained.
+fn scan_mcp_config_names(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let bytes = &bytes[..bytes.len().min(MCP_SCAN_BYTES)];
+    const KEY: &[u8] = b"\"mcpServers\"";
+    let Some(start) = bytes.windows(KEY.len()).position(|w| w == KEY) else { return Vec::new() };
+    let mut i = start + KEY.len();
+    // Only whitespace and the colon may stand between the key and its object;
+    // anything else means this is not the shape it claims to be.
+    while i < bytes.len() && bytes[i] != b'{' {
+        if !bytes[i].is_ascii_whitespace() && bytes[i] != b':' {
+            return Vec::new();
+        }
+        i += 1;
+    }
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                i += 1;
+            }
+            b'"' => {
+                let mut j = i + 1;
+                let mut text = Vec::new();
+                let mut closed = false;
+                while j < bytes.len() {
+                    match bytes[j] {
+                        // Whatever it escapes is not a character a name may
+                        // contain, so the backslash stands in for it and
+                        // `plausible_name` refuses the result.
+                        b'\\' => {
+                            text.push(b'\\');
+                            j += 2;
+                        }
+                        b'"' => {
+                            closed = true;
+                            break;
+                        }
+                        byte => {
+                            text.push(byte);
+                            j += 1;
+                        }
+                    }
+                }
+                // A string the fragment cut in half is the end of what can be
+                // read: there is no way to tell a key from a value after it.
+                if !closed {
+                    break;
+                }
+                if depth == 1 {
+                    let mut after = j + 1;
+                    while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+                        after += 1;
+                    }
+                    if after < bytes.len() && bytes[after] == b':' {
+                        names.push(plausible_name(&String::from_utf8_lossy(&text)));
+                    }
+                }
+                i = j + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    names
+}
+
+/// codex borrows through `-c mcp_servers.<name>.<field>=<value>`. The value
+/// half is the part that holds a command line or an env block, so only the
+/// key is read — and only when it addresses an MCP server, because `-c` is a
+/// general config override and most of what it sets is not a capability.
+fn codex_mcp_key(value: &str) -> Option<String> {
+    let name = value.strip_prefix("mcp_servers.")?.split('.').next()?;
+    Some(plausible_name(name))
+}
+
+/// What `.git/HEAD` says, told apart rather than flattened.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Head {
+    Branch(String),
+    /// The short object id. A detached HEAD has no branch, and printing the
+    /// id where a branch name goes is a lie a person will act on.
+    Detached(String),
+}
+
+/// The `.git` directory that governs `cwd`, wherever it actually lives.
+///
+/// A worktree and a submodule both leave a `.git` *file* holding
+/// `gitdir: <path>`, and that path is routinely relative — to the directory
+/// holding the file, not to the process's cwd. Resolving it against the wrong
+/// one finds nothing and reports no branch for every submodule on the machine.
+fn git_dir(cwd: &Path) -> Option<PathBuf> {
+    for dir in cwd.ancestors() {
+        let candidate = dir.join(".git");
+        let Ok(meta) = std::fs::metadata(&candidate) else { continue };
+        if meta.is_dir() {
+            return Some(candidate);
+        }
+        let text = std::fs::read_to_string(&candidate).ok()?;
+        let target = text.lines().find_map(|line| line.trim().strip_prefix("gitdir:"))?.trim();
+        let target = Path::new(target);
+        return Some(if target.is_absolute() { target.to_path_buf() } else { dir.join(target) });
+    }
+    None
+}
+
+/// The branch a run is working on, read the way `project::git` reads one:
+/// straight off disk, with no subprocess anywhere near the gather path.
+///
+/// A cwd outside a repository yields nothing — not an error, not a row.
+pub(crate) fn head_of(cwd: &str) -> Option<Head> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(git_dir(Path::new(cwd))?.join("HEAD")).ok()?;
+    let head = text.trim();
+    if let Some(name) = head.strip_prefix("ref: refs/heads/") {
+        return (!name.is_empty()).then(|| Head::Branch(name.to_string()));
+    }
+    let hex = head.chars().all(|c| c.is_ascii_hexdigit()) && head.len() >= 7;
+    hex.then(|| Head::Detached(head.chars().take(7).collect()))
+}
+
 fn mtime_of(path: &str) -> Option<u64> {
     if path.is_empty() {
         return None;
@@ -293,6 +778,10 @@ struct Found {
     started: u64,
     batch: bool,
     requested: Option<String>,
+    /// Capability *names* only. The argument vector this came out of is not
+    /// kept anywhere, in this struct or beyond it.
+    skills: Vec<String>,
+    mcp: Vec<String>,
 }
 
 /// Find the fleet. Expensive, and therefore cached.
@@ -326,6 +815,10 @@ pub fn fleet() -> Vec<Item> {
         let batch = rest.iter().any(|w| *w == "-p" || *w == "--print" || *w == "exec");
         let started = now().saturating_sub(elapsed_seconds(etime).unwrap_or(0));
         let requested = requested_session(agent, &rest[1..]);
+        // The one place the argument vector exists, and the last place it is
+        // allowed to. Both extractions take a relation and a name; `rest` is
+        // dropped with the loop iteration.
+        let (skills, mcp) = borrowed_capabilities(agent, &rest[1..]);
         found.push(Found {
             pid: pid.into(),
             ppid: ppid.into(),
@@ -334,6 +827,8 @@ pub fn fleet() -> Vec<Item> {
             started,
             batch,
             requested,
+            skills,
+            mcp,
         });
     }
     if found.is_empty() {
@@ -349,7 +844,7 @@ pub fn fleet() -> Vec<Item> {
     found
         .into_iter()
         .map(|found| {
-            let Found { pid, ppid, agent, etime, started, batch, requested } = found;
+            let Found { pid, ppid, agent, etime, started, batch, requested, skills, mcp } = found;
             let cwd = cwds.get(&pid).cloned().unwrap_or_default();
             let pane = panes
                 .iter()
@@ -372,6 +867,15 @@ pub fn fleet() -> Vec<Item> {
             }
             if let Some(id) = requested {
                 it = it.put("requested_session", id);
+            }
+            // Two keys with two names, because "claude has forty skills" and
+            // "this run loaded one" are different facts and a single field
+            // would let them be read as the same number.
+            if !skills.is_empty() {
+                it = it.put("run_skills", skills.join(", "));
+            }
+            if !mcp.is_empty() {
+                it = it.put("run_mcp", mcp.join(", "));
             }
             it
         })
@@ -549,6 +1053,14 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
     }
     attach_sessions(&mut runs, sessions);
     let panes = panes();
+    // The event log is read once, not once per run. `events::latest_for_run`
+    // parses the whole file per call and a gather asks about every run, so
+    // eight agents would have been eight parses of the same bounded file.
+    let reported = latest_events();
+    // Runs in one project share a branch, and a project is usually where
+    // several of them are. Two file reads is cheap; twenty is still worth not
+    // doing.
+    let mut branches: HashMap<String, Option<Head>> = HashMap::new();
     runs.into_iter()
         .map(|mut it| {
             // Two clocks, one meaning. The pane's is the more direct when
@@ -561,27 +1073,57 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
             let by_file = mtime_of(it.get("session"));
             let last = by_pane.into_iter().chain(by_file).max();
             let silent = last.map(|t| now.saturating_sub(t)).unwrap_or(0);
+            let event = reported.get(it.get("run_id"));
             // A batch run writes to a pipe and keeps no conversation file, so
-            // silence tells you nothing about it. It is reported as working:
-            // it is doing something, there is simply no way to watch.
-            let state = if last.is_none() || it.get("batch") == "1" {
-                State::Working
-            } else {
-                // The conversation says what the clock cannot: whether this
-                // run is quiet because it is thinking or quiet because it
-                // asked you something and stopped.
-                //
-                // Only asked when the clock is about to say "waiting", which
-                // is the only answer it can change — a run that moved a
-                // second ago is working whatever its last entry was. That
-                // keeps the cost proportional to the number of *quiet* runs
-                // rather than to the size of the fleet: eighty busy agents
-                // cost nothing, and reading 64KB per row on every keystroke
-                // would not have fit the budget.
-                let turn = (silent >= QUIET).then(|| last_turn(it.get("session"))).flatten();
-                classify(false, silent, turn)
-            };
+            // silence tells you nothing about it, and neither does a run with
+            // no clock at all. Both are working as far as anything here can
+            // see — unless the agent itself has said otherwise. An event is a
+            // statement rather than an inference, and it is the only thing
+            // that can speak for a run nothing can watch.
+            let blind = last.is_none() || it.get("batch") == "1";
+            // The conversation says what the clock cannot: whether this run is
+            // quiet because it is thinking or quiet because it asked you
+            // something and stopped.
+            //
+            // Only asked when the clock is about to say "waiting", which is
+            // the only answer it can change — a run that moved a second ago is
+            // working whatever its last entry was. That keeps the cost
+            // proportional to the number of *quiet* runs rather than to the
+            // size of the fleet: eighty busy agents cost nothing, and reading
+            // 64KB per row on every keystroke would not have fit the budget.
+            let turn = (!blind && silent >= QUIET)
+                .then(|| last_turn(it.get("session")))
+                .flatten();
+            let state = classify_reported(
+                false,
+                if blind { 0 } else { silent },
+                turn,
+                event.map(|e| (e.kind.as_str(), e.ts)),
+                last,
+            );
+            if let Some(event) = event {
+                // Carried on the row so the Quick Look and the control graph
+                // read the same record this state was decided from, rather
+                // than parsing the log again and possibly disagreeing with
+                // what is on screen. `detail` was credential-filtered when it
+                // was written.
+                it.data.insert("event_kind".into(), event.kind.clone());
+                it.data.insert("event_at".into(), event.ts.to_string());
+                it.data.insert("event_task".into(), event.task.clone());
+                if let Some(detail) = event.detail.clone() {
+                    it.data.insert("event_detail".into(), detail);
+                }
+            }
             let cwd = it.get("cwd").to_string();
+            match branches.entry(cwd.clone()).or_insert_with(|| head_of(&cwd)) {
+                Some(Head::Branch(name)) => {
+                    it.data.insert("branch".into(), name.clone());
+                }
+                Some(Head::Detached(id)) => {
+                    it.data.insert("detached".into(), id.clone());
+                }
+                None => {}
+            }
             let project = match cwd.rsplit('/').next().unwrap_or("") {
                 "" => crate::paths::tilde(&cwd),
                 p => p.to_string(),
@@ -604,6 +1146,233 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
             it
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Effective context
+// ---------------------------------------------------------------------------
+
+/// Everything known about one run, as label/value pairs in reading order.
+///
+/// Rendering-agnostic on purpose. Quick Look, `prelude fleet` and the control
+/// table all want the same facts in the same order, and a second surface
+/// re-deriving them is how two views of one run start disagreeing. An empty
+/// value means "nothing says so" and is the caller's to drop — a run outside a
+/// repository has no branch line at all, rather than a line saying it has none.
+///
+/// The expensive parts are here rather than on the row for a reason: the model
+/// is a bounded read of the session file and the tasks are a directory of
+/// small files, and both are wanted only when somebody is looking at one run.
+/// Gather never calls this.
+pub fn effective_context(run: &Item) -> Vec<(&'static str, String)> {
+    let agent = run.get("agent");
+    let (skills, mcp) = installed_counts(agent);
+    let mut out = vec![
+        ("agent", agent.to_string()),
+        ("project", project_label(run)),
+        ("branch", branch_label(run).unwrap_or_default()),
+        ("session", session_label(run)),
+        ("task", task_label(run)),
+        ("state", state_label(run)),
+        ("started", started_label(run)),
+        ("model", model_of(agent, run.get("session")).unwrap_or_default()),
+        // Confirmed, never inferred: these are the capabilities this run's own
+        // command line named. "none" is said out loud so it can never be read
+        // as the inventory line below.
+        ("skills loaded by this run", or_none(run.get("run_skills"))),
+        ("mcp loaded by this run", or_none(run.get("run_mcp"))),
+        (
+            "installed for this agent",
+            format!("{skills} skills · {mcp} mcp servers, none loaded unless named above"),
+        ),
+    ];
+    // A structured event outranks the conversation, so the conversation is
+    // shown only when there is no event — two "last" lines saying different
+    // things is worse than either.
+    match event_label(run) {
+        Some(said) => out.push(("last report", said)),
+        None => out.push(("last said", transcript_tail(run.get("session"), 1).join(" "))),
+    }
+    out
+}
+
+fn or_none(value: &str) -> String {
+    if value.is_empty() { "none".into() } else { value.to_string() }
+}
+
+/// The branch, or the honest admission that HEAD is not on one.
+pub fn branch_label(run: &Item) -> Option<String> {
+    match (run.get("branch"), run.get("detached")) {
+        ("", "") => None,
+        ("", id) => Some(format!("detached at {id}")),
+        (name, _) => Some(name.to_string()),
+    }
+}
+
+fn project_label(run: &Item) -> String {
+    match run.get("project") {
+        "" => crate::paths::tilde(run.get("cwd")),
+        project => project.to_string(),
+    }
+}
+
+fn state_label(run: &Item) -> String {
+    // `fields` already carries the state with its silence in it ("waiting
+    // 4m"), computed once by the live path; recomputing it here from `state`
+    // alone would drop the duration.
+    match run.fields.get(1) {
+        Some(field) if !field.is_empty() => field.clone(),
+        _ => run.get("state").to_string(),
+    }
+}
+
+fn started_label(run: &Item) -> String {
+    let started: u64 = run.get("started").parse().unwrap_or(0);
+    if started == 0 {
+        return String::new();
+    }
+    format!("{} ago", short_dur(now().saturating_sub(started)))
+}
+
+/// The conversation this run is in, and how confidently it was matched.
+///
+/// An ambiguous or missing match says so rather than showing nothing: "two
+/// runs of this agent are in this project" is the reason there is no session
+/// here, and a blank line invites somebody to go looking for a bug.
+fn session_label(run: &Item) -> String {
+    let relation = run.get("session_match");
+    match (run.get("session_id"), relation) {
+        ("", "ambiguous") => "not linked · more than one run of this agent here".into(),
+        ("", "requested-missing") => {
+            format!("{} · no such conversation on this machine", run.get("session_native_id"))
+        }
+        ("", _) => String::new(),
+        (id, relation) => {
+            let subject = match run.get("subject") {
+                "" => id.to_string(),
+                subject => subject.to_string(),
+            };
+            if relation.is_empty() { subject } else { format!("{subject} · {relation}") }
+        }
+    }
+}
+
+/// Open tasks this run is doing, by title.
+///
+/// Read here rather than on the row because it is a directory of small files
+/// and gather has no use for it; `tasks_of` is the one rule for this edge, and
+/// the control graph builds `RunRecord::tasks` through it.
+fn task_label(run: &Item) -> String {
+    let titles: Vec<String> = tasks_of(run.get("run_id"))
+        .into_iter()
+        .map(|task| format!("{} · {}", task.title, task.state.as_str()))
+        .collect();
+    titles.join(" | ")
+}
+
+/// The open tasks attached to a run, newest first. Empty for a run nothing was
+/// opened against, which is most of them.
+///
+/// `open_tasks`, never `all`. A run is a live process, so the only tasks it
+/// can still be doing are open ones — every caller here filters the finished
+/// ones out again anyway — and `all` is O(every task ever created and not yet
+/// swept): 52 ms over a five-thousand-record store, paid by `effective_
+/// context` and therefore by every Quick Look of a running agent. The open
+/// set is bounded by outstanding work instead, and is read through the index
+/// rather than by walking the directory.
+pub fn tasks_of(run_id: &str) -> Vec<crate::task::Task> {
+    tasks_of_in(&crate::task::open_tasks(), run_id)
+}
+
+/// The same edge, for a caller that already holds the open set.
+///
+/// The control graph asks it about every run at once and would otherwise read
+/// the index once per row. It exists so that the *rule* — which tasks belong
+/// to a run, and in what order — is stated in one place and cannot drift:
+/// `control` used to build its own closure over `task::all()`, so a task
+/// marked done stayed on `runs[].tasks` in `control --json` after Quick Look
+/// had dropped it, and the two views of one edge disagreed.
+pub fn tasks_of_in(open: &[crate::task::Task], run_id: &str) -> Vec<crate::task::Task> {
+    if run_id.is_empty() {
+        return Vec::new();
+    }
+    let mut tasks: Vec<crate::task::Task> =
+        open.iter().filter(|task| task.run.as_deref() == Some(run_id)).cloned().collect();
+    tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at));
+    tasks
+}
+
+/// The last thing this run said about itself, as a sentence.
+///
+/// Absent rather than empty when there is no event, because the caller shows
+/// conversation evidence in its place — that is the fallback the evidence
+/// order calls for.
+fn event_label(run: &Item) -> Option<String> {
+    let kind = run.get("event_kind");
+    if kind.is_empty() {
+        return None;
+    }
+    let at: u64 = run.get("event_at").parse().unwrap_or(0);
+    let mut said = kind.to_string();
+    if at > 0 {
+        said.push_str(&format!(" · {} ago", short_dur(now().saturating_sub(at))));
+    }
+    match run.get("event_detail") {
+        "" => {}
+        detail => said.push_str(&format!(" · {detail}")),
+    }
+    Some(said)
+}
+
+/// What the *agent* has, which is a different question from what this run
+/// took. Counted rather than listed: the two numbers are the whole point.
+///
+/// Directory entries only — no frontmatter parsing, no hashing, nothing that
+/// belongs behind the capability cache tier. The count is therefore an
+/// arithmetic restatement of the launcher's Skill rows and `control`'s
+/// `AgentRecord::skills`, and it has to come to the same number as both, so it
+/// counts on their rule and not a looser one.
+///
+/// Two things it used to do differently, and both put a number on screen that
+/// contradicted the list right beside it. `~/.agents/skills` is a *location*
+/// rather than an agent — `missing_agents` says so, by reporting a skill that
+/// lives only there as missing from every agent — so counting it as the
+/// agent's own inventory made claude's nine skills into eighteen and gave
+/// codex nine it does not have. And the same skill name can appear under
+/// several roots, so names are counted once however many directories hold
+/// them.
+fn installed_counts(agent: &str) -> (usize, usize) {
+    if agent.is_empty() {
+        return (0, 0);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for (dir, _) in
+        crate::sources::agents::skill_dirs().into_iter().filter(|(_, owner)| *owner == agent)
+    {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !entry.path().is_dir() {
+                continue;
+            }
+            names.insert(name);
+        }
+    }
+    let skills = names.len();
+    let mcp = crate::cache::read_cached("mcp")
+        .iter()
+        .filter(|server| server.get("agent").split(',').map(str::trim).any(|a| a == agent))
+        .count();
+    (skills, mcp)
+}
+
+/// The capability names a run confirmed, split by kind. The reverse of this —
+/// which runs loaded a given capability — is built in `control.rs`.
+pub fn confirmed_capabilities(run: &Item) -> (Vec<String>, Vec<String>) {
+    let split = |value: &str| -> Vec<String> {
+        value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+    };
+    (split(run.get("run_skills")), split(run.get("run_mcp")))
 }
 
 /// What a run last said, read from its conversation file rather than its
@@ -639,4 +1408,536 @@ pub fn transcript_tail(path: &str, want: usize) -> Vec<String> {
     }
     out.reverse();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory nothing else is using, removed with the test.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "prelude-running-{name}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("scratch directory");
+            Scratch(root)
+        }
+        fn write(&self, rel: &str, text: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).expect("fixture directory");
+            }
+            std::fs::write(&path, text).expect("fixture");
+            path
+        }
+        fn dir(&self, rel: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(&path).expect("fixture directory");
+            path
+        }
+        fn at(&self, rel: &str) -> String {
+            self.0.join(rel).to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_branch_is_read_off_disk_in_every_shape_a_repository_takes() {
+        let scratch = Scratch::new("git");
+
+        // The ordinary case, and from a subdirectory: a run's cwd is rarely
+        // the repository root.
+        scratch.write("repo/.git/HEAD", "ref: refs/heads/feature/agent-control-plane\n");
+        scratch.dir("repo/src/sources");
+        assert_eq!(
+            head_of(&scratch.at("repo/src/sources")),
+            Some(Head::Branch("feature/agent-control-plane".into()))
+        );
+
+        // Detached: there is no branch, and the id is labelled as one by
+        // `branch_label` rather than printed where a name goes.
+        scratch.write("bisect/.git/HEAD", "9f1c2d3e4b5a60718293a4b5c6d7e8f901234567\n");
+        assert_eq!(head_of(&scratch.at("bisect")), Some(Head::Detached("9f1c2d3".into())));
+
+        // A worktree keeps HEAD elsewhere and leaves a file saying where.
+        let elsewhere = scratch.dir("repo/.git/worktrees/spike");
+        std::fs::write(elsewhere.join("HEAD"), "ref: refs/heads/spike\n").expect("worktree HEAD");
+        scratch.write("tree/.git", &format!("gitdir: {}\n", elsewhere.display()));
+        assert_eq!(head_of(&scratch.at("tree")), Some(Head::Branch("spike".into())));
+
+        // A submodule's is relative — to the directory holding the file, not
+        // to the process's working directory.
+        scratch.write("super/.git/modules/lib/HEAD", "ref: refs/heads/vendor\n");
+        scratch.write("super/lib/.git", "gitdir: ../.git/modules/lib\n");
+        assert_eq!(head_of(&scratch.at("super/lib")), Some(Head::Branch("vendor".into())));
+
+        // Not a repository at all, and an empty cwd. No branch, no error.
+        assert_eq!(head_of(&scratch.at("nowhere")), None);
+        assert_eq!(head_of(""), None);
+        // A `.git` file pointing at nothing readable degrades the same way.
+        scratch.write("broken/.git", "gitdir: /no/such/place\n");
+        assert_eq!(head_of(&scratch.at("broken")), None);
+    }
+
+    #[test]
+    fn a_borrowed_capability_keeps_its_name_and_never_its_path() {
+        let (skills, mcp) = borrowed_capabilities(
+            "claude",
+            &["--plugin-dir", "/Users/someone/.cache/prelude/borrow/deploy", "fix the build"],
+        );
+        assert_eq!(skills, vec!["deploy".to_string()], "the last path component is the name");
+        assert!(mcp.is_empty());
+
+        // Both spellings, and the staged file's extension is not part of it.
+        let (_, mcp) = borrowed_capabilities(
+            "claude",
+            &["--mcp-config=/Users/someone/.cache/prelude/borrow/node_repl.json"],
+        );
+        assert_eq!(mcp, vec!["node_repl".to_string()]);
+
+        // pi points straight at the owner's directory, SKILL.md and all.
+        let (skills, _) = borrowed_capabilities(
+            "pi",
+            &["--skill", "/Users/someone/.agents/skills/cnipa-ooa/SKILL.md", "start"],
+        );
+        assert_eq!(skills, vec!["cnipa-ooa".to_string()], "the file is not the skill");
+
+        // codex addresses config by dotted path; only the key is a name.
+        let (_, mcp) = borrowed_capabilities(
+            "codex",
+            &["-c", "mcp_servers.node_repl.command=\"npx\"", "-c", "model=\"gpt-5\""],
+        );
+        assert_eq!(mcp, vec!["node_repl".to_string()], "-c is not only for capabilities");
+
+        // Three of the eight pairings have no flag, and extract nothing.
+        assert_eq!(borrowed_capabilities("opencode", &["--skill", "/s/deploy"]).0, Vec::<String>::new());
+
+        // Anything that cannot be reduced to a plausible name is recorded as
+        // having happened, without saying what it was.
+        assert_eq!(
+            borrowed_capabilities("claude", &["--plugin-dir=/tmp/@@not a name!!"]).0,
+            vec![UNNAMED.to_string()]
+        );
+        assert_eq!(
+            borrowed_capabilities("pi", &["--skill=/tmp/sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ01"]).0,
+            vec![UNNAMED.to_string()],
+            "a credential arriving where a name was expected is not stored as one"
+        );
+    }
+
+    #[test]
+    fn preludes_own_borrow_command_records_the_server_it_staged() {
+        // Exactly what `prelude _lend-mcp claude computer-use` emits on a
+        // machine where that server lives in an application bundle — and
+        // exactly what `ps` gives back, because it joins the argument vector
+        // with spaces and `fleet` splits it again on them. The value is
+        // therefore a fragment: valid JSON up to where it was cut, and
+        // nothing serde will take.
+        let emitted = "--mcp-config={\"mcpServers\":{\"computer-use\":{\"args\":[\"mcp\"],\
+                       \"command\":\"./Codex Computer Use.app/Contents/MacOS/Client\"}}}";
+        let split: Vec<&str> = emitted.split(' ').collect();
+        assert!(split.len() > 1, "the space is the whole problem");
+        let (_, mcp) = borrowed_capabilities("claude", &split);
+        assert_eq!(mcp, vec!["computer-use".to_string()], "the name is at the front of the object");
+
+        // Whole and unbroken, serde still does it, and several servers still
+        // come back as several names.
+        let (_, mcp) = borrowed_capabilities(
+            "claude",
+            &["--mcp-config={\"mcpServers\":{\"one\":{\"command\":\"a\"},\"two\":{\"command\":\"b\"}}}"],
+        );
+        assert_eq!(mcp, vec!["one".to_string(), "two".to_string()]);
+
+        // The scan reads keys and never values. A command, an argument list
+        // and an env block sit one level deeper and are not names.
+        let (_, mcp) = borrowed_capabilities(
+            "claude",
+            &["--mcp-config={\"mcpServers\":{\"gh\":{\"command\":\"npx\",\"env\":{\"TOKEN\":\"x\"}},"],
+        );
+        assert_eq!(mcp, vec!["gh".to_string()], "only the server key is a name");
+
+        // A fragment that cuts inside the name itself yields no name — there
+        // is no way to tell how much of it there was.
+        let (_, mcp) = borrowed_capabilities("claude", &["--mcp-config={\"mcpServers\":{\"gh"]);
+        assert_eq!(mcp, vec![UNNAMED.to_string()]);
+        // And an object that is not a config at all still says nothing.
+        let (_, mcp) = borrowed_capabilities("claude", &["--mcp-config={\"model\":\"opus\"}"]);
+        assert_eq!(mcp, vec![UNNAMED.to_string()]);
+    }
+
+    #[test]
+    fn a_capability_named_twice_on_one_command_line_is_recorded_once() {
+        // codex sets one server with several `-c` overrides, and nothing says
+        // they arrive together: `dedup()` removes only *adjacent* repeats, so
+        // this reached the row, `mcp_confirmed` and Quick Look as three.
+        let (_, mcp) = borrowed_capabilities(
+            "codex",
+            &[
+                "-c", "mcp_servers.a.command=\"npx\"",
+                "-c", "mcp_servers.b.command=\"node\"",
+                "-c", "mcp_servers.a.env={\"K\":\"v\"}",
+            ],
+        );
+        assert_eq!(mcp, vec!["a".to_string(), "b".to_string()], "two servers, in the order named");
+
+        let (skills, _) = borrowed_capabilities(
+            "claude",
+            &["--plugin-dir=/c/borrow/deploy", "--plugin-dir=/c/borrow/lint",
+              "--plugin-dir=/c/borrow/deploy"],
+        );
+        assert_eq!(skills, vec!["deploy".to_string(), "lint".to_string()]);
+    }
+
+    #[test]
+    fn a_command_line_carrying_an_api_key_leaves_none_of_it_on_the_run() {
+        let key = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ01";
+        let inline = format!(
+            "{{\"mcpServers\":{{\"gh\":{{\"command\":\"npx\",\"args\":[\"-y\",\"gh-mcp\"],\
+             \"env\":{{\"GITHUB_TOKEN\":\"{key}\"}}}}}}}}"
+        );
+        let args = [
+            "--resume",
+            "0cc7d054-2bef-4e1b-ba7b-56cba3958ac6",
+            "--mcp-config",
+            inline.as_str(),
+            "--plugin-dir",
+            "/Users/someone/.cache/prelude/borrow/deploy",
+            "rotate the key and redeploy",
+        ];
+        let (skills, mcp) = borrowed_capabilities("claude", &args);
+        assert_eq!(mcp, vec!["gh".to_string()], "the server's name, and nothing under it");
+        assert_eq!(skills, vec!["deploy".to_string()]);
+
+        // The row itself: everything `fleet` records from an argument vector.
+        let mut run = Item::new("kill 4242", Kind::Run)
+            .title("claude")
+            .put("agent", "claude")
+            .put("run_id", "claude:4242:1000")
+            .put("run_skills", skills.join(", "))
+            .put("run_mcp", mcp.join(", "));
+        if let Some(id) = requested_session("claude", &args) {
+            run = run.put("requested_session", id);
+        }
+        let stored = serde_json::to_string(&run).expect("serialize");
+        for leak in [key, "GITHUB_TOKEN", "npx", "gh-mcp", "rotate the key", "/Users/someone"] {
+            assert!(!stored.contains(leak), "the run kept {leak}: {stored}");
+        }
+        assert!(stored.contains("\"gh\"") && stored.contains("deploy"), "the names survive");
+
+        // `ps` joins the argument vector with spaces and we split it back on
+        // them, so a hand-written definition with spaces in it arrives in
+        // pieces. A fragment is not a definition and not a name: the run
+        // records that something was loaded, and no piece of the key can
+        // reach the row through the fragments this never looks at.
+        let spaced = format!(
+            "--mcp-config {{ \"mcpServers\": {{ \"gh\": {{ \"env\": {{ \"T\": \"{key}\" }} }} }} }}"
+        );
+        let split: Vec<&str> = spaced.split(' ').collect();
+        let (_, mcp) = borrowed_capabilities("claude", &split);
+        assert_eq!(mcp, vec![UNNAMED.to_string()], "half a definition is not a name");
+        assert!(!mcp.join(", ").contains("sk-"));
+    }
+
+    #[test]
+    fn a_reported_event_outranks_the_clock_only_while_it_is_the_newest_thing() {
+        // The clock says three hundred seconds of silence, which on its own
+        // reads as waiting. The agent said it was working, after that.
+        assert_eq!(
+            classify_reported(false, 300, Some(Turn::Spoke), Some(("task.progress", 1_000)), Some(900)),
+            State::Working,
+            "a statement beats a clock reading it postdates"
+        );
+        // The same event, older than the last thing the run actually did.
+        assert_eq!(
+            classify_reported(false, 300, Some(Turn::Spoke), Some(("task.progress", 800)), Some(900)),
+            State::Waiting,
+            "an event from before the last append describes a run that has moved on"
+        );
+        // And in the other direction: quiet for four seconds, but it has said
+        // it is blocked on somebody.
+        assert_eq!(
+            classify_reported(false, 4, None, Some(("task.wait", 1_000)), Some(999)),
+            State::Waiting
+        );
+        // A kind that asserts nothing about the process leaves the machine
+        // exactly as it was.
+        assert_eq!(
+            classify_reported(false, 300, None, Some(("task.assign", 5_000)), Some(10)),
+            State::Waiting
+        );
+        assert_eq!(
+            classify_reported(false, 5, None, Some(("something.new", 5_000)), Some(10)),
+            State::Working
+        );
+        // A run with no clock at all — a batch run — can still be spoken for,
+        // but only by something it said just now. There is no reading that
+        // could ever overtake an event here, so age is the only guard there
+        // is: without it the first `task.done` ever recorded against a
+        // `codex exec` pins it at "waiting" until the process exits.
+        assert_eq!(
+            classify_reported(false, 0, None, Some(("task.wait", now())), None),
+            State::Waiting,
+            "a statement made just now speaks for a run nothing can watch"
+        );
+        assert_eq!(
+            classify_reported(false, 0, None, Some(("task.wait", 7)), None),
+            State::Working,
+            "an event from 1970 is not a statement about what a run is doing"
+        );
+        assert_eq!(
+            classify_reported(false, 0, None, Some(("task.done", now() - QUIET - 1)), None),
+            State::Working,
+            "and neither is one that has gone stale"
+        );
+        assert_eq!(classify_reported(false, 0, None, None, None), State::Working);
+        // Nothing outranks a process that is gone.
+        assert_eq!(
+            classify_reported(true, 0, Some(Turn::Acting), Some(("task.progress", 9_000)), Some(1)),
+            State::Dead
+        );
+        // With no event this is `classify`, unchanged.
+        for (silent, turn) in [(0, None), (29, None), (30, None), (9_000, Some(Turn::Acting))] {
+            assert_eq!(
+                classify_reported(false, silent, turn, None, Some(1)),
+                classify(false, silent, turn)
+            );
+        }
+    }
+
+    /// The shape `live_with_sessions` passes for a run nothing can watch: no
+    /// clock, and therefore a silence of zero, because silence means nothing
+    /// about a process writing to a pipe.
+    fn blind_run(event: Option<(&str, u64)>) -> State {
+        classify_reported(false, 0, None, event, None)
+    }
+
+    #[test]
+    fn a_batch_run_is_never_reported_as_stuck_by_an_event_of_any_age() {
+        // `codex exec` and `claude -p` keep no conversation file and hold no
+        // pane. Every one of these kinds says "waiting" when it is fresh, and
+        // none of them may say it from the past — the whole reason the guard
+        // exists is that no clock can ever overtake an event here.
+        for kind in ["task.wait", "task.done", "task.fail", "task.cancel"] {
+            assert_eq!(
+                blind_run(Some((kind, now()))),
+                State::Waiting,
+                "{kind} said just now is a statement"
+            );
+            for stale in [0, 7, now().saturating_sub(QUIET + 1), now().saturating_sub(3_600)] {
+                assert_eq!(
+                    blind_run(Some((kind, stale))),
+                    State::Working,
+                    "{kind} at {stale} is history, and a batch run is not stuck"
+                );
+            }
+        }
+        // And with nothing said at all, silence is not evidence either way.
+        assert_eq!(blind_run(None), State::Working);
+    }
+
+    #[test]
+    fn a_model_is_read_only_where_a_native_file_records_one() {
+        let scratch = Scratch::new("model");
+
+        let claude = scratch.write(
+            "claude.jsonl",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\
+             \"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+        );
+        assert_eq!(
+            model_of("claude", &claude.to_string_lossy()),
+            Some("claude-opus-5".to_string())
+        );
+
+        let codex = scratch.write(
+            "codex.jsonl",
+            "{\"type\":\"session_meta\",\"payload\":{\"model_provider\":\"openai\"}}\n\
+             {\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-luna\",\"effort\":\"high\"}}\n",
+        );
+        assert_eq!(model_of("codex", &codex.to_string_lossy()), Some("gpt-5.6-luna".to_string()));
+
+        // pi writes `model_change` when the session opens and never again, so
+        // a long conversation puts it far outside the tail window.
+        let mut long = String::from("{\"type\":\"model_change\",\"modelId\":\"gpt-5.6-terra\"}\n");
+        while long.len() < (TAIL_BYTES as usize) * 2 {
+            long.push_str(
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\
+                 \"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n",
+            );
+        }
+        let pi = scratch.write("pi.jsonl", &long);
+        assert_eq!(model_of("pi", &pi.to_string_lossy()), Some("gpt-5.6-terra".to_string()));
+
+        // Nothing structured says so: a model named in prose, in a flag or in
+        // a field that is not the one the format records, is not evidence.
+        let quiet = scratch.write(
+            "quiet.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\
+             \"content\":[{\"type\":\"text\",\"text\":\"running claude --model opus\"}]}}\n\
+             {\"type\":\"response_item\",\"payload\":{\"model\":\"gpt-9\"}}\n",
+        );
+        assert_eq!(model_of("claude", &quiet.to_string_lossy()), None);
+        assert_eq!(model_of("codex", &quiet.to_string_lossy()), None, "only turn_context counts");
+        assert_eq!(model_of("claude", ""), None);
+        assert_eq!(model_of("claude", &scratch.at("no-such-file.jsonl")), None);
+        // An agent whose format we cannot read says nothing rather than
+        // guessing from a field that happens to be called model.
+        assert_eq!(model_of("opencode", &claude.to_string_lossy()), None);
+    }
+
+    #[test]
+    fn what_a_run_loaded_is_never_what_its_agent_has_installed() {
+        let loaded = Item::new("kill 1", Kind::Run)
+            .title("claude")
+            .put("agent", "claude")
+            .put("run_id", "claude:1:100")
+            .put("state", "working")
+            .put("run_skills", "deploy")
+            .fields(["Prelude", "working", "pid 1", ""]);
+        let bare = Item::new("kill 2", Kind::Run)
+            .title("claude")
+            .put("agent", "claude")
+            .put("run_id", "claude:2:100")
+            .put("state", "working");
+
+        assert_eq!(
+            confirmed_capabilities(&loaded),
+            (vec!["deploy".to_string()], Vec::new()),
+            "confirmed means this run's own command line named it"
+        );
+        assert_eq!(
+            confirmed_capabilities(&bare),
+            (Vec::new(), Vec::new()),
+            "an agent that has a skill installed has not loaded it"
+        );
+
+        let context = effective_context(&bare);
+        let value = |label: &str| {
+            context.iter().find(|(l, _)| *l == label).map(|(_, v)| v.clone()).unwrap_or_default()
+        };
+        assert_eq!(value("skills loaded by this run"), "none");
+        assert_eq!(value("mcp loaded by this run"), "none");
+        assert!(
+            value("installed for this agent").contains("skills"),
+            "the inventory is counted under its own label: {:?}",
+            value("installed for this agent")
+        );
+        assert_ne!(
+            value("skills loaded by this run"),
+            value("installed for this agent"),
+            "the two numbers must never be the same field"
+        );
+        assert_eq!(
+            effective_context(&loaded)
+                .iter()
+                .find(|(l, _)| *l == "skills loaded by this run")
+                .map(|(_, v)| v.as_str()),
+            Some("deploy")
+        );
+    }
+
+    #[test]
+    fn effective_context_reports_what_it_knows_and_stays_silent_otherwise() {
+        let scratch = Scratch::new("context");
+        scratch.write("repo/.git/HEAD", "ref: refs/heads/main\n");
+
+        let run = Item::new("tmux switch-client -t work:1.0", Kind::Run)
+            .title("claude")
+            .put("agent", "claude")
+            .put("run_id", "claude:77:1000")
+            .put("project", "repo")
+            .put("branch", "main")
+            .put("started", (now().saturating_sub(600)).to_string())
+            .put("state", "waiting")
+            .put("session_id", "claude:abc")
+            .put("session_match", "explicit")
+            .put("subject", "milestone five")
+            .put("event_kind", "task.progress")
+            .put("event_at", now().saturating_sub(30).to_string())
+            .put("event_detail", "reading running.rs")
+            .fields(["repo", "waiting 4m", "work:1.0", "milestone five"]);
+
+        let context = effective_context(&run);
+        let value = |label: &str| {
+            context.iter().find(|(l, _)| *l == label).map(|(_, v)| v.clone()).unwrap_or_default()
+        };
+        assert_eq!(value("agent"), "claude");
+        assert_eq!(value("project"), "repo");
+        assert_eq!(value("branch"), "main");
+        assert_eq!(value("session"), "milestone five · explicit");
+        assert_eq!(value("state"), "waiting 4m", "the silence is part of the state");
+        assert_eq!(value("started"), "10m ago");
+        assert!(value("last report").starts_with("task.progress · "));
+        assert!(value("last report").ends_with("reading running.rs"));
+        assert!(
+            context.iter().all(|(label, _)| *label != "last said"),
+            "an event replaces the conversation evidence rather than joining it"
+        );
+        assert_eq!(value("model"), "", "no native file, no model line");
+
+        // A detached HEAD is labelled, never presented as a branch name.
+        let detached = Item::new("kill 5", Kind::Run).put("detached", "9f1c2d3");
+        assert_eq!(branch_label(&detached).as_deref(), Some("detached at 9f1c2d3"));
+        assert_eq!(branch_label(&Item::new("kill 6", Kind::Run)), None);
+
+        // With no event the conversation is the fallback.
+        let quiet = Item::new("kill 8", Kind::Run).put("agent", "claude").put("run_id", "claude:8:1");
+        assert!(effective_context(&quiet).iter().any(|(label, _)| *label == "last said"));
+    }
+
+    #[test]
+    fn the_newest_event_per_run_survives_a_log_far_longer_than_the_window() {
+        use crate::events::{testing, Event, Log};
+        // A directory of this test's own, and a log addressed by path. No
+        // environment variable is touched, so nothing here is racing another
+        // test's `var_os` on another thread.
+        let root = testing::root("running-events");
+        let path = root.path.join("events.jsonl");
+        let log = Log::at(path.clone());
+        assert!(latest_events_in(&path).is_empty(), "no log is not an error");
+
+        for (run, note) in
+            [("claude:1:9", "first"), ("codex:2:9", "another agent"), ("claude:1:9", "newest")]
+        {
+            log.append(&Event::new("task.progress", "t1").run(run).detail(note))
+                .expect("append");
+        }
+        let latest = latest_events_in(&path);
+        assert_eq!(latest.len(), 2, "one record per run, not one per event");
+        assert_eq!(latest["claude:1:9"].detail.as_deref(), Some("newest"));
+        assert_eq!(latest["codex:2:9"].detail.as_deref(), Some("another agent"));
+        // A run nobody has said anything about has no record, and never
+        // borrows a neighbour's: this map is the only per-run lookup there
+        // is, so the isolation the events module used to prove separately is
+        // proved here, on the path that actually runs.
+        assert!(!latest.contains_key("claude:9:9"), "an unknown run has said nothing");
+        assert!(!latest.contains_key(""), "and neither has an empty run id");
+
+        // Push the whole conversation past the window this reads, then say
+        // one more thing. Gather wants the newest, and the newest is always
+        // at the end of an append-only file.
+        while std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) < EVENT_TAIL_BYTES * 2 {
+            log.append(&Event::new("task.progress", "t2").run("pi:3:9").detail("busy"))
+                .expect("append");
+        }
+        log.append(&Event::new("task.wait", "t1").run("claude:1:9").detail("your turn"))
+            .expect("append");
+        let latest = latest_events_in(&path);
+        assert_eq!(latest["claude:1:9"].kind, "task.wait");
+        assert_eq!(latest["claude:1:9"].detail.as_deref(), Some("your turn"));
+    }
 }

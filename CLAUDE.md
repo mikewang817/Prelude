@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 55 tests
+cargo test                 # 180 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -142,14 +142,47 @@ terminal, and `·` is the separator on every row. `doctor` measures it with a
 cursor-position report and caches the answer. Always use `width::dwidth`.
 
 **The home and root commands are not the catalogue.** An empty query renders
-only Msg, Agent, Run, Skill and MCP. An ordinary query searches those plus
-Search commands and fixed Quicklinks — never the thousands of files, history
-entries, apps, clipboard rows and `$PATH` commands underneath. Exact `f`
-shows one Search Files command; `f:` opens its results. `:` lists every scope,
-and clearing restores the home. Keep `home.txt`, the root-command `list.txt`
-and the complete scoped item cache on one gathered snapshot and one layout —
-a scope must never gather a source on each keystroke. `a:` excludes Session
-because `s:` owns the hundreds of old conversations.
+what is outstanding — Msg, Task, Run and the Agent launch entries — plus the
+exceptions a person should be told about: an MCP server that cannot account
+for itself, a Skill whose copies have drifted apart or whose tree is broken.
+Healthy inventory is not on that screen; a skill that is fine is reachable
+through `/name`, `a:` and ordinary search, a server that answers through
+`mcp:`, `a:` and ordinary search, and forty of them in front of three running
+agents is a list nobody reads. A row is dropped when it *accounts for itself*,
+which is narrower than "is healthy" in one direction and wider in the other.
+An MCP server goes when `health` is `ok` **or** `disabled` — disabled is
+somebody's decision and `doctor mcp` records it as a note and reports the
+server fine, so a permanent home row would be Prelude arguing with its own
+diagnostic — and stays for `failed`, `auth`, `unknown`, a word the vocabulary
+does not know, or no health field at all. A Skill goes on `single`,
+`identical`, `unknown` or `private-unknown` provided no copy has a broken or
+escaping link or an unreadable file; `unknown` means a copy has no fingerprint
+yet, which on a first launch is every skill on the machine, and the unreadable
+case is caught by its own count rather than through that word. A row with no
+`integrity` field at all has had nothing claimed about it and is shown. The
+home's order interleaves two kinds by state — Msg, failed Task, completed
+Task, waiting Run, waiting Task, working Run, working Task, queued Task, Agent
+entries, then the inventory exceptions — which is why it is its own ordering
+in `home_items` and not a change to `by_rank` or to any `Kind::priority`,
+whose band rule governs *search*. An ordinary query
+searches all of that plus Skill, MCP, Search commands and fixed Quicklinks —
+never the thousands of files, history entries, apps, clipboard rows and
+`$PATH` commands underneath. Exact `f` shows one Search Files command; `f:`
+opens its results. `:` lists every scope, and clearing restores the home. Keep
+`home.txt`, the root-command `list.txt` and the complete scoped item cache on
+one gathered snapshot and one layout — a scope must never gather a source on
+each keystroke, and `a:waiting`, `a:failed`, `a:claude Prelude`, `a:using X`
+and `a:without X` all filter that one snapshot with no Agent CLI behind them.
+`a:`'s values are quote-aware, like `s:`'s: a Skill name is an identifier but
+an MCP server's name is whatever its owner called it, and `claude.ai Google
+Drive` split on whitespace becomes a different question with an empty answer.
+`a:` excludes Session because `s:` owns the hundreds of old conversations.
+
+`/` has the two states a search provider has. An *incomplete* name browses —
+`/cnipa-oo` lists the Skill rows it matches — and a complete one is an
+invocation, so `/cnipa-ooa` is the single row that runs it and the Skill row
+is gone. Nothing here shows two rows for one intent, and MCP servers are not
+on `/` at all: they are not invoked by name, and `mcp:` is their scope.
 
 **A provider is a command until it has an argument.** Exact `g` and `google`
 show one Search Google row; Enter changes the query to `g ` without closing
@@ -300,6 +333,24 @@ Pinned rank is source rank and must be recorded in `data` just like recency.
 Forking uses each native CLI (`claude --fork-session`, `codex fork`, `pi
 --fork`) and is absent when no syntax is known; do not fake it with a fresh
 Session. The explicit raw export stays under Prelude's 0700 data directory.
+
+**A doctor reports; `--repair` re-verifies before it acts.** `doctor.rs`
+offers exactly two repairs, both on Prelude's own records, each confirmed
+separately with Cancel first. A report is printed, read, and then answered one
+question at a time, so minutes pass between seeing something and acting on it
+— and staging names are deterministic (`borrow/<server>.json`,
+`borrow/<skill>/`), so a borrow staged *while the confirmation is on screen*
+wears the name the question is about. Every `Repair` therefore carries the
+evidence its finding was made on — mtime and mode for a Trash, the run and
+session ids for an orphaned Task — and declines when that no longer matches.
+The Task side re-finds the fleet at the moment of applying rather than
+trusting the report, the same rule Session trash follows, and re-decides
+orphanhood with `task::orphans` rather than a second copy of the rule. A
+broken symlink under `borrow/` is reported without a repair: `paths::trash`
+gates on `exists()`, which follows the link, so the offer could only fail at
+the moment somebody said yes to it. And a staging root that will not open is
+not a staging root that is absent — reporting the second as the first is the
+diagnostic calling a place it could not look into empty.
 
 Trashing a Session follows a stricter boundary than ordinary file trash: it
 is offered only while inactive, canonicalizes the path, requires a `.jsonl`

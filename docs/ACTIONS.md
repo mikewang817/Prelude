@@ -115,6 +115,23 @@ authentication states are omitted.
 
 Rows without a tmux address omit pane-only actions.
 
+Quick Look for a Run is `running::effective_context` and nothing of its own:
+Agent, project, branch, Session, Task, state, start time, model, the
+capabilities this Run confirmed against what its Agent merely has installed,
+and then the last structured report — or, only where there is none, what the
+conversation last said.
+
+`effective_context` has exactly one caller, and it is this panel. `prelude
+fleet` renders its own columns and shows no branch, model or capabilities, and
+`control.rs` re-derives what it needs from the same underlying helpers —
+`branch_label`, `model_of`, `confirmed_capabilities`, `tasks_of` — rather than
+from the list. Those helpers are the shared part, and they are shared precisely
+because two surfaces deriving one fact separately is how they start disagreeing
+about it: `runs[].tasks` in `control --json` was its own closure over every
+task ever created, so a task marked done stayed on the Run there after this
+panel had dropped it. Anything a second surface needs from a Run belongs in a
+helper both call, not in a second reading of the row.
+
 ### Question from an agent
 
 - Answer “go ahead”
@@ -125,11 +142,61 @@ Rows without a tmux address omit pane-only actions.
 
 A custom answer remains Enter's default.
 
+### Task
+
+A Task is what a Run is *for*: the piece of work, which outlives the process
+doing it. It is an object rather than a command line, so Enter acts — it shows
+the record, which is the whole of what a Task is. The secondary hands over the
+id, because the id is what every other verb takes.
+
+- Hand it off to another running agent, keeping the id, the title and the history
+- Mark it done, with a result
+- Show its event history, without leaving the panel
+- Copy the task id
+- Dismiss it, once it is done or failed
+- Try it again, only once it has finished
+- Cancel it, last and red, after confirming
+
+Enter has a second reading — go to the agent doing it — taken when the row
+carries a `pane`, with `Go to its pane full-screen` on the same key. The Task
+store cannot supply that address: it records which Run took the work, because
+an agent said so, but a pane comes and goes while the record does not, so
+caching one would be caching a fact with a shorter life than the file holding
+it. `cache::attach_runs` joins it on at gather time instead, matching a Task's
+`run_id` against the live Run list. A task nobody is running has nothing to go
+to, and the whole of a task is its record, so opening it *is* showing that
+record.
+
+`Dismiss it` is offered on Done and Failed and on nothing else. Cancelling is
+itself the decision, taken from a panel that asked first, so a cancelled Task
+was never asking — `task::awaiting_review` excludes it, and the Quick Look
+`dismissed` line is absent for the same reason.
+
+Handing off addresses a *run*, not an agent name: `bus::handoff` refuses on
+anything but exactly one recipient, and two claudes in two projects are two
+different answers to "hand it to claude". Several candidates collapse into a
+submenu. The run already doing the task is not offered.
+
+Retry appears only on a finished Task and the three verbs that change a live
+one appear only on an open Task, because `task.rs` refuses the other way round
+in each case. Cancelling is red and confirms even though `retry` exists: retry
+opens a *new* task with a new id, so everything already pointing at this one —
+a message's `--task`, another Task's `--needs`, the event trail — stays
+pointed at a cancelled record.
+
+Over an agent's input box the panel is a different list. Nothing there changes
+the Task; what is wanted is the reference:
+
+- Insert its context — one line naming the id, state, agent, project and result
+- Show its record locally
+- Copy the task id
+
 ### Session
 
 - Enter resumes an idle Session; an active Session goes to its tmux pane, or inserts its project when no pane address exists, rather than starting a competing resume
 - Resume now, only when no active Run owns it
 - Fork it through the native Claude, Codex or pi CLI; offer nothing where the Agent has no known fork verb
+- Resume it with a Skill, or with an MCP server, that its Agent does not own — for one run only, and absent where that Agent has no one-run flag
 - Pin or unpin it
 - Rename it, or restore the Agent's native title
 - Archive it without touching the native conversation; archived Sessions appear under `s:is:archived`
@@ -137,6 +204,7 @@ A custom answer remains Enter's default.
 - Start fresh in the same project
 - Insert a `cd` command
 - Export the untouched JSONL into Prelude's private exports directory
+- Export a portable Markdown transcript beside it
 - Reveal the authoritative native file
 - Copy the session ID
 - Move an inactive native conversation to the Trash, after confirmation
@@ -145,6 +213,28 @@ Archive is Prelude metadata and is reversible. Trash is offered only for an
 inactive Session, re-finds the fleet at action time, accepts only canonical
 JSONL files below the known Claude, Codex and pi Session roots, and never
 unlinks the file.
+
+The two exports are not alternatives. The raw JSONL is authoritative and is
+what you hand back to the Agent that wrote it; the Markdown one is what you
+send to a person, redacted and free of tool-call plumbing. Both land in
+Prelude's own private exports directory.
+
+Resuming with a borrowed capability follows the same rule as forking: three of
+the eight Agent/capability pairings have no one-run syntax at all, and a
+command assembled for one of those would look right on the prompt and fail
+after the launcher had closed. Those Agents are offered nothing. Neither entry
+appears against a live Run, for the reason `Resume now` does not: it would
+start a competitor. The capability itself is chosen after the verb, in a
+picker of its own, so drawing the panel never costs a walk of every Skill
+directory.
+
+The picker lists only what the Session's Agent does not already own, because
+that is what borrowing is: a claude Session offered a one-run borrow of
+claude's own nine Skills is a nine-row question with no answer in it.
+`~/.agents/skills` is a location rather than an Agent — `missing_agents`
+reports a Skill that lives only there as missing from every Agent — so a shared
+Skill stays in the list. With nothing left to offer the action says so instead
+of opening an empty picker.
 
 ### Skill
 
@@ -155,12 +245,21 @@ unlinks the file.
 - Replace one divergent copy from another only after showing that Diff; the old target moves to the Trash
 - Read the instructions
 - Open `SKILL.md` in the editor
+- Open all copies, only where there is more than one
 - Delete a copy, recoverably
 
 Replacement re-hashes source and target and refuses if either changed after
 the comparison. A source with credential-like material is never copied.
 Agent choices use a submenu. A submenu with one possible target is collapsed
 into a direct action.
+
+A Skill merged across four Agents is four directories behind one row, and
+`dir` is only ever the first of them. `Open all copies` is that target made
+explicit, so it appears only where there is more than one — with a single copy
+`Open` already is it, and a panel whose fifth row repeats its fourth teaches
+you not to read it. Quick Look states the same thing as data: a modification
+time per copy, so a divergence says which way round to replace, and a warning
+line for any symlink that is broken or resolves outside the Skill.
 
 ### MCP server
 
