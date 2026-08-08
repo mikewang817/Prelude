@@ -110,6 +110,16 @@ fn main() -> ExitCode {
         // diffing behaviour without standing up a terminal.
         ["_dump"] => {
             let items = cache::gather();
+            println!("{}", render::render(&compute::home_items(&items), term_width()));
+            0
+        }
+        ["_dump-root"] => {
+            let items = cache::gather();
+            println!("{}", render::render(&compute::root_items(&items), term_width()));
+            0
+        }
+        ["_dump-all"] => {
+            let items = cache::gather();
             println!("{}", render::render(&items, term_width()));
             0
         }
@@ -179,7 +189,15 @@ fn main() -> ExitCode {
         // Decides, per keypress of Enter, whether to accept the selection or
         // answer it in place. Only fzf can make that conditional.
         ["_enter", line] => {
-            let ask = render::parse_line(line)
+            let item = render::parse_line(line);
+            if let Some(it) = item.as_ref().filter(|i| i.get("mode") == "complete-query") {
+                // Search commands are Prelude's one-input equivalent of
+                // Raycast's argument form. Stay open and put the provider or
+                // scope syntax in the box for the person to continue typing.
+                println!("change-query({})", it.get("completion"));
+                return ExitCode::SUCCESS;
+            }
+            let ask = item
                 .is_some_and(|i| i.get("mode") == "start" && !i.get("prompt").is_empty());
             let me = exec::shq(&std::env::current_exe().unwrap_or_default().to_string_lossy());
             if ask {
@@ -262,6 +280,9 @@ HUMANS
   prelude fleet --status one short line for a tmux status bar
   prelude watch          notify the moment an agent stops and waits for you
 
+  Inside search:  : lists scopes · a: agents · s: sessions · f: files
+                  c: clipboard · h: history · g TERM searches Google
+
 AGENTS  (run these from inside a conversation; see `prelude init agent`)
   prelude ask   TEXT     ask the human a question and wait for the answer
                          answer goes to stdout · exit 3 if nobody answered
@@ -301,7 +322,7 @@ fn bind(q: &str, path: &str, cols: &str, tw: &str) -> i32 {
     // The prefix hints belong to the empty query and nothing else: once there
     // is a query there are results to read, and a row of syntax above them is
     // in the way rather than helpful.
-    let header = if q.is_empty() { ui::HINTS } else { "" };
+    let header = if q.trim().is_empty() { ui::HINTS } else { "" };
     println!("{search}+change-header({header})+reload({me} _dynamic {} {} {} {})",
              exec::shq(q), exec::shq(path), exec::shq(cols), exec::shq(tw));
     0
@@ -313,22 +334,33 @@ fn bind(q: &str, path: &str, cols: &str, tw: &str) -> i32 {
 /// pipe, so a measurement would fall back to a default and the computed rows
 /// would drift ten columns out of step with the static ones.
 fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
-    let rows = compute::dynamic_rows(q);
+    let static_items: Vec<item::Item> = if compute::needs_static_items(q) {
+        std::fs::read_to_string(paths::cache().join("search-items.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let rows = compute::dynamic_rows_with(q, &static_items);
     if !rows.is_empty() {
         println!("{}", render::render_with(&rows, cols, None, tw));
     }
     // Once the query has clearly declared an intent — a sum, a translation,
-    // an agent to start — the 2000-odd unrelated rows underneath are noise.
-    // Show only what was asked for.
+    // a scope, an agent to start — the unrelated catalogue underneath is
+    // noise. Show only what was asked for.
     if compute::is_special(q) {
         return 0;
     }
-    if !path.is_empty() {
-        if let Ok(t) = std::fs::read_to_string(path) {
-            print!("{t}");
-            if !t.ends_with('\n') {
-                println!();
-            }
+    let list = if q.trim().is_empty() {
+        paths::cache().join("home.txt")
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    if let Ok(t) = std::fs::read_to_string(list) {
+        print!("{t}");
+        if !t.ends_with('\n') {
+            println!();
         }
     }
     0
@@ -432,6 +464,163 @@ mod tests {
     }
 
     #[test]
+    fn web_addresses_are_recognised_without_guessing_at_files() {
+        use crate::compute::web_url;
+        for (typed, want) in [
+            ("https://example.com/a?x=1#top", "https://example.com/a?x=1#top"),
+            ("HTTP://example.com", "http://example.com"),
+            ("example.com", "https://example.com"),
+            ("www.example.com/docs", "https://www.example.com/docs"),
+            ("localhost:3000", "http://localhost:3000"),
+            ("127.0.0.1:8080/api", "http://127.0.0.1:8080/api"),
+            ("demo.test:3000", "http://demo.test:3000"),
+            ("example.com:443", "https://example.com:443"),
+            ("https://hello.app", "https://hello.app"),
+            ("[::1]:3000", "http://[::1]:3000"),
+        ] {
+            assert_eq!(web_url(typed).as_deref(), Some(want), "{typed}");
+        }
+        assert!(!crate::compute::is_special("example.com"), "ordinary search results stay visible");
+        let row = crate::compute::dynamic_rows_with("example.com", &[]).into_iter().next().unwrap();
+        assert_eq!(row.kind, crate::item::Kind::Link);
+        assert_eq!(row.cmd, "https://example.com", "a URL is data, not an `open ...` shell command");
+
+        for typed in [
+            "Cargo.toml",
+            "main.rs",
+            "notes.md",
+            "1.2.3",
+            "999.1.1.1",
+            "https://user:secret@example.com",
+            "javascript:alert(1)",
+            "file:///tmp/x",
+            "example.com:0",
+            "example.com:99999",
+            "not a url.com",
+        ] {
+            assert_eq!(web_url(typed), None, "must not guess at {typed}");
+        }
+    }
+
+    #[test]
+    fn root_search_is_an_agent_home_until_the_user_types() {
+        use crate::compute::{home_items, root_items, scope_query, scoped_rows, Scope};
+        use crate::item::{Item, Kind};
+
+        let mut all = vec![
+            Item::new("claude", Kind::Agent).put("agent", "claude"),
+            Item::new("/review", Kind::Skill),
+            Item::new("gmail", Kind::Mcp),
+            Item::new("kill 42", Kind::Run),
+            Item::new("old", Kind::Session),
+            Item::new("cargo", Kind::Path),
+            Item::new("copied", Kind::Clip).put("full", "copied"),
+            Item::new("git status", Kind::History),
+        ];
+        all.extend(crate::compute::scope_commands());
+        let home = home_items(&all);
+        assert_eq!(home.len(), 4);
+        assert!(home.iter().all(|i| matches!(i.kind, Kind::Agent | Kind::Skill | Kind::Mcp | Kind::Run)));
+        let root = root_items(&all);
+        assert!(root.iter().any(|i| i.title == "Search Files"));
+        assert!(root.iter().all(|i| !matches!(i.kind, Kind::Session | Kind::Path | Kind::Clip | Kind::History)));
+        let f = crate::compute::dynamic_rows_with("f", &all);
+        assert_eq!(f.len(), 1, "an exact scope alias must not open global fuzzy search");
+        assert_eq!(f[0].get("completion"), "f:");
+
+        assert_eq!(scope_query("c:"), Some((Scope::Clipboard, "")));
+        assert_eq!(scope_query("H: git"), Some((Scope::History, "git")));
+        assert_eq!(scope_query("en:hello"), None, "translation is not a search scope");
+        assert!(crate::compute::is_special("f:"));
+        assert!(crate::compute::is_special(":"));
+        assert!(crate::compute::is_special("/"));
+        assert!(crate::compute::is_special("@"));
+
+        let skill_rows = crate::compute::dynamic_rows_with("/rev", &all);
+        assert_eq!(skill_rows.len(), 1);
+        assert_eq!(skill_rows[0].kind, Kind::Skill);
+        let ask_rows = crate::compute::dynamic_rows_with("@cla", &all);
+        assert_eq!(ask_rows.len(), 1);
+        assert_eq!(ask_rows[0].kind, Kind::Search);
+        assert_eq!(ask_rows[0].get("completion"), "@claude ");
+
+        let clips = scoped_rows(Scope::Clipboard, "cop", &all);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].kind, Kind::Clip);
+        assert!(scoped_rows(Scope::Clipboard, "missing", &all).is_empty());
+        let agents = scoped_rows(Scope::Agent, "", &all);
+        assert!(agents.iter().all(|i| i.kind != Kind::Session), "sessions have their own s: scope");
+    }
+
+    #[test]
+    fn search_providers_are_commands_before_they_have_an_argument() {
+        use crate::item::Kind;
+        let google = crate::compute::quicklink_items_from(crate::compute::QUICKLINKS_DEFAULT).into_iter()
+            .find(|i| i.get("provider") == "g").expect("Google provider");
+        assert_eq!(google.kind, Kind::Search);
+        assert_eq!(google.get("mode"), "complete-query");
+        assert_eq!(google.get("completion"), "g ");
+        assert!(google.title.contains("Google"));
+        assert_eq!(crate::compute::search_provider_from(crate::compute::QUICKLINKS_DEFAULT, "google")
+            .unwrap().get("completion"), "g ");
+        assert!(crate::compute::exact_quicklink_key_from(crate::compute::QUICKLINKS_DEFAULT, "g"),
+            "an exact alias must outrank ordinary fuzzy matches");
+        let (url, _, term, _) = crate::compute::quicklink_from(crate::compute::QUICKLINKS_DEFAULT, "g rust").unwrap();
+        assert_eq!(term, "rust");
+        assert_eq!(url, "https://www.google.com/search?q=rust");
+    }
+
+    #[test]
+    fn web_search_defaults_migrate_once_without_overwriting_a_provider() {
+        let original = "# mine\n[b]\nname = \"My Baidu\"\nurl = \"https://example.com/?q={q}\"\n";
+        let (migrated, changed) = crate::compute::add_web_search_defaults(original.to_string());
+        assert!(changed);
+        assert!(migrated.starts_with(original));
+        let links = crate::minitoml::parse(&migrated);
+        assert_eq!(links["b"]["name"], "My Baidu", "a user's provider always wins");
+        assert_eq!(links["bing"]["name"], "Bing");
+        assert_eq!(links["ddg"]["name"], "DuckDuckGo");
+
+        let (again, changed) = crate::compute::add_web_search_defaults(migrated.clone());
+        assert!(!changed);
+        assert_eq!(again, migrated, "the migration must not restore a provider the user later deletes");
+    }
+
+    #[test]
+    fn created_quicklinks_round_trip_without_rewriting_the_config() {
+        use crate::compute::{append_quicklink, fixed_quicklink_from, remove_quicklink_block, QuicklinkDraft};
+        use crate::item::Kind;
+
+        let original = "# keep this comment\n[g]\nname = \"Google\"\nurl = \"https://google.com?q={q}\"\n";
+        let draft = QuicklinkDraft {
+            name: "Design \"draft\"".into(),
+            kind: "file",
+            target: "~/Notes/A # draft.md".into(),
+        };
+        let made = append_quicklink(original.to_string(), "design", &draft).unwrap();
+        assert!(made.starts_with(original), "manual formatting and comments must survive");
+        assert!(append_quicklink(made.clone(), "design", &draft).is_err(), "never overwrite");
+
+        let parsed = crate::minitoml::parse(&made);
+        assert_eq!(parsed["design"]["name"], draft.name);
+        assert_eq!(parsed["design"]["target"], draft.target);
+        let item = fixed_quicklink_from(&made, "DESIGN").unwrap();
+        assert_eq!(item.kind, Kind::File);
+        assert_eq!(item.get("quicklink"), "design");
+        assert_eq!(item.get("quicklink_managed"), "true");
+
+        let removed = remove_quicklink_block(made, "design").unwrap();
+        assert_eq!(removed, original, "removing it must leave hand-written quicklinks byte-for-byte");
+
+        let secret = crate::item::Item::new("https://example.com", Kind::Link)
+            .title("download")
+            .put("url", "https://example.com/file?token=abc123");
+        assert!(crate::compute::quicklink_draft(&secret).is_err(), "credentials are never indexed");
+        let clip = crate::item::Item::new("some text", Kind::Clip);
+        assert!(crate::compute::quicklink_draft(&clip).unwrap().is_none(), "ephemeral rows are not stable targets");
+    }
+
+    #[test]
     fn timestamps_and_offsets() {
         let (v, _) = crate::calc::timecalc("1699999999").unwrap();
         assert!(v.starts_with("2023-11-"), "got {v}");
@@ -494,11 +683,17 @@ mod tests {
                 assert_eq!(on_enter(&it, h), Default_::Insert, "{k:?} in {h:?}");
             }
         }
-        // Objects act at a shell but hand over text to an agent.
-        for k in [File, App, Link] {
+        // Files, folders and apps act at a shell but hand over text to an agent.
+        for k in [File, Dir, App] {
             let it = Item::new("x", k);
             assert!(matches!(on_enter(&it, Host::Shell), Default_::Act(_)), "{k:?}");
             assert!(matches!(on_enter(&it, Host::Agent), Default_::InsertText(_)), "{k:?}");
+        }
+        // URLs are external objects in both hosts. ^K still offers their text.
+        let link = Item::new("https://example.com", Link).put("url", "https://example.com");
+        for h in [Host::Shell, Host::Agent] {
+            assert_eq!(on_enter(&link, h), Default_::Act(crate::defaults::Verb::OpenUrl));
+            assert_eq!(on_secondary(&link, h), Some(Default_::InsertText(crate::defaults::Text::Name)));
         }
         // The secondary sits directly under Enter's own entry in the ^K
         // panel, so it must differ from it rather than repeat it — two rows
@@ -630,11 +825,26 @@ mod tests {
         let file = Item::new("/tmp/readme.md", Kind::File).put("path", "/tmp/readme.md");
         assert_eq!(
             ids(&file),
-            ["secondary", "openwith", "open", "reveal-finder", "copyabs", "openalways", "trash"]
+            ["secondary", "openwith", "open", "reveal-finder", "copyabs", "openalways", "quicklink-create", "trash"]
         );
 
         let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
-        assert_eq!(ids(&app), ["reveal-finder", "copy", "insert", "trash"]);
+        assert_eq!(ids(&app), ["reveal-finder", "copy", "insert", "quicklink-create", "trash"]);
+
+        let link = Item::new("https://example.com", Kind::Link).put("url", "https://example.com");
+        assert_eq!(ids(&link), ["secondary", "copy", "quicklink-create"]);
+
+        let dir = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
+        assert_eq!(ids(&dir), ["secondary", "insert", "copy", "quicklink-create"]);
+
+        let linked = Item::new("/tmp/readme.md", Kind::File)
+            .put("path", "/tmp/readme.md")
+            .put("quicklink", "readme")
+            .put("quicklink_managed", "true");
+        let linked_ids = ids(&linked);
+        assert!(!linked_ids.contains(&"quicklink-create".to_string()));
+        assert!(linked_ids.iter().position(|id| id == "quicklink-remove").unwrap()
+            < linked_ids.iter().position(|id| id == "trash").unwrap());
 
         let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
         let clip_ids = ids(&clip);
@@ -721,12 +931,12 @@ mod tests {
     fn commands_are_handed_over_and_objects_just_happen() {
         use crate::defaults::{on_enter, Default_, Host, Verb};
         use crate::item::{Item, Kind::*};
-        // Anything that becomes a command line, including an agent.
-        for k in [Agent, History, Script, Snippet, Port, Proc, Dir, Clip] {
+        // Anything that denotes a command line, including an agent.
+        for k in [Agent, History, Script, Snippet, Port, Proc, Clip] {
             assert_eq!(on_enter(&Item::new("x", k), Host::Shell), Default_::Insert, "{k:?}");
         }
         // Objects, where there is no command worth reading.
-        for k in [File, Find, Config] {
+        for k in [File, Find, Config, Dir] {
             assert_eq!(on_enter(&Item::new("x", k), Host::Shell), Default_::Act(Verb::Open), "{k:?}");
         }
         // Mid-conversation there is no prompt to paste onto, so "start it"
@@ -737,19 +947,19 @@ mod tests {
         );
     }
 
-    /// Opening is always by application and never by executing the file, and
-    /// an application with a space in its name is one argument.
+    /// External objects are passed as arguments, never shell syntax. Spaces
+    /// in an application or path therefore remain inside one argument.
     #[test]
-    fn open_commands_are_well_formed() {
-        use crate::openwith::{ext_of, open_cmd};
-        assert_eq!(open_cmd("/tmp/x.json", None), "open /tmp/x.json");
-        assert_eq!(open_cmd("/tmp/a b.json", None), "open '/tmp/a b.json'");
+    fn external_open_arguments_are_well_formed() {
+        use crate::openwith::{ext_of, open_args};
+        assert_eq!(open_args("/tmp/x.json", None), ["/tmp/x.json"]);
+        assert_eq!(open_args("/tmp/a b.json", None), ["/tmp/a b.json"]);
         assert_eq!(
-            open_cmd("/tmp/x.json", Some("Visual Studio Code")),
-            "open -a 'Visual Studio Code' /tmp/x.json"
+            open_args("/tmp/x.json", Some("Visual Studio Code")),
+            ["-a", "Visual Studio Code", "/tmp/x.json"]
         );
-        // An empty remembered app must fall back, not produce `open -a ''`.
-        assert_eq!(open_cmd("/tmp/x.json", Some("  ")), "open /tmp/x.json");
+        // An empty remembered app must fall back, not produce `-a ''`.
+        assert_eq!(open_args("/tmp/x.json", Some("  ")), ["/tmp/x.json"]);
         assert_eq!(ext_of("/a/b/.claude.json"), "json");
         assert_eq!(ext_of("/a/b/Makefile"), "");
         assert_eq!(ext_of("/a/b/X.JSON"), "json", "extensions are matched case-insensitively");
@@ -1023,6 +1233,7 @@ mod tests {
             (Kind::Container, "stop"),
             (Kind::Skill, "rm:claude"),
             (Kind::Skill, "menu:rm"),
+            (Kind::File, "quicklink-remove"),
             (Kind::Port, "run"),
             (Kind::Proc, "run"),
         ] {

@@ -32,11 +32,21 @@ pub fn parse(text: &str) -> Table {
 }
 
 fn strip_comment(line: &str) -> &str {
-    let mut in_str = false;
+    let mut quote = None;
+    let mut escaped = false;
     for (i, c) in line.char_indices() {
-        match c {
-            '"' => in_str = !in_str,
-            '#' if !in_str => return &line[..i],
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote == Some('"') && c == '\\' {
+            escaped = true;
+            continue;
+        }
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), c) if q == c => quote = None,
+            (None, '#') => return &line[..i],
             _ => {}
         }
     }
@@ -47,10 +57,36 @@ fn unquote(v: &str) -> String {
     if let Some(inner) = v.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
         return inner
             .split(',')
-            .map(|p| p.trim().trim_matches('"').to_string())
+            .map(|p| unquote(p.trim()))
             .filter(|p| !p.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
     }
-    v.trim_matches('"').trim_matches('\'').to_string()
+    if let Some(inner) = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        }
+        return out;
+    }
+    v.strip_prefix('\'')
+        .and_then(|x| x.strip_suffix('\''))
+        .unwrap_or(v)
+        .to_string()
 }

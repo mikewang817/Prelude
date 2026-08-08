@@ -80,7 +80,9 @@ pub fn dirs() -> Vec<Item> {
         .filter(|d| *d != here && std::path::Path::new(d).is_dir())
         .map(|d| {
             let short = paths::tilde(&d);
-            Item::new(format!("cd {}", shq(&d)), Kind::Dir).sub(short)
+            Item::new(format!("cd {}", shq(&d)), Kind::Dir)
+                .sub(short)
+                .put("path", d)
         })
         .collect()
 }

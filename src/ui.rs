@@ -41,7 +41,7 @@ const PREVIEW_LIST_PCT: usize = 55;
 /// It shows only on an empty query and disappears the moment you type, so it
 /// costs a row exactly when there is nothing else to look at and never
 /// competes with results.
-pub const HINTS: &str = "s: conversations   r: running agents   f: files   @ ask an agent";
+pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
 
 /// One key beyond Enter, and it is a Ctrl key because those are the only
 /// ones a terminal reliably receives. macOS spends Option on composing
@@ -175,12 +175,23 @@ pub fn search(paste_target: Option<String>) -> i32 {
     // in a different column from the static ones.
     let tw = render::title_width(&items, cols);
     let widths = render::column_widths(&items, render::middle_budget(cols, tw));
-    let feed = render::render_with(&items, cols, Some(&widths), Some(tw));
+    let root = crate::compute::root_items(&items);
+    let root_feed = render::render_with(&root, cols, Some(&widths), Some(tw));
+    let home = crate::compute::home_items(&items);
+    let home_feed = render::render_with(&home, cols, Some(&widths), Some(tw));
 
-    // Park the static list on disk so the per-keystroke reload only has to
-    // cat it, rather than re-gathering every source.
+    // Root Search has two deliberately small surfaces: the agent home before
+    // typing, and agent/Quicklink/search commands afterwards. The full
+    // gathered catalogue is data for explicit scopes, not an eager fuzzy
+    // list. Keep it as JSON so a scope never runs a source on a keystroke.
     let static_path = crate::paths::cache().join("list.txt");
-    let _ = crate::cache::write_atomic(&static_path, feed.as_bytes());
+    let home_path = crate::paths::cache().join("home.txt");
+    let items_path = crate::paths::cache().join("search-items.json");
+    let _ = crate::cache::write_atomic(&static_path, root_feed.as_bytes());
+    let _ = crate::cache::write_atomic(&home_path, home_feed.as_bytes());
+    if let Ok(json) = serde_json::to_vec(&items) {
+        let _ = crate::cache::write_atomic(&items_path, &json);
+    }
     let me = std::env::current_exe().unwrap_or_default();
     let me = me.to_string_lossy().into_owned();
 
@@ -227,7 +238,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
     }
 
     loop {
-        let out = run_fzf(&feed, args.clone(), cols);
+        let out = run_fzf(&home_feed, args.clone(), cols);
         if out.failed {
             let msg = out.stderr.trim().lines().last().unwrap_or("").to_string();
             eprintln!("prelude: fzf could not start{}", if msg.is_empty() { String::new() } else { format!(": {msg}") });
@@ -246,6 +257,11 @@ pub fn search(paste_target: Option<String>) -> i32 {
                 return code;
             }
             "ctrl-x" => {
+                // The legacy force-run key must not turn a URL back into a
+                // shell command. Links always go straight to Launch Services.
+                if item.kind == Kind::Link {
+                    return apply_default(&item, &paste_target);
+                }
                 crate::frecency::bump(&item.cmd);
                 emit("RUN", &item.cmd, &paste_target);
                 return 0;
@@ -283,17 +299,21 @@ pub fn perform(item: &Item, what: crate::defaults::Default_, paste: &Option<Stri
 fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 {
     use crate::defaults::Verb::*;
     match verb {
-        // Opening a file, launching an app and following a link are all
-        // harmless and reversible, unlike running a shell command — which is
-        // what the insert-first rule actually exists to guard.
-        // `open` hands the file to the application that owns it, or to the
-        // one the user picked in ^K. It goes onto the prompt like any other
-        // command rather than being spawned from here, so the shell owns the
-        // process and you can see what ran.
+        // External objects go straight to macOS Launch Services. No `open`
+        // command touches the terminal buffer or shell history. Files honour
+        // Prelude's remembered application; folders always use Finder.
         Open => {
             let p = first_of(item, &["path", "file", "config"]);
             let p = if p.is_empty() { item.cmd.clone() } else { p };
-            emit("RUN", &crate::openwith::open_default(&p), paste);
+            let result = if item.kind == Kind::Dir {
+                crate::openwith::open_now(&p, None)
+            } else {
+                crate::openwith::open_default_now(&p)
+            };
+            if let Err(e) = result {
+                note(&e, paste);
+                return 2;
+            }
         }
         // Beside the conversation, not on top of it and not off in another
         // window: the reason to start a second agent while talking to the
@@ -346,7 +366,19 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             argv.push(&item.cmd);
             crate::exec::run(&argv, d);
         }
-        Launch | OpenUrl => emit("RUN", &item.cmd, paste),
+        Launch => {
+            if let Err(e) = crate::openwith::open_now(item.get("path"), None) {
+                note(&e, paste);
+                return 2;
+            }
+        }
+        OpenUrl => {
+            let url = if item.get("url").is_empty() { &item.cmd } else { item.get("url") };
+            if let Err(e) = crate::openwith::open_now(url, None) {
+                note(&e, paste);
+                return 2;
+            }
+        }
         CopyResult => {
             copy(&item.cmd);
             eprintln!("copied: {}", item.cmd);
@@ -530,9 +562,18 @@ pub fn copy(text: &str) {
 /// answer. A second binary for a one-line prompt would be a dependency, and
 /// this way the input box looks exactly like the one you just came from.
 pub fn prompt_line(label: &str) -> Option<String> {
-    let mut args = base_args("› ", label, Some(&format!("{DIM}Send  Enter   ·   Cancel  Esc{RESET}")));
+    prompt_line_initial(label, "")
+}
+
+/// The same one-line prompt, with an editable suggestion already present.
+pub fn prompt_line_initial(label: &str, initial: &str) -> Option<String> {
+    let accept = if initial.is_empty() { "Send" } else { "Continue" };
+    let mut args = base_args("› ", label, Some(&format!("{DIM}{accept}  Enter   ·   Cancel  Esc{RESET}")));
     args.push("--print-query".into());
     args.push("--no-info".into());
+    if !initial.is_empty() {
+        args.push(format!("--query={initial}"));
+    }
     let out = run_fzf("", args, 0);
     if out.failed {
         return None;

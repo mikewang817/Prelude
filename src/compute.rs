@@ -251,11 +251,131 @@ pub fn translate_query(q: &str) -> Option<(String, String)> {
     Some((lang.to_string(), text.to_string()))
 }
 
-// ─── quicklinks ──────────────────────────────────────────────────────────
+// ─── web addresses and quicklinks ────────────────────────────────────────
+
+/// Turn what looks unambiguously like a web address into one macOS can open.
+///
+/// No URL crate: this runs on every keystroke, and a new dependency would be
+/// paid on every Prelude startup. This is deliberately narrower than a full
+/// RFC parser — web pages only, no `file:`, `data:` or `javascript:` schemes,
+/// no credentials, and no guessing when a local filename is more plausible.
+pub fn web_url(query: &str) -> Option<String> {
+    let t = query.trim();
+    if t.is_empty()
+        || t.len() > 4096
+        || t.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return None;
+    }
+
+    let explicit = ["https://", "http://"]
+        .iter()
+        .find(|scheme| t.get(..scheme.len()).is_some_and(|p| p.eq_ignore_ascii_case(scheme)));
+    let (scheme, rest) = match explicit {
+        Some(scheme) => (*scheme, &t[scheme.len()..]),
+        None => ("", t),
+    };
+
+    if scheme.is_empty() {
+        if t.starts_with(['/', '~']) || t.starts_with("./") || t.starts_with("../") {
+            return None;
+        }
+        // `Cargo.toml` and `notes.md` are objects before they are speculative
+        // domains. The extension guard covers not-yet-created files too;
+        // an explicit scheme always wins when someone really owns `foo.app`.
+        if std::path::Path::new(t).exists() || looks_like_filename(t) {
+            return None;
+        }
+    }
+
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let (host, port) = split_host_port(authority)?;
+    let local = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || host.to_ascii_lowercase().ends_with(".local")
+        || host.to_ascii_lowercase().ends_with(".test");
+    if !valid_web_host(host) {
+        return None;
+    }
+
+    if !scheme.is_empty() {
+        return Some(format!("{scheme}{rest}"));
+    }
+    let scheme = if local || port.is_some_and(|p| p != 443) { "http://" } else { "https://" };
+    Some(format!("{scheme}{t}"))
+}
+
+fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+        let tail = &rest[end + 1..];
+        let port = if tail.is_empty() {
+            None
+        } else {
+            Some(tail.strip_prefix(':')?.parse::<u16>().ok().filter(|p| *p > 0)?)
+        };
+        return Some((host, port));
+    }
+    if authority.matches(':').count() > 1 {
+        return None;
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => Some((host, Some(port.parse::<u16>().ok().filter(|p| *p > 0)?))),
+        None => Some((authority, None)),
+    }
+}
+
+fn valid_web_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    if !host.is_ascii() || host.len() > 253 || !host.contains('.') {
+        return false;
+    }
+    let labels = host.trim_end_matches('.').split('.');
+    let mut last = "";
+    for label in labels {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return false;
+        }
+        last = label;
+    }
+    (last.len() >= 2 && last.bytes().all(|b| b.is_ascii_alphabetic()))
+        || (last.len() > 4 && last.to_ascii_lowercase().starts_with("xn--"))
+}
+
+fn looks_like_filename(t: &str) -> bool {
+    if t.contains(['/', '?', '#', ':']) || t.to_ascii_lowercase().starts_with("www.") {
+        return false;
+    }
+    let ext = t.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "app" | "c" | "cfg" | "conf" | "cpp" | "css" | "csv" | "doc" | "docx"
+            | "dmg" | "gif" | "go" | "gz" | "h" | "hpp" | "html" | "ini" | "java"
+            | "jpeg" | "jpg" | "js" | "json" | "jsx" | "kt" | "lock" | "log" | "md"
+            | "pdf" | "pkg" | "png" | "ppt" | "pptx" | "py" | "rb" | "rs" | "scss"
+            | "sh" | "svg" | "swift" | "tar" | "toml" | "ts" | "tsx" | "txt" | "webp"
+            | "xls" | "xlsx" | "xml" | "yaml" | "yml" | "zip" | "zsh"
+    )
+}
 
 pub const QUICKLINKS_DEFAULT: &str = r#"# Prelude quicklinks
-# Type the keyword followed by your search terms, e.g.  g rust async
+# Type the keyword followed by your search terms, e.g.  g rust async.
 # {q} is replaced with what you typed (URL-encoded).
+# Fixed file, folder, URL and application entries can be created from ^K.
+# prelude:defaults web-search-v2
 
 [g]
 name = "Google"
@@ -276,17 +396,566 @@ url  = "https://developer.mozilla.org/en-US/search?q={q}"
 [gs]
 name = "Google Scholar"
 url  = "https://scholar.google.com/scholar?q={q}"
+
+[b]
+name = "Baidu"
+url  = "https://www.baidu.com/s?wd={q}"
+
+[bing]
+name = "Bing"
+url  = "https://www.bing.com/search?q={q}"
+
+[ddg]
+name = "DuckDuckGo"
+url  = "https://duckduckgo.com/?q={q}"
 "#;
 
-pub fn quicklinks() -> crate::minitoml::Table {
-    let p = paths::config().join("quicklinks.toml");
-    if !p.exists() {
-        let _ = std::fs::create_dir_all(paths::config());
-        let _ = std::fs::write(&p, QUICKLINKS_DEFAULT);
+const WEB_SEARCH_V2_MARKER: &str = "# prelude:defaults web-search-v2";
+const WEB_SEARCH_V2: [(&str, &str, &str); 3] = [
+    ("b", "Baidu", "https://www.baidu.com/s?wd={q}"),
+    ("bing", "Bing", "https://www.bing.com/search?q={q}"),
+    ("ddg", "DuckDuckGo", "https://duckduckgo.com/?q={q}"),
+];
+
+pub fn quicklinks_file() -> std::path::PathBuf {
+    paths::config().join("quicklinks.toml")
+}
+
+pub(crate) fn add_web_search_defaults(mut text: String) -> (String, bool) {
+    if text.lines().any(|line| line == WEB_SEARCH_V2_MARKER) {
+        return (text, false);
     }
-    std::fs::read_to_string(&p)
-        .map(|t| crate::minitoml::parse(&t))
-        .unwrap_or_default()
+    let existing = crate::minitoml::parse(&text);
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(WEB_SEARCH_V2_MARKER);
+    text.push('\n');
+    for (key, name, url) in WEB_SEARCH_V2 {
+        if existing.contains_key(key) {
+            continue;
+        }
+        text.push_str(&format!(
+            "\n[{key}]\nname = {}\nurl = {}\n",
+            toml_string(name),
+            toml_string(url),
+        ));
+    }
+    (text, true)
+}
+
+fn quicklinks_text() -> String {
+    let p = quicklinks_file();
+    if !p.exists() {
+        let _ = crate::cache::write_atomic(&p, QUICKLINKS_DEFAULT.as_bytes());
+    }
+    let text = std::fs::read_to_string(&p).unwrap_or_default();
+    let (text, changed) = add_web_search_defaults(text);
+    if changed {
+        let _ = crate::cache::write_atomic(&p, text.as_bytes());
+    }
+    text
+}
+
+pub fn quicklinks() -> crate::minitoml::Table {
+    crate::minitoml::parse(&quicklinks_text())
+}
+
+#[derive(Clone, Debug)]
+pub struct QuicklinkDraft {
+    pub name: String,
+    pub kind: &'static str,
+    pub target: String,
+}
+
+pub fn quicklinkable(kind: Kind) -> bool {
+    matches!(kind, Kind::File | Kind::Find | Kind::Config | Kind::Dir | Kind::Link | Kind::App)
+}
+
+/// The stable identity behind a selected object. Local targets are resolved
+/// before storage so a quicklink works from every directory and `..` cannot
+/// make it silently point somewhere else later.
+pub fn quicklink_draft(it: &Item) -> Result<Option<QuicklinkDraft>, String> {
+    if !quicklinkable(it.kind) {
+        return Ok(None);
+    }
+    let (kind, raw) = match it.kind {
+        Kind::File | Kind::Find => ("file", it.get("path")),
+        Kind::Config => ("config", it.get("path")),
+        Kind::Dir => ("folder", it.get("path")),
+        Kind::Link => ("url", it.get("url")),
+        Kind::App => ("app", it.get("path")),
+        _ => unreachable!(),
+    };
+    if raw.is_empty() {
+        return Err("that row has no stable target".into());
+    }
+    let target = if kind == "url" {
+        if crate::secrets::looks_secret(raw) || url_has_secret(raw) {
+            return Err("that URL appears to contain a credential and will not be indexed".into());
+        }
+        web_url(raw).ok_or_else(|| "that is not a safe HTTP or HTTPS URL".to_string())?
+    } else {
+        let real = std::path::Path::new(raw)
+            .canonicalize()
+            .map_err(|_| "that target is not there any more".to_string())?;
+        crate::paths::tilde(&real.to_string_lossy())
+    };
+    let name = if matches!(it.kind, Kind::Dir) {
+        raw.trim_end_matches('/').rsplit('/').next().unwrap_or(&it.title).to_string()
+    } else {
+        crate::width::flatten(&it.title)
+    };
+    Ok(Some(QuicklinkDraft { name, kind, target }))
+}
+
+fn url_has_secret(url: &str) -> bool {
+    let Some(query) = url.split_once('?').map(|(_, q)| q.split('#').next().unwrap_or(q)) else {
+        return false;
+    };
+    query.split('&').filter_map(|part| part.split_once('=').map(|(k, _)| k))
+        .any(|key| matches!(
+            key.to_ascii_lowercase().as_str(),
+            "api_key" | "apikey" | "key" | "token" | "access_token" | "auth"
+                | "authorization" | "password" | "secret" | "signature" | "sig"
+                | "x-amz-signature" | "code"
+        ))
+}
+
+pub fn quicklink_suggestion(it: &Item) -> String {
+    let base = quicklink_draft(it).ok().flatten().map(|d| d.name).unwrap_or_else(|| it.title.clone());
+    let base = std::path::Path::new(&base)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or(base);
+    let mut out = String::new();
+    let mut dash = false;
+    for c in base.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            dash = false;
+        } else if !out.is_empty() && !dash {
+            out.push('-');
+            dash = true;
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn valid_quicklink_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 40
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+pub fn normalize_quicklink_key(raw: &str) -> Result<String, String> {
+    let key = raw.trim().to_ascii_lowercase();
+    if valid_quicklink_key(&key) {
+        Ok(key)
+    } else {
+        Err("use 1–40 letters, numbers, hyphens or underscores".into())
+    }
+}
+
+fn toml_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn quicklink_marker(key: &str, end: bool) -> String {
+    format!("# prelude:quicklink {key} {}", if end { "end" } else { "begin" })
+}
+
+pub(crate) fn append_quicklink(
+    mut text: String,
+    key: &str,
+    draft: &QuicklinkDraft,
+) -> Result<String, String> {
+    if !valid_quicklink_key(key) {
+        return Err("use 1–40 letters, numbers, hyphens or underscores".into());
+    }
+    if crate::minitoml::parse(&text).contains_key(key) {
+        return Err(format!("a quicklink called {key} already exists"));
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!(
+        "\n{}\n[{key}]\nname = {}\nkind = {}\ntarget = {}\n{}\n",
+        quicklink_marker(key, false),
+        toml_string(&draft.name),
+        toml_string(draft.kind),
+        toml_string(&draft.target),
+        quicklink_marker(key, true),
+    ));
+    Ok(text)
+}
+
+pub fn create_quicklink(key: &str, it: &Item) -> Result<QuicklinkDraft, String> {
+    let key = normalize_quicklink_key(key)?;
+    let draft = quicklink_draft(it)?.ok_or_else(|| "that kind cannot be a quicklink".to_string())?;
+    let text = append_quicklink(quicklinks_text(), &key, &draft)?;
+    crate::cache::write_atomic(&quicklinks_file(), text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(draft)
+}
+
+pub(crate) fn remove_quicklink_block(mut text: String, key: &str) -> Result<String, String> {
+    if !valid_quicklink_key(key) {
+        return Err("invalid quicklink name".into());
+    }
+    let begin = format!("{}\n", quicklink_marker(key, false));
+    let end = format!("\n{}", quicklink_marker(key, true));
+    let start = text.find(&begin).ok_or_else(|| "that quicklink is managed in the config file".to_string())?;
+    let tail = text[start + begin.len()..]
+        .find(&end)
+        .ok_or_else(|| "quicklink block is incomplete".to_string())?;
+    let mut finish = start + begin.len() + tail + end.len();
+    if text[finish..].starts_with('\n') {
+        finish += 1;
+    }
+    if start > 0 && text[..start].ends_with('\n') {
+        text.replace_range(start - 1..finish, "");
+    } else {
+        text.replace_range(start..finish, "");
+    }
+    Ok(text)
+}
+
+pub fn remove_quicklink(key: &str) -> Result<(), String> {
+    let key = normalize_quicklink_key(key)?;
+    let text = remove_quicklink_block(quicklinks_text(), &key)?;
+    crate::cache::write_atomic(&quicklinks_file(), text.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn expand_quicklink_target(target: &str) -> String {
+    target.strip_prefix("~/")
+        .map(|rest| paths::home().join(rest).to_string_lossy().into_owned())
+        .unwrap_or_else(|| target.to_string())
+}
+
+fn managed_quicklink(text: &str, key: &str) -> bool {
+    let begin = quicklink_marker(key, false);
+    let end = quicklink_marker(key, true);
+    text.lines().any(|line| line == begin) && text.lines().any(|line| line == end)
+}
+
+/// Resolve an exact fixed quicklink back into the kind of object it targets.
+pub(crate) fn fixed_quicklink_from(text: &str, q: &str) -> Option<Item> {
+    let key = q.trim().to_ascii_lowercase();
+    if !valid_quicklink_key(&key) {
+        return None;
+    }
+    let links = crate::minitoml::parse(text);
+    let body = links.get(&key)?;
+    let raw = body.get("target").or_else(|| body.get("url"))?;
+    if raw.contains("{q}") {
+        return None;
+    }
+    let kind = body.get("kind").map(String::as_str)
+        .unwrap_or_else(|| if body.contains_key("url") { "url" } else { "" });
+    let name = body.get("name").cloned().unwrap_or_else(|| key.clone());
+    let target = expand_quicklink_target(raw);
+    let managed = managed_quicklink(text, &key).to_string();
+    let item = match kind {
+        "url" => {
+            let url = web_url(&target)?;
+            Item::new(url.clone(), Kind::Link).title(name).put("url", url)
+        }
+        "file" => Item::new(target.clone(), Kind::File).title(name).put("path", target.clone()),
+        "config" => Item::new(target.clone(), Kind::Config).title(name).put("path", target.clone()),
+        "folder" | "dir" => Item::new(format!("cd {}", shq(&target)), Kind::Dir)
+            .title(name).put("path", target.clone()),
+        "app" => Item::new(format!("open {}", shq(&target)), Kind::App)
+            .title(name).put("path", target.clone()),
+        _ => return None,
+    };
+    let missing = kind != "url" && !std::path::Path::new(&target).exists();
+    Some(item
+        .fields([key.clone(), if missing { "⚠ target missing".to_string() } else { crate::paths::tilde(&target) }])
+        .put("quicklink", key)
+        .put("quicklink_managed", managed)
+        .put("quicklink_target", target))
+}
+
+/// Quicklinks with arguments are commands before they are links. Keeping
+/// them in the searchable catalogue makes `g` and `google` reveal what is
+/// available instead of looking like failed fuzzy searches.
+pub(crate) fn quicklink_items_from(text: &str) -> Vec<Item> {
+    let links = crate::minitoml::parse(text);
+    let mut out = Vec::with_capacity(links.len());
+    for (key, body) in links {
+        if !valid_quicklink_key(&key) {
+            continue;
+        }
+        let Some(target) = body.get("target").or_else(|| body.get("url")) else { continue };
+        if target.contains("{q}") {
+            let name = body.get("name").cloned().unwrap_or_else(|| key.clone());
+            let title = if name.to_ascii_lowercase().starts_with("search ") {
+                name
+            } else {
+                format!("Search {name}")
+            };
+            out.push(
+                Item::new(key.clone(), Kind::Search)
+                    .title(title)
+                    .fields([format!("{key} <query>"), "web search".to_string()])
+                    .put("mode", "complete-query")
+                    .put("completion", format!("{key} "))
+                    .put("provider", key)
+                    .put("desc", "type a search term"),
+            );
+        } else if let Some(item) = fixed_quicklink_from(text, &key) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+pub fn quicklink_items() -> Vec<Item> {
+    quicklink_items_from(&quicklinks_text())
+}
+
+pub(crate) fn exact_quicklink_key_from(text: &str, q: &str) -> bool {
+    let key = q.trim().to_ascii_lowercase();
+    if !valid_quicklink_key(&key) {
+        return false;
+    }
+    crate::minitoml::parse(text)
+        .get(&key)
+        .is_some_and(|body| body.contains_key("target") || body.contains_key("url"))
+}
+
+pub(crate) fn search_provider_from(text: &str, q: &str) -> Option<Item> {
+    let want = q.trim().to_ascii_lowercase();
+    quicklink_items_from(text).into_iter().find(|it| {
+        if it.kind != Kind::Search || it.get("provider").is_empty() {
+            return false;
+        }
+        let name = it.title.strip_prefix("Search ").unwrap_or(&it.title);
+        it.get("provider") == want || name.to_ascii_lowercase() == want
+    })
+}
+
+fn exact_quicklink_item(q: &str) -> Option<Item> {
+    let text = quicklinks_text();
+    search_provider_from(&text, q).or_else(|| {
+        exact_quicklink_key_from(&text, q).then(|| fixed_quicklink_from(&text, q)).flatten()
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Agent,
+    Running,
+    Sessions,
+    Files,
+    Clipboard,
+    History,
+    Applications,
+    Commands,
+    Directories,
+    Project,
+    Ssh,
+    Snippets,
+    Ports,
+    Processes,
+    Containers,
+    Mcp,
+    Config,
+}
+
+struct ScopeDef {
+    scope: Scope,
+    prefix: &'static str,
+    title: &'static str,
+    desc: &'static str,
+}
+
+const SCOPES: &[ScopeDef] = &[
+    ScopeDef { scope: Scope::Agent, prefix: "a:", title: "Agent Control Center", desc: "agents, skills, MCP and config" },
+    ScopeDef { scope: Scope::Running, prefix: "r:", title: "Running Agents", desc: "working and waiting now" },
+    ScopeDef { scope: Scope::Sessions, prefix: "s:", title: "Past Conversations", desc: "all agent sessions" },
+    ScopeDef { scope: Scope::Files, prefix: "f:", title: "Search Files", desc: "project and indexed roots" },
+    ScopeDef { scope: Scope::Clipboard, prefix: "c:", title: "Clipboard History", desc: "recent copied text" },
+    ScopeDef { scope: Scope::History, prefix: "h:", title: "Shell History", desc: "recent commands" },
+    ScopeDef { scope: Scope::Applications, prefix: "app:", title: "Applications", desc: "installed macOS apps" },
+    ScopeDef { scope: Scope::Commands, prefix: "cmd:", title: "Commands", desc: "$PATH and system commands" },
+    ScopeDef { scope: Scope::Directories, prefix: "dir:", title: "Folders", desc: "zoxide and recent cd targets" },
+    ScopeDef { scope: Scope::Project, prefix: "proj:", title: "Current Project", desc: "scripts, files and git" },
+    ScopeDef { scope: Scope::Ssh, prefix: "ssh:", title: "SSH Hosts", desc: "~/.ssh/config" },
+    ScopeDef { scope: Scope::Snippets, prefix: "snip:", title: "Snippets", desc: "saved command templates" },
+    ScopeDef { scope: Scope::Ports, prefix: "port:", title: "Listening Ports", desc: "local TCP listeners" },
+    ScopeDef { scope: Scope::Processes, prefix: "proc:", title: "Processes", desc: "CPU and memory consumers" },
+    ScopeDef { scope: Scope::Containers, prefix: "docker:", title: "Containers", desc: "running Docker containers" },
+    ScopeDef { scope: Scope::Mcp, prefix: "mcp:", title: "MCP Servers", desc: "all agent integrations" },
+    ScopeDef { scope: Scope::Config, prefix: "cfg:", title: "Agent Config", desc: "settings and instruction files" },
+];
+
+fn scope_item(d: &ScopeDef) -> Item {
+    Item::new(d.prefix, Kind::Search)
+        .title(d.title)
+        .fields([d.prefix.to_string(), d.desc.to_string()])
+        .put("mode", "complete-query")
+        .put("completion", d.prefix)
+        .put("desc", d.desc)
+}
+
+pub fn scope_commands() -> Vec<Item> {
+    SCOPES.iter().map(scope_item).collect()
+}
+
+fn exact_scope_command(q: &str) -> Option<Item> {
+    let want = q.trim().to_ascii_lowercase();
+    SCOPES.iter()
+        .find(|d| d.prefix.trim_end_matches(':') == want)
+        .map(scope_item)
+}
+
+pub fn scope_query(q: &str) -> Option<(Scope, &str)> {
+    let t = q.trim();
+    let (head, rest) = t.split_once(':')?;
+    let head = head.to_ascii_lowercase();
+    let def = SCOPES.iter().find(|d| d.prefix.trim_end_matches(':') == head)?;
+    Some((def.scope, rest.trim()))
+}
+
+pub fn needs_static_items(q: &str) -> bool {
+    let t = q.trim();
+    scope_query(t).is_some()
+        || t.starts_with('/')
+        || (t.starts_with('@') && !t.chars().any(char::is_whitespace))
+}
+
+fn skill_prefix_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
+    let rest = q.trim().strip_prefix('/')?;
+    let name = rest.split_whitespace().next().unwrap_or(rest);
+    if static_items.iter().any(|it| it.kind == Kind::Skill && it.title.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    let want = rest.to_lowercase();
+    Some(static_items.iter()
+        .filter(|it| it.kind == Kind::Skill && it.title.to_lowercase().contains(&want))
+        .take(100)
+        .cloned()
+        .collect())
+}
+
+fn agent_prompt_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
+    let rest = q.trim().strip_prefix('@')?;
+    if rest.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let want = rest.to_ascii_lowercase();
+    Some(static_items.iter()
+        .filter(|it| it.kind == Kind::Agent && it.title.to_ascii_lowercase().contains(&want))
+        .map(|it| {
+            let agent = it.get("agent");
+            Item::new(format!("@{agent}"), Kind::Search)
+                .title(format!("Ask {agent}"))
+                .fields([format!("@{agent} <question>"), "answer inside Prelude".to_string()])
+                .put("mode", "complete-query")
+                .put("completion", format!("@{agent} "))
+                .put("ask", agent)
+                .put("desc", "type a question")
+        })
+        .collect())
+}
+
+pub fn home_items(items: &[Item]) -> Vec<Item> {
+    items
+        .iter()
+        .filter(|it| matches!(it.kind, Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp))
+        .cloned()
+        .collect()
+}
+
+/// What an ordinary root query may fuzzy-match. Large and private sources
+/// are commands here, not thousands of eager rows: `f` finds Search Files,
+/// and `f:` opens that scope. Fixed Quicklinks remain root commands even when
+/// their target happens to be a file or application.
+pub fn root_items(items: &[Item]) -> Vec<Item> {
+    items
+        .iter()
+        .filter(|it| {
+            matches!(it.kind, Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search)
+                || !it.get("quicklink").is_empty()
+        })
+        .cloned()
+        .collect()
+}
+
+fn matches_terms(it: &Item, term: &str) -> bool {
+    let needles: Vec<String> = term.split_whitespace().map(str::to_lowercase).collect();
+    if needles.is_empty() {
+        return true;
+    }
+    let hay = format!("{} {} {} {}", it.title, it.subtitle, it.fields.join(" "), it.cmd).to_lowercase();
+    needles.iter().all(|n| hay.contains(n))
+}
+
+pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item> {
+    use Kind::*;
+    if scope == Scope::Running {
+        return crate::sources::running::live()
+            .into_iter().filter(|it| matches_terms(it, term)).take(100).collect();
+    }
+    if scope == Scope::Sessions {
+        return crate::sources::sessions::search(term);
+    }
+    if scope == Scope::Files {
+        let mut rows: Vec<Item> = static_items.iter()
+            .filter(|it| it.kind == File && matches_terms(it, term))
+            .cloned().collect();
+        match search_fileindex(term) {
+            Some(hits) => rows.extend(hits),
+            None if rows.is_empty() => rows.push(
+                Item::new("prelude index", Find)
+                    .title("⚠ file index not built")
+                    .sub("no index yet — run:  prelude index"),
+            ),
+            None => {}
+        }
+        let mut rows = crate::cache::finish(rows);
+        rows.truncate(100);
+        return rows;
+    }
+    let wanted = |kind| match scope {
+        Scope::Agent => matches!(kind, Msg | Agent | Run | Skill | Mcp | Config),
+        Scope::Clipboard => kind == Clip,
+        Scope::History => kind == History,
+        Scope::Applications => kind == App,
+        Scope::Commands => matches!(kind, Path | Sys),
+        Scope::Directories => kind == Dir,
+        Scope::Project => matches!(kind, Script | File | Git),
+        Scope::Ssh => kind == Ssh,
+        Scope::Snippets => kind == Snippet,
+        Scope::Ports => kind == Port,
+        Scope::Processes => kind == Proc,
+        Scope::Containers => kind == Container,
+        Scope::Mcp => kind == Mcp,
+        Scope::Config => kind == Config,
+        Scope::Running | Scope::Sessions | Scope::Files => false,
+    };
+    static_items.iter()
+        .filter(|it| wanted(it.kind) && matches_terms(it, term))
+        .take(200)
+        .cloned()
+        .collect()
 }
 
 fn percent_encode(s: &str) -> String {
@@ -301,18 +970,33 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// `g rust async` -> (url, name, term).
-pub fn quicklink(q: &str) -> Option<(String, String, String)> {
+/// `g rust async` -> (url, name, term, key).
+pub(crate) fn quicklink_from(text: &str, q: &str) -> Option<(String, String, String, String)> {
     let (key, term) = q.trim().split_once(char::is_whitespace)?;
     let term = term.trim();
     if term.is_empty() {
         return None;
     }
-    let links = quicklinks();
+    let links = crate::minitoml::parse(text);
     let body = links.get(&key.to_ascii_lowercase())?;
-    let url = body.get("url")?.replace("{q}", &percent_encode(term));
+    let template = body.get("target").or_else(|| body.get("url"))?;
+    if !template.contains("{q}") {
+        return None;
+    }
+    let url = template.replace("{q}", &percent_encode(term));
     let name = body.get("name").cloned().unwrap_or_else(|| key.to_string());
-    Some((url, name, term.to_string()))
+    Some((url, name, term.to_string(), key.to_ascii_lowercase()))
+}
+
+pub fn quicklink(q: &str) -> Option<(String, String, String, String)> {
+    quicklink_from(&quicklinks_text(), q)
+}
+
+fn is_quicklink_template(key: &str) -> bool {
+    quicklinks()
+        .get(&key.to_ascii_lowercase())
+        .and_then(|body| body.get("target").or_else(|| body.get("url")))
+        .is_some_and(|target| target.contains("{q}"))
 }
 
 // ─── whole-disk file search ──────────────────────────────────────────────
@@ -391,17 +1075,6 @@ pub fn search_fileindex(term: &str) -> Option<Vec<Item>> {
     Some(out)
 }
 
-/// `s:query` — search every past agent session, not just the recent ones.
-pub fn session_query(q: &str) -> Option<&str> {
-    let t = q.trim();
-    for p in ["s:", "S:"] {
-        if let Some(rest) = t.strip_prefix(p) {
-            return Some(rest.trim());
-        }
-    }
-    None
-}
-
 /// `@claude refactor this` — start an agent in the current directory with a
 /// prompt, turning the launcher into the agent's front door.
 pub fn agent_query(q: &str) -> Option<(String, String)> {
@@ -417,44 +1090,6 @@ pub fn agent_query(q: &str) -> Option<(String, String)> {
     let agent = installed.iter().find(|k| **k == want)
         .or_else(|| installed.iter().find(|k| k.starts_with(&want)))?;
     Some((agent.to_string(), prompt.to_string()))
-}
-
-/// `a:` — everything about your agents, grouped, in one place.
-pub fn agent_overview(term: &str) -> Vec<Item> {
-    let items = crate::cache::gather_agents();
-    let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
-    items
-        .into_iter()
-        .filter(|it| {
-            if needles.is_empty() || it.kind == Kind::Agent {
-                return true;
-            }
-            let hay = format!("{} {}", it.title, it.fields.join(" ")).to_lowercase();
-            needles.iter().all(|n| hay.contains(n.as_str()))
-        })
-        .collect()
-}
-
-/// `r:` — only what is running, so eighty of them are not eighty rows down
-/// a list of two thousand. `r:waiting` narrows to the ones holding you up.
-pub fn running_query(q: &str) -> Option<&str> {
-    let t = q.trim();
-    for p in ["r:", "R:"] {
-        if let Some(rest) = t.strip_prefix(p) {
-            return Some(rest.trim());
-        }
-    }
-    None
-}
-
-pub fn agent_query_prefix(q: &str) -> Option<&str> {
-    let t = q.trim();
-    for p in ["a:", "A:"] {
-        if let Some(rest) = t.strip_prefix(p) {
-            return Some(rest.trim());
-        }
-    }
-    None
 }
 
 /// `/skill-name args` — invoke a skill and answer in the panel.
@@ -475,24 +1110,23 @@ pub fn skill_query(q: &str) -> Option<(Item, String)> {
 
 /// Does this query produce a computed row rather than a search?
 ///
-/// Pattern-matching only — this runs on *every* keystroke, so it must not
-/// actually compute anything. Evaluating here would shell out to `units`
-/// (and once, to the network for exchange rates) on each character typed.
+/// Intent recognition only — this runs on *every* keystroke, so it must not
+/// evaluate a result. The one config lookup is a tiny local file needed for
+/// exact Quicklink aliases; calculations, subprocesses and network work stay
+/// in `dynamic_rows_with`.
 pub fn is_special(q: &str) -> bool {
     let t = q.trim();
     if t.is_empty() {
         return false;
     }
-    if t.len() > 2 && (t.starts_with("f:") || t.starts_with("F:")) {
+    if t == ":"
+        || exact_scope_command(t).is_some()
+        || scope_query(t).is_some()
+        || t.starts_with(['/', '@'])
+    {
         return true;
     }
-    if session_query(t).is_some() || agent_query(t).is_some() {
-        return true;
-    }
-    if agent_query_prefix(t).is_some() || running_query(t).is_some() {
-        return true;
-    }
-    if t.starts_with('/') && skill_query(t).is_some() {
+    if exact_quicklink_item(t).is_some() {
         return true;
     }
     if translate_query(t).is_some() {
@@ -505,16 +1139,40 @@ pub fn is_special(q: &str) -> bool {
         return true;
     }
     match t.split_once(char::is_whitespace) {
-        Some((k, rest)) if !rest.trim().is_empty() => {
-            quicklinks().contains_key(&k.to_ascii_lowercase())
-        }
+        Some((k, rest)) if !rest.trim().is_empty() => is_quicklink_template(k),
         _ => false,
     }
 }
 
 /// The rows a query computes, in the order they should appear.
-pub fn dynamic_rows(q: &str) -> Vec<Item> {
+pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
     let mut rows = Vec::new();
+    if q.trim() == ":" {
+        return scope_commands();
+    }
+    if let Some(item) = exact_scope_command(q) {
+        return vec![item];
+    }
+    if let Some((scope, term)) = scope_query(q) {
+        return scoped_rows(scope, term, static_items);
+    }
+    if let Some(rows) = skill_prefix_rows(q, static_items) {
+        return rows;
+    }
+    if let Some(rows) = agent_prompt_rows(q, static_items) {
+        return rows;
+    }
+    if let Some(item) = exact_quicklink_item(q) {
+        return vec![item];
+    }
+    if let Some(url) = web_url(q) {
+        rows.push(
+            Item::new(url.clone(), Kind::Link)
+                .title(q.trim())
+                .sub(&url)
+                .put("url", url),
+        );
+    }
     if let Some(v) = crate::calc::calc(q) {
         rows.push(Item::new(v.clone(), Kind::Calc).title(v).sub(q.trim()));
     }
@@ -524,26 +1182,15 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
     if let Some((v, note)) = crate::calc::timecalc(q) {
         rows.push(Item::new(v.clone(), Kind::Calc).title(v).sub(note));
     }
-    if let Some((url, name, term)) = quicklink(q) {
+    if let Some((url, name, term, key)) = quicklink(q) {
         rows.push(
-            Item::new(format!("open {}", shq(&url)), Kind::Link)
+            Item::new(url.clone(), Kind::Link)
                 .title(format!("{name}: {term}"))
                 .sub(format!("{name} · {term}"))
-                .put("url", url),
+                .put("url", url)
+                .put("quicklink", key)
+                .put("quicklink_managed", "false"),
         );
-    }
-    if let Some(rest) = q.trim().strip_prefix("f:").or_else(|| q.trim().strip_prefix("F:")) {
-        match search_fileindex(rest.trim()) {
-            Some(hits) => rows.extend(hits),
-            None => rows.push(
-                Item::new("prelude index", Kind::Find)
-                    .title("⚠ file index not built")
-                    .sub("no index yet — run:  prelude index"),
-            ),
-        }
-    }
-    if let Some(term) = agent_query_prefix(q) {
-        rows.extend(agent_overview(term));
     }
     if let Some((skill, args)) = skill_query(q) {
         // Pick an agent that actually has it; "shared" is a directory, not
@@ -563,16 +1210,6 @@ pub fn dynamic_rows(q: &str) -> Vec<Item> {
                 .put("prompt", prompt)
                 .put("mode", "start"),
         );
-    }
-    if let Some(term) = running_query(q) {
-        let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
-        rows.extend(crate::sources::running::live().into_iter().filter(|it| {
-            let hay = format!("{} {} {}", it.title, it.fields.join(" "), it.get("cwd")).to_lowercase();
-            needles.iter().all(|n| hay.contains(n.as_str()))
-        }));
-    }
-    if let Some(term) = session_query(q) {
-        rows.extend(crate::sources::sessions::search(term));
     }
     if let Some((agent, prompt)) = agent_query(q) {
         let cwd = paths::cwd().map(|p| p.to_string_lossy().into_owned());

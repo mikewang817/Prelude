@@ -56,6 +56,7 @@ pub fn run() -> i32 {
     println!("    {} units    {DIM}10kg to lb · 1gb to mb · 100 degF to degC{RESET}",
              if u { format!("{GREEN}✓{RESET}") } else { format!("{YELLOW}✗{RESET}") });
     println!("    {GREEN}✓{RESET} time     {DIM}now + 3 days · 1699999999{RESET}");
+    println!("    {GREEN}✓{RESET} web      {DIM}github.com · localhost:3000 · https://example.com{RESET}");
     let ql = crate::compute::quicklinks();
     println!("    {GREEN}✓{RESET} links    {DIM}{}{RESET}",
              ql.keys().filter(|k| !k.is_empty()).cloned().collect::<Vec<_>>().join(" "));

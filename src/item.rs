@@ -14,6 +14,8 @@ pub enum Kind {
     Run,
     Session,
     Config,
+    /// A search provider or scoped search waiting for its argument.
+    Search,
     Translate,
     Calc,
     Port,
@@ -66,6 +68,7 @@ impl Kind {
             Mcp => 985,
             Session => 980,
             Config => 975,
+            Search => 430,
             Translate => 420,
             Calc => 400,
             Port => 150,
@@ -99,6 +102,7 @@ impl Kind {
             Run => (GREEN, "running"),
             Session => (MAGENTA, "session"),
             Config => (YELLOW, "config"),
+            Search => (CYAN, "search"),
             Translate => (CYAN, "translate"),
             Calc => (YELLOW, "="),
             Port => (RED, "port"),
@@ -125,7 +129,7 @@ impl Kind {
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
-            Msg, Agent, Session, Config, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
+            Msg, Agent, Run, Session, Config, Search, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
             Clip, Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }

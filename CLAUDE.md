@@ -8,13 +8,15 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 23 tests
+cargo test                 # 42 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
-./target/release/prelude _dump     # non-interactive list, for diffing layout
+./target/release/prelude _dump     # empty-query agent home, for diffing layout
+./target/release/prelude _dump-root # searchable root commands
+./target/release/prelude _dump-all  # complete catalogue behind scopes
 ```
 
-`_dump`, `_footer`, `_preview`, `_bind`, `_dynamic`, `_copy`, `_runhere`,
+`_dump`, `_dump-root`, `_dump-all`, `_footer`, `_preview`, `_bind`, `_dynamic`, `_copy`, `_runhere`,
 `_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`, `_lend-mcp`,
 `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
@@ -62,9 +64,12 @@ which are the ones most often the *start* of a command (`--resume`, a model,
 a question). Safety is the second reason, not the first: `claude` is
 harmless and is still handed over. An object just happens, because nobody
 proofreads `open -a Zed foo.json`. Files therefore go to the application
-that owns them rather than to `$EDITOR`, so a `.png` lands in Preview;
-`openwith.rs` remembers overrides per extension and `^K` is where they are
-made — that panel is the settings surface, not a second list of shortcuts.
+that owns them rather than to `$EDITOR`, folders go to Finder, and URLs go
+to the default browser. These external objects are passed directly to macOS
+Launch Services — never emitted as `open ...` shell commands, never written
+to the prompt or history. `openwith.rs` remembers file overrides per
+extension and `^K` is where they are made — that panel is the settings
+surface, not a second list of shortcuts.
 
 In a conversation the rule cannot hold, because there is no prompt to paste
 onto: whatever is handed over lands in a *conversation*. A path and a
@@ -79,8 +84,9 @@ their own output. tmux is guaranteed on that path, because the popup is how
 **Commands insert, objects act.** Inserting a file path when you wanted to
 read the file is a step backwards; opening a file is harmless in a way that
 `kill $(lsof -ti tcp:3000)` is not. The default also depends on the host:
-the same file means "open it" at a shell and "here is the path" in an agent's
-input box.
+the same file or folder means "open it" at a shell and "here is the path" in
+an agent's input box. URLs are deliberately consistent across hosts: Enter
+opens the browser, while `^K` offers `Insert URL` for a conversation.
 
 **Sources degrade to nothing.** A source that fails, or finds nothing,
 returns an empty list. Never blocks, never panics, never prints. Anything
@@ -105,11 +111,22 @@ pins `e5 83 bf ba` decoding as 基.
 terminal, and `·` is the separator on every row. `doctor` measures it with a
 cursor-position report and caches the answer. Always use `width::dwidth`.
 
+**The home and root commands are not the catalogue.** An empty query renders
+only Msg, Agent, Run, Skill and MCP. An ordinary query searches those plus
+Search commands and fixed Quicklinks — never the thousands of files, history
+entries, apps, clipboard rows and `$PATH` commands underneath. Exact `f`
+shows one Search Files command; `f:` opens its results. `:` lists every scope,
+and clearing restores the home. Keep `home.txt`, the root-command `list.txt`
+and the complete scoped item cache on one gathered snapshot and one layout —
+a scope must never gather a source on each keystroke. `a:` excludes Session
+because `s:` owns the hundreds of old conversations.
+
 **fzf matches against displayed text.** A row computed *from* the query can
-never fuzzy-match it, so `is_special()` exists and must stay pure
-pattern-matching — it runs on every keystroke and must not evaluate anything.
-`{}` in a binding is the *transformed* text, so bindings use `{2}` to reach
-the payload.
+never fuzzy-match it, so `is_special()` recognizes intent and must not
+calculate, shell out or use the network — it runs on every keystroke. Exact
+Quicklink aliases are the one tiny config lookup, because aliases outrank
+fuzzy matches. `{}` in a binding is the *transformed* text, so bindings use
+`{2}` to reach the payload.
 
 **Layout must be computed once and passed down.** The per-keystroke helper
 runs in a separate process. If both sides measure their own widths they
@@ -237,11 +254,16 @@ Each agent has its own invocation syntax. `opencode` needs a subcommand
 where the others take a prompt positionally; `codex exec` refuses to run
 outside a git repository. See `AGENTS` in `sources/sessions.rs`.
 
-Copying and deleting a skill are the only places Prelude writes to a user's
-files. Both stay behind an explicit action, never a default, and never
-overwrite.
+Prelude writes its own config for explicit settings such as open-with rules
+and Quicklinks (and versioned, one-time additions to their built-in search
+providers). Quicklink writes are atomic and never overwrite a keyword;
+generated blocks are marked so removing one preserves hand-written
+`quicklinks.toml` comments and search templates byte-for-byte, and URLs that
+look credential-bearing are refused rather than indexed. Outside Prelude's
+config and caches, copying or deleting a skill are the only writes to user
+files, and neither is a default action.
 
-Deleting is the only *destructive* one, and is built so that being wrong is
+Deleting a target is built so that being wrong is
 survivable rather than so that it cannot happen. It moves the directory to
 `~/.Trash` — never `unlink`, never `remove_dir_all` — uniquifying the name
 rather than overwriting what is already in there. `ui::confirm` puts Cancel

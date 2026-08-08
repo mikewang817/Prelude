@@ -15,8 +15,8 @@
 //! "*"  = "Visual Studio Code"     # everything not named above
 //! ```
 
-use crate::exec::shq;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 const SECTION: &str = "apps";
 /// The key standing for "anything not named explicitly".
@@ -82,23 +82,56 @@ fn quoted_key(k: &str) -> String {
     }
 }
 
-/// The command that opens `path` — with `app` if given, otherwise with
-/// whatever macOS considers its owner.
-///
-/// `open` rather than the app's binary: it hands the file to a running
-/// instance instead of starting a second copy, and it is the same path the
-/// Finder takes, so a file type nobody has claimed still lands somewhere
-/// sensible instead of failing.
-pub fn open_cmd(path: &str, app: Option<&str>) -> String {
-    match app {
-        Some(a) if !a.trim().is_empty() => format!("open -a {} {}", shq(a.trim()), shq(path)),
-        _ => format!("open {}", shq(path)),
+/// Arguments passed to `/usr/bin/open`, kept as separate strings rather than
+/// shell syntax. Exposed so tests can pin spaces and application names without
+/// actually launching anything.
+pub fn open_args(target: &str, app: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(app) = app.map(str::trim).filter(|a| !a.is_empty()) {
+        args.push("-a".to_string());
+        args.push(app.to_string());
     }
+    args.push(target.to_string());
+    args
 }
 
-/// What Enter should run for this path, honouring any remembered choice.
-pub fn open_default(path: &str) -> String {
-    open_cmd(path, chosen_for(path).as_deref())
+/// Hand a URL, file, folder or application directly to macOS Launch Services.
+///
+/// Arguments go straight to `/usr/bin/open`, never through `sh -c`, so an
+/// object's default action does not touch the terminal buffer or shell
+/// history. `app` is used only for an explicit/remembered file association;
+/// folders and URLs pass `None` and keep the system owner.
+pub fn open_now(target: &str, app: Option<&str>) -> Result<(), String> {
+    if target.is_empty() {
+        return Err("nothing to open".into());
+    }
+    let status = Command::new("/usr/bin/open")
+        .args(open_args(target, app))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not ask macOS to open it: {e}"))?;
+    if status.success() { Ok(()) } else { Err("macOS could not open it".into()) }
+}
+
+pub fn open_default_now(path: &str) -> Result<(), String> {
+    open_now(path, chosen_for(path).as_deref())
+}
+
+pub fn reveal_now(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("nothing to reveal".into());
+    }
+    let status = Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not ask Finder to reveal it: {e}"))?;
+    if status.success() { Ok(()) } else { Err("Finder could not reveal it".into()) }
 }
 
 /// Show the installed applications and return the one picked.

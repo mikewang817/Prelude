@@ -3,19 +3,17 @@
 A Raycast-style launcher for your terminal — and the place your agents can
 reach you from.
 
-Press one key. A search box appears. Type a few letters. It searches
-everything you might want to run — this project's scripts, your shell
-history, listening ports, running processes, installed apps, your clipboard,
-your snippets — and **types the command onto your prompt.**
+Press one key. A search box appears with your agents, skills and MCP servers.
+Type a name to search that root, or open an explicit scope for project scripts,
+shell history, ports, processes, apps, clipboard and the other machine-wide
+sources. A selected command is **typed onto your prompt** for review.
 
 You press Enter to actually run it.
 
 ```
 ╭─ Prelude ────────────────────────────────────────────────────────────╮
-│ ⌕ dev                                                        4/2280  │
+│ ⌕ proj:dev                                                    1/5     │
 │ ▸ pnpm dev        · package.json · vite --host --port 3000    script │
-│   npm run dev                                                history │
-│   :3000 node      · node · pid 4821                             port │
 │ ──────────────────────────────────────────────────────────────────── │
 │  Insert into prompt  Enter   ·   Actions  Ctrl+K                     │
 ╰──────────────────────────────────────────────────────────────────────╯
@@ -51,7 +49,7 @@ on:
 │ ⌕                                                            1/2447  │
 │ ▸ claude · api-gateway asks · asked 4m ago · The migration drops… asking you │
 │   claude · docs        · waiting 12m · work:2.1 · fix the limiter    running │
-│   pnpm dev             · package.json · vite --host --port 3000       script │
+│   cnipa-ooa            · claude, shared · used 8× · 1d ago             skill │
 │ ──────────────────────────────────────────────────────────────────── │
 │  Answer it  Enter   ·   Actions  Ctrl+K                              │
 ╰──────────────────────────────────────────────────────────────────────╯
@@ -77,16 +75,17 @@ times a day, and safe for the launcher to offer killing whatever holds port
 3000 — but safety is the second reason, not the first. `claude` is harmless
 and still gets handed over.
 
-**An object just happens.** Files, apps, links, results: there is no command
-here anyone would read, let alone edit. `open -a Zed foo.json` is not
-something you want to proofread.
+**An object just happens.** Files, folders, apps, links and results are not
+command lines anyone wants to proofread. Prelude hands them directly to macOS
+Launch Services — no `open ...` command touches the prompt or shell history.
 
 | | `Enter` |
 |---|---|
 | **a question an agent asked** | **answers it, and unblocks the agent** |
 | a running agent | goes to its pane |
 | an agent, a skill, a session | onto your prompt, ready to edit |
-| a file or config | opens in an application |
+| a file or config | opens in its default application |
+| a folder | opens in Finder |
 | an app | launches it |
 | a link | opens in the browser |
 | a result | copies it |
@@ -110,10 +109,11 @@ blanket `"*"` still leaves `.png` going to Preview.
 ### In a conversation, there is no prompt to paste onto
 
 From the popup over an agent's input box, "onto your prompt" means something
-else entirely: whatever you hand over lands in a *conversation*. So a file
-gives its path and a command gives its text — both useful to say to an agent
-— but an agent row cannot. Typing `codex` into Claude's box sends Claude the
-word "codex".
+else entirely: whatever you hand over lands in a *conversation*. So a file or
+folder gives its path and a command gives its text — both useful to say to an
+agent — but an agent row cannot. Typing `codex` into Claude's box sends Claude
+the word "codex". A URL is the deliberate exception: Enter opens the browser;
+`Ctrl+K → Insert URL` hands it to the conversation.
 
 The only reading of "start it" that means anything there is **a second agent
 beside the first**, so that is what Enter does: it splits the pane you are
@@ -417,6 +417,8 @@ name their alternatives specifically instead:
 | a command | insert it | run it |
 | an agent | insert it | start it |
 | a file | open it | insert its path |
+| a folder | open it in Finder | insert its path |
+| a URL | open it in the browser | open it in the browser |
 | an app | launch it | insert its name |
 | a port | insert the kill | show what is using it |
 | a result | copy it | insert it |
@@ -441,6 +443,37 @@ advertised, and all of them are in `^K`.
 
 Open the launcher itself with `^R`.
 
+## Search starts as an agent home
+
+With an empty query Prelude shows only the things that belong to its main
+job: questions waiting for you, running agents, installed agents, skills and
+MCP servers. On the current test machine that is 25 useful rows instead of a
+2,400-row fzf catalogue dominated by `$PATH`.
+
+Start typing and Prelude searches the root commands — agents, skills, MCP,
+Quicklinks, web providers and the commands that open each larger source. It
+does not throw the 2,400 underlying rows back onto the screen. For example,
+`f` produces `Search Files · f:`; Enter completes the prefix, and only `f:`
+shows files. The same rule applies to the other sources:
+
+```text
+a: agents      r: running      s: sessions      f: files
+c: clipboard   h: history      app: apps         cmd: commands
+```
+
+Applications, history, files, clipboard entries and `$PATH` executables
+therefore require their explicit scope. This trades a little syntax for a
+stable, agent-first root instead of making every single letter match hundreds
+of unrelated machine objects.
+
+Type `:` to see every scope, including project items, folders, SSH hosts,
+snippets, ports, processes, containers, MCP and config. An exact prefix works
+without a term: `c:` opens clipboard history and `f:` opens file search.
+Clearing the query returns to the agent home.
+
+See [the search model](docs/SEARCH.md) for the complete scope table and the
+rules that keep computed rows from being filtered out by fzf.
+
 ## What it searches
 
 | Source | Where it comes from |
@@ -461,16 +494,55 @@ Open the launcher itself with `^R`.
 | **Git** | Branches read straight off `.git/refs` |
 | **`$PATH`** | Every executable, ranked lowest |
 
-Plus rows computed from what you type: arithmetic, unit and currency
-conversion, date arithmetic, on-device translation, and quicklinks. Once a
-query declares an intent this way, the rest of the list disappears — you
-asked for one thing, so you see one thing.
+Plus rows computed from what you type: web addresses, arithmetic, unit and
+currency conversion, date arithmetic, on-device translation, and quicklinks.
+A URL appears at the top and Enter hands it directly to macOS's default
+browser — no command is pasted, no shell runs, and nothing enters history.
+Explicit calculator, translation and prefix queries hide unrelated rows.
 
 ```
 10kg to lb        →  22.046226 lb        1847*0.23     →  424.81
 1gb to mb         →  1,024 mb            now + 3 days  →  2026-08-10 …
 100 usd to cny    →  676.04 CNY          1699999999    →  2023-11-15 …
 en:你好            →  Hello               g rust async  →  opens Google
+localhost:3000     →  opens the browser    github.com    →  opens the browser
+```
+
+### Quicklinks
+
+A quicklink gives a stable object a short keyword without turning it into a
+shell command. Select a file, folder, URL, config or application, then choose
+`Ctrl+K → Create Quicklink…` and edit the suggested keyword:
+
+```text
+README.md → preadme
+```
+
+From then on, typing `preadme` resolves back to a file row. Enter uses the
+same default as the original — its owning application for a file, Finder for
+a folder, the default browser for a URL. In an agent popup, file and folder
+quicklinks hand over their paths as usual.
+
+Created definitions are appended to `quicklinks.toml` without rewriting its
+comments or hand-written search templates. A generated definition can be
+edited or removed from its own action panel; removing it never touches the
+target. Keywords are unique and are never silently overwritten. URLs that
+look like they carry credentials are refused rather than indexed.
+
+Search templates are commands before they have an argument. Typing `g`
+shows `Search Google · g <query>`; Enter keeps Prelude open and prepares `g `
+for the search term. Providers are also searchable by name, so `google` and
+`baidu` find them without knowing their aliases. Once a term exists, the
+single result is the URL that Enter opens directly:
+
+```text
+g                    → Search Google · g <query>
+g rust async         → Google
+gs elliptic curve   → Google Scholar
+b Rust 异步         → Baidu
+bing rust async     → Bing
+ddg rust async      → DuckDuckGo
+gh prelude          → GitHub search
 ```
 
 ## The action panel
@@ -538,9 +610,10 @@ Open the launcher and this is what you see first, before typing anything:
   Gmail     mcp   · claude · ✔ connected
 ```
 
-`a:` shows exactly the same thing, filtered — the two share one code path so
-they cannot drift apart. Everything else is one keystroke away through
-search.
+`a:` opens the complete agent control centre: the same home rows plus agent
+configuration. Sessions stay behind `s:` instead of adding hundreds of old
+conversations to the agent overview. Other machine sources open through their
+scope commands rather than joining ordinary root search.
 
 **MCP servers report real status**, asked of each agent rather than read out
 of config files: `✔ connected`, `⏸ disabled`, `⚠ not logged in`. Reading the
@@ -565,7 +638,8 @@ AI-generated titles where available:
   InkQuest                              session · pi     · ~/App/InkQuest · 1d ago
 ```
 
-The most recent 15 appear in the main list; `s:` searches all of them.
+Sessions do not fill the empty-query home. `s:` shows the newest conversations
+and searches all of them.
 
 **Lend a skill or an MCP server to an agent that lacks it.** Prelude knows
 which agents have a skill, so it knows which do not — and every agent turns

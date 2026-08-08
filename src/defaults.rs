@@ -129,7 +129,7 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
 
         // Commands: unchanged in both hosts. Destructive ones especially.
         (History | Script | Path | Snippet | Ssh | Container | Git, _) => Insert,
-        (Port | Proc | Sys, _) => Insert,
+        (Port | Proc | Sys | Search, _) => Insert,
 
         // Objects: act at a shell, hand over the text to an agent.
         // Opening means "give it to an application", not "give it to $EDITOR"
@@ -142,8 +142,10 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         (App, Host::Shell) => Act(Verb::Launch),
         (App, Host::Agent) => InsertText(Text::Name),
 
-        (Link, Host::Shell) => Act(Verb::OpenUrl),
-        (Link, Host::Agent) => InsertText(Text::Name),
+        // A URL is an external object wherever Prelude was opened. Enter
+        // asks Launch Services to open it directly; handing the URL to an
+        // agent remains the secondary action in ^K.
+        (Link, _) => Act(Verb::OpenUrl),
 
         (Calc | Translate, Host::Shell) => Act(Verb::CopyResult),
         (Calc | Translate, Host::Agent) => InsertText(Text::Result),
@@ -189,8 +191,10 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         (Config, Host::Shell) => Act(Verb::Open),
         (Config, Host::Agent) => InsertText(Text::AbsolutePath),
 
-        // cd has to happen in *your* shell, so it stays an inserted command.
-        (Dir, Host::Shell) => Insert,
+        // A folder is an object like a file: Finder is the harmless default.
+        // `cd` remains the first explicit alternative in ^K. In a
+        // conversation the path is still what the agent needs.
+        (Dir, Host::Shell) => Act(Verb::Open),
         (Dir, Host::Agent) => InsertText(Text::AbsolutePath),
 
         (Clip, _) => Insert,
@@ -238,6 +242,7 @@ pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
         Clip => Act(Verb::CopyResult),
         Session => Act(Verb::CdThere),
         Dir => InsertText(Text::AbsolutePath),
+        Search => return None,
     };
     if host == Host::Agent {
         // A skill is the one row with two genuinely different texts to hand
@@ -255,6 +260,11 @@ pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
                 InsertText(Text::Name)
             });
         }
+        // Links are external objects in both hosts; the text is still a
+        // useful alternative when the intent was to hand it to the agent.
+        if item.kind == Link {
+            return Some(alt);
+        }
         // Otherwise the primary is already "hand over the text", so an
         // inserting secondary would be the same keystroke twice.
         if matches!(alt, InsertText(_) | Insert) {
@@ -267,6 +277,15 @@ pub fn on_secondary(item: &Item, host: Host) -> Option<Default_> {
 /// A human-readable name for the current default, shown as the first entry of
 /// the action panel so the behaviour is never a mystery.
 pub fn describe(item: &Item, host: Host) -> &'static str {
+    if item.kind == Kind::Search {
+        return if !item.get("ask").is_empty() {
+            "Add question"
+        } else if item.get("provider").is_empty() {
+            "Open this search"
+        } else {
+            "Add search term"
+        };
+    }
     name(item, on_enter(item, host))
 }
 
@@ -296,6 +315,9 @@ fn name(item: &Item, d: Default_) -> &'static str {
     }
     if d == Default_::InsertText(Text::Name) && item.kind == Kind::Link {
         return "Insert URL";
+    }
+    if d == Default_::Act(Verb::Open) && item.kind == Kind::Dir {
+        return "Open in Finder";
     }
     describe_action(d)
 }

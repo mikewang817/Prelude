@@ -116,6 +116,10 @@ pub fn gather() -> Vec<Item> {
         .collect();
 
     let mut items = Vec::with_capacity(2600);
+    // Search providers, fixed Quicklinks and scope commands belong in global
+    // search, but the empty-query home filters them back out.
+    items.extend(crate::compute::quicklink_items());
+    items.extend(crate::compute::scope_commands());
     for (name, _) in SLOW {
         // Sessions are numerous enough to swamp the list; only the newest
         // few go in, and `s:` searches the rest.
@@ -183,15 +187,17 @@ fn join_before(h: std::thread::JoinHandle<Vec<Item>>, budget: Duration) -> Optio
     if h.is_finished() { h.join().ok() } else { None }
 }
 
-/// Just the agent-owned rows, for the `a:` overview.
+/// The agent control centre as data. Sessions deliberately have their own
+/// `sessions` command and `s:` scope; including hundreds of them here made
+/// both the human overview and `prelude agents --json` session listings in
+/// disguise.
 pub fn gather_agents() -> Vec<Item> {
-    let mut items = crate::sources::agents::summary();
-    items.extend(read_cached("mcp"));
-    items.extend(crate::sources::agents::skills());
-    items.extend(crate::sources::agents::configs());
+    let mut items = crate::bus::items();
     items.extend(crate::sources::agents::summary());
+    items.extend(crate::sources::running::live());
+    items.extend(crate::sources::agents::skills());
     items.extend(read_cached("mcp"));
-    items.extend(read_cached("sessions"));
+    items.extend(crate::sources::agents::configs());
     finish(items)
 }
 

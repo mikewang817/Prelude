@@ -130,6 +130,10 @@ pub fn text(it: &Item) -> String {
         Kind::Clip => out.push(it.get("full").to_string()),
         Kind::App => kv(&mut out, "path", &tilde(it.get("path"))),
         Kind::Link => kv(&mut out, "url", it.get("url")),
+        Kind::Search => {
+            kv(&mut out, "type", it.get("completion"));
+            kv(&mut out, "about", it.get("desc"));
+        },
         Kind::Agent => {
             for (k, v) in [("skills", 0), ("mcp", 1), ("sessions", 2)] {
                 kv(&mut out, k, it.fields.get(v).map(String::as_str).unwrap_or(""));
@@ -179,7 +183,7 @@ pub fn text(it: &Item) -> String {
             }
         }
     }
-    if it.kind != Kind::Clip {
+    if !matches!(it.kind, Kind::Clip | Kind::Link | Kind::Search) {
         out.push(String::new());
         out.push(format!("{DIM}runs{RESET}"));
         out.push(it.cmd.clone());

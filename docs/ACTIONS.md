@@ -61,6 +61,10 @@ A label must describe the observed result:
 An explicit `Run now` action runs immediately. Irreversible operations confirm
 first, with Cancel selected by default.
 
+Files, folders, applications and URLs are not shell commands. Their defaults
+call macOS Launch Services directly with separate arguments; no `open ...`
+line is pasted, executed by the shell, or recorded in shell history.
+
 ### 3. Prefer intent over completeness
 
 There is no generic checklist appended to every kind. In particular, Prelude
@@ -84,7 +88,9 @@ an agent is text to hand into that conversation.
 Agent-host menus omit resume, lend and one-off shell commands that would
 otherwise be pasted into chat as prose. Explicitly local actions such as Open
 Settings, Open in Editor and Reveal in Finder execute in the popup process
-rather than being typed into the conversation.
+rather than being typed into the conversation. URLs are the deliberate
+exception to path handoff: Enter always opens the browser, while `Insert URL`
+is the conversation alternative.
 
 ## Current menus
 
@@ -163,6 +169,7 @@ Definitions containing credentials are never put on a command line.
 - Reveal in Finder
 - Copy the path
 - Change the default application for the extension
+- Create a Quicklink
 - Move to the Trash
 
 Config rows omit deletion. Files always go to the Trash rather than being
@@ -173,6 +180,7 @@ unlinked, and protected paths are refused after canonicalization.
 - Reveal in Finder
 - Copy the application path
 - Insert the `open` command
+- Create a Quicklink
 - Move the application to the Trash
 
 There is no `cd into the app`: entering an application bundle is not a normal
@@ -212,13 +220,29 @@ entry. Agent TUIs, SSH and interactive containers do not.
 
 These stay intentionally short:
 
-- Link: insert URL, copy URL, insert the `open` command.
-- Directory: insert the path or copy it; Enter inserts `cd`.
+- Link: Enter opens the default browser directly; the panel inserts or copies the URL.
+- Directory: Enter opens Finder; the panel inserts `cd`, inserts the path, or copies it.
+- Files, folders, links, configs and applications can create a Quicklink.
 - Calculator: insert or copy the result.
 - Translation: insert the translation or copy its source.
 - Clipboard: copy or insert the text, and translate it locally.
 
 A two-line action panel is an honest result, not a gap to fill.
+
+### Search commands and Quicklink management
+
+A search provider without an argument is a `Search` command rather than a
+half-formed link. Enter keeps the launcher open and fills its alias (`g `,
+`b `, and so on) into the query; its panel opens the provider configuration.
+Scope commands behave the same way with `f:`, `c:` and the other scopes, but
+need no action-panel entries.
+
+A stable object without a quicklink offers `Create Quicklink…`. A resolved
+quicklink instead offers `Edit Quicklink Definition`, and action-created
+entries offer `Remove Quicklink…` before any action that removes the target.
+Removing the name leaves the file, folder, application or URL untouched.
+Hand-written template definitions are edited in the config rather than
+rewritten by Prelude.
 
 ## Implementation
 

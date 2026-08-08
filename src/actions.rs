@@ -310,6 +310,10 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // its counterpart already are both of them. The panel listed them
         // again underneath: four rows, two actions.
         Kind::Calc => vec![],
+        Kind::Search if !it.get("provider").is_empty() => vec![
+            a("quicklink-edit", "Edit Search Providers", crate::compute::quicklinks_file().to_string_lossy()),
+        ],
+        Kind::Search => vec![],
         Kind::Ssh => vec![
             a("editssh", "Edit ~/.ssh/config", ""),
             a("copy", "Copy host", it.get("host")),
@@ -324,15 +328,21 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             a("insert", "Insert open command", &it.cmd),
             a("trash", "Move to Trash…", "uninstalls it, recoverably"),
         ],
+        Kind::Dir if host == crate::defaults::Host::Agent => vec![
+            a("openit", "Open locally in Finder", it.get("path")),
+            a("insert", "Insert cd command", &it.cmd),
+            a("copy", "Copy path", it.get("path")),
+        ],
+        Kind::Dir => vec![
+            a("insert", "Insert cd command", &it.cmd),
+            a("copy", "Copy path", it.get("path")),
+        ],
         Kind::Sys => vec![
             a("copy", "Copy the command", ""),
         ],
-        // No "Open in browser": that is Enter, stated above. The insert is
-        // the `open …` command, which the secondary's bare URL is not.
-        Kind::Link => vec![
-            a("copy", "Copy URL", it.get("url")),
-            a("insert", "Insert open command", &it.cmd),
-        ],
+        // Enter opens the browser directly through Launch Services. The two
+        // useful alternatives are text: hand it over, or copy it.
+        Kind::Link => vec![a("copy", "Copy URL", it.get("url"))],
         // History, scripts, $PATH, branches, folders. Enter inserts them and
         // the secondary runs them, which is the whole of what they are — so
         // this arm adds nothing and the generic tail below fills in `run`,
@@ -343,6 +353,23 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // third row repeats its first is teaching you not to read it.
         _ => vec![],
     };
+    // A quicklink names a stable object without changing what kind of object
+    // it is. Its configuration belongs before any action that removes the
+    // target itself.
+    if crate::compute::quicklinkable(it.kind) {
+        let mut qacts = Vec::new();
+        if it.get("quicklink").is_empty() {
+            qacts.push(a("quicklink-create", "Create Quicklink…", "give this object a keyword"));
+        } else {
+            qacts.push(a("quicklink-edit", "Edit Quicklink Definition", it.get("quicklink")));
+            if it.get("quicklink_managed") == "true" {
+                qacts.push(a("quicklink-remove", "Remove Quicklink…", "the target is untouched"));
+            }
+        }
+        let at = acts.iter().position(|(id, ..)| is_destructive(it.kind, id)).unwrap_or(acts.len());
+        acts.splice(at..at, qacts);
+    }
+
     // Enter is already stated in the main footer and again in this panel's
     // non-selectable header. Listing it as the first action made ^K start by
     // repeating the key the person had just declined. The secondary remains
@@ -432,7 +459,7 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
 /// is red but not confirmed, because `docker start` exists; killing a
 /// process is both, because nothing brings it back.
 pub fn is_destructive(kind: Kind, id: &str) -> bool {
-    matches!(id, "killrun" | "stop" | "trash" | "mcpremove")
+    matches!(id, "killrun" | "stop" | "trash" | "mcpremove" | "quicklink-remove")
         || id.starts_with("rm:")
         || id == "menu:rm"
         || (id == "run" && matches!(kind, Kind::Port | Kind::Proc))
@@ -625,6 +652,76 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "desc" => show_description(it),
         "editsnips" => ui::emit("INSERT", &format!("{editor} {}", shq(&crate::paths::config().join("snippets.toml").to_string_lossy())), paste),
         "editssh" => ui::emit("INSERT", &format!("{editor} ~/.ssh/config"), paste),
+        "quicklink-create" => {
+            let suggestion = crate::compute::quicklink_suggestion(it);
+            let Some(raw_key) = ui::prompt_line_initial(" quicklink keyword ", &suggestion) else {
+                return 130;
+            };
+            let key = match crate::compute::normalize_quicklink_key(&raw_key) {
+                Ok(key) => key,
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            };
+            if crate::compute::quicklinks().contains_key(&key) {
+                ui::note(&format!("a quicklink called {key} already exists"), paste);
+                return 2;
+            }
+            let draft = match crate::compute::quicklink_draft(it) {
+                Ok(Some(d)) => d,
+                Ok(None) => {
+                    ui::note("that kind cannot be a quicklink", paste);
+                    return 2;
+                }
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            };
+            if !ui::confirm(
+                &format!("create quicklink “{key}”?"),
+                "Create Quicklink",
+                &format!("{} · {}", draft.kind, draft.target),
+            ) {
+                return 130;
+            }
+            match crate::compute::create_quicklink(&key, it) {
+                Ok(_) => ui::note(&format!("created quicklink {key}"), paste),
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            }
+        }
+        "quicklink-edit" => {
+            // Reading once also creates the default file on a fresh install.
+            let _ = crate::compute::quicklinks();
+            run_or_emit(
+                &format!("{editor} {}", shq(&crate::compute::quicklinks_file().to_string_lossy())),
+                paste,
+            );
+        }
+        "quicklink-remove" => {
+            let key = it.get("quicklink");
+            if key.is_empty() {
+                return 2;
+            }
+            if !ui::confirm(
+                &format!("remove quicklink “{key}”?"),
+                "Remove Quicklink",
+                "the target is untouched",
+            ) {
+                return 130;
+            }
+            match crate::compute::remove_quicklink(key) {
+                Ok(()) => ui::note(&format!("removed quicklink {key}"), paste),
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            }
+        }
         "tr_en" | "tr_zh" => {
             let text = if it.get("full").is_empty() { it.cmd.clone() } else { it.get("full").to_string() };
             let lang = if id == "tr_en" { "en" } else { "zh-Hans" };
@@ -684,7 +781,12 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         }
         _ if id.starts_with("agentcfg:") => {
             match crate::sources::agents::config_for(&id[9..]) {
-                Some(p) => run_or_emit(&crate::openwith::open_default(&p), paste),
+                Some(p) => {
+                    if let Err(e) = crate::openwith::open_default_now(&p) {
+                        ui::note(&e, paste);
+                        return 2;
+                    }
+                }
                 None => ui::note("that agent has no settings file here", paste),
             }
         }
@@ -726,8 +828,18 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         }
         // The application half. `openit` is what Enter does, repeated here so
         // the panel states it; the other two are how you change it.
-        "openit" => run_or_emit(&crate::openwith::open_default(&target), paste),
-        "reveal-finder" => run_or_emit(&format!("open -R {}", shq(&target)), paste),
+        "openit" => {
+            if let Err(e) = crate::openwith::open_now(&target, None) {
+                ui::note(&e, paste);
+                return 2;
+            }
+        }
+        "reveal-finder" => {
+            if let Err(e) = crate::openwith::reveal_now(&target) {
+                ui::note(&e, paste);
+                return 2;
+            }
+        }
         "openwith" | "openalways" => {
             let Some(app) = crate::openwith::pick_app(short_name(&target)) else { return 130 };
             if id == "openalways" {
@@ -739,7 +851,10 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 let scope = if ext.is_empty() { "files like that".into() } else { format!(".{ext} files") };
                 ui::note(&format!("{scope} now open in {app}"), paste);
             }
-            run_or_emit(&crate::openwith::open_cmd(&target, Some(&app)), paste);
+            if let Err(e) = crate::openwith::open_now(&target, Some(&app)) {
+                ui::note(&e, paste);
+                return 2;
+            }
         }
         // Borrow: build the one command that starts `agent` with someone
         // else's capability attached, and hand it over unrun. Nothing is
