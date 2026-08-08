@@ -106,10 +106,11 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let mut acts = match it.kind {
         Kind::Session => {
-            let mut v = vec![
-                a("run", "Resume now", it.get("agent")),
-                a("details", "Show conversation details", it.get("opening")),
-            ];
+            let mut v = Vec::new();
+            if it.get("active_run").is_empty() {
+                v.push(a("run", "Resume now", it.get("agent")));
+            }
+            v.push(a("details", "Show conversation details", it.get("opening")));
             if !it.get("cwd").is_empty() {
                 v.push(a("newsession", "Start fresh in this project", it.get("agent")));
                 v.push(a("cdsession", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
@@ -432,8 +433,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     let runnable = matches!(
         it.kind,
         Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Ssh
-            | Kind::Container | Kind::Git | Kind::Sys | Kind::Agent | Kind::Session
-    );
+            | Kind::Container | Kind::Git | Kind::Sys | Kind::Agent
+    ) || (it.kind == Kind::Session && it.get("active_run").is_empty());
     if runnable && !runs_it && !acts.iter().any(|(id, ..)| *id == "run") {
         acts.push(a("run", "Run now", ""));
     }

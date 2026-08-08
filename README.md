@@ -255,6 +255,7 @@ a plain shell command it runs from its own conversation:
 | `prelude say WHO TEXT` | send a line to another running agent |
 | `prelude inbox [--json]` | what other agents left for you |
 | `prelude fleet --json` | who else is running, and which are stuck |
+| `prelude control --json` | Agent, Run, Session, Skill and MCP relationships |
 
 ### `prelude ask` — the one that changes what an agent can be
 
@@ -629,6 +630,27 @@ configuration. Sessions stay behind `s:` instead of adding hundreds of old
 conversations to the agent overview. Other machine sources open through their
 scope commands rather than joining ordinary root search.
 
+Under those rows Prelude now keeps one relationship graph rather than five
+unrelated lists. Runs have stable ids, Sessions have agent-qualified ids, and
+each side names the other when the evidence is sound. An explicit native
+resume id is exact; the newest Session in a directory is inferred only when
+there is exactly one run of that Agent there. Two Claude processes in the same
+project remain visibly ambiguous instead of both claiming the same Session.
+`Ctrl+P` shows how a match was made. Selecting an active Session goes to its
+tmux pane when one exists; without a pane it inserts the active project
+instead. Neither path starts a competing resume.
+
+The same graph is scriptable without launcher rows:
+
+```sh
+prelude control
+prelude control --json
+```
+
+It contains installed Agent executables, Run ids and state, active Session
+edges, Skill ownership, MCP health and config paths. Process prompts and full
+command lines are deliberately absent because they may contain credentials.
+
 **MCP servers report real status**, asked of each agent rather than read out
 of config files: `✔ connected`, `⏸ disabled`, `⚠ not logged in`. Reading the
 config missed every claude.ai-hosted server and could not tell you whether
@@ -835,6 +857,7 @@ run for themselves.
 | `prelude answer ID TEXT` | the return path |
 | `prelude answer-of ID` | collect a `--no-wait` answer |
 | `prelude fleet --json` | who else is running |
+| `prelude control [--json]` | Agent/Run/Session/Skill/MCP relationship graph |
 | `prelude agents [--json]` | the agent overview, as data |
 | `prelude sessions [--json]` | every past conversation, as data |
 | `prelude skills [--json]` | every skill and who has it, as data |

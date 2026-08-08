@@ -168,6 +168,18 @@ pub fn text(it: &Item) -> String {
             kv(&mut out, "at", it.get("addr"));
             kv(&mut out, "state", it.get("state"));
             kv(&mut out, "pid", it.get("pid"));
+            kv(&mut out, "run", it.get("run_id"));
+            let started = it.get("started").parse::<f64>().unwrap_or(0.0);
+            kv(&mut out, "started", &crate::sources::user::ago(started));
+            kv(&mut out, "session", it.get("session_native_id"));
+            let matched = match it.get("session_match") {
+                "explicit" => "explicit resume id",
+                "cwd-latest" => "only run in this project",
+                "ambiguous" => "ambiguous: several runs share this project",
+                "requested-missing" => "requested id not present in the session cache",
+                _ => "",
+            };
+            kv(&mut out, "matched", matched);
             // What it last said, from its conversation file — which exists
             // whether or not it is in a terminal Prelude can see into. The
             // pane's screen is better when there is one, since it shows the
@@ -246,6 +258,17 @@ pub fn text(it: &Item) -> String {
             for (k, v) in [("skills", 0), ("mcp", 1), ("sessions", 2)] {
                 kv(&mut out, k, it.fields.get(v).map(String::as_str).unwrap_or(""));
             }
+            let runs = it.get("run_count").parse::<usize>().unwrap_or(0);
+            let waiting = it.get("waiting_count").parse::<usize>().unwrap_or(0);
+            if runs > 0 {
+                kv(
+                    &mut out,
+                    "running",
+                    &format!("{runs}{}", if waiting > 0 { format!(" · {waiting} waiting") } else { String::new() }),
+                );
+                let projects: Vec<String> = serde_json::from_str(it.get("projects")).unwrap_or_default();
+                kv(&mut out, "projects", &projects.join(", "));
+            }
             out.push(String::new());
             out.push(format!("{DIM}start it{RESET}"));
             out.push(it.get("agent").to_string());
@@ -254,6 +277,11 @@ pub fn text(it: &Item) -> String {
             kv(&mut out, "agent", it.get("agent"));
             kv(&mut out, "id", it.get("id"));
             kv(&mut out, "where", &tilde(it.get("cwd")));
+            if !it.get("active_run").is_empty() {
+                kv(&mut out, "active", it.get("active_state"));
+                kv(&mut out, "run", it.get("active_run"));
+                kv(&mut out, "at", it.get("active_addr"));
+            }
             if !it.get("opening").is_empty() {
                 out.push(String::new());
                 out.push(format!("{DIM}opened with{RESET}"));

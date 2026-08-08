@@ -461,7 +461,7 @@ pub fn configs() -> Vec<Item> {
 /// again: this is a tally of the three sources above it, and computing them
 /// a second time to count them made a summary cost more than the thing it
 /// summarises.
-pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item]) -> Vec<Item> {
+pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) -> Vec<Item> {
     use std::collections::BTreeMap;
     let mut per: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut tally = |it: &Item| {
@@ -482,6 +482,14 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item]) -> Vec<Item> {
         .into_iter()
         .map(|name| {
             let (sk, mc, se) = per.get(name).copied().unwrap_or_default();
+            let own_runs: Vec<&Item> = runs.iter().filter(|run| run.get("agent") == name).collect();
+            let waiting = own_runs.iter().filter(|run| run.get("state") == "waiting").count();
+            let projects: Vec<&str> = own_runs
+                .iter()
+                .map(|run| run.get("project"))
+                .filter(|project| !project.is_empty())
+                .collect();
+            let run_ids: Vec<&str> = own_runs.iter().map(|run| run.get("run_id")).collect();
             Item::new(name, Kind::Agent)
                 .title(name)
                 .fields([
@@ -490,6 +498,11 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item]) -> Vec<Item> {
                     format!("{se} sessions"),
                 ])
                 .put("agent", name)
+                .put("agent_id", name)
+                .put("run_count", own_runs.len().to_string())
+                .put("waiting_count", waiting.to_string())
+                .put("projects", serde_json::to_string(&projects).unwrap_or_default())
+                .put("run_ids", serde_json::to_string(&run_ids).unwrap_or_default())
         })
         .collect()
 }

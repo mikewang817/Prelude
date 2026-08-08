@@ -310,6 +310,7 @@ pub fn all() -> Vec<Item> {
                 .title(crate::width::flatten(&r.title))
                 .fields([r.agent.to_string(), where_, crate::sources::user::ago(ts)])
                 .put("agent", r.agent)
+                .put("session_id", format!("{}:{}", r.agent, r.id))
                 .put("id", r.id)
                 .put("cwd", r.cwd)
                 .put("ts", format!("{ts:.0}"))
@@ -337,7 +338,15 @@ pub fn latest_for(agent: &str) -> Option<Item> {
 
 /// `s:query` — search every session, not just the recent ones.
 pub fn search(term: &str) -> Vec<Item> {
-    let all = crate::cache::read_cached("sessions");
+    // `gather` joins the graph once and writes this derived snapshot. This
+    // function runs on every keypress, so it must filter that snapshot rather
+    // than repeat even syscall-only relationship work hundreds of times.
+    let mut all = crate::cache::read_cached("sessions-linked");
+    if all.is_empty() {
+        let raw = crate::cache::read_cached("sessions");
+        let runs = super::running::linked_identities(&raw);
+        all = super::running::annotate_sessions(raw, &runs);
+    }
     let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
     all.into_iter()
         .filter(|i| {

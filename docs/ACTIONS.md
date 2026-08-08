@@ -127,7 +127,8 @@ A custom answer remains Enter's default.
 
 ### Session
 
-- Resume now
+- Enter resumes an idle Session; an active Session goes to its tmux pane, or inserts its project when no pane address exists, rather than starting a competing resume
+- Resume now, only when no active Run owns it
 - Show conversation details
 - Start fresh in the same project
 - Insert a `cd` command

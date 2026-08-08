@@ -10,6 +10,7 @@ mod cache;
 mod calc;
 mod clipd;
 mod compute;
+mod control;
 mod defaults;
 mod doctor;
 mod exec;
@@ -55,6 +56,8 @@ fn main() -> ExitCode {
         ["fleet", "--json"] => fleet::list(true),
         ["fleet", "--status"] => fleet::status(),
         ["watch"] => fleet::watch(),
+        ["control"] => control::list(false),
+        ["control", "--json"] => control::list(true),
 
         // The agent-facing verbs. These are what an agent runs from its own
         // shell, so each one is a plain word with the text last: an agent
@@ -83,7 +86,12 @@ fn main() -> ExitCode {
 
         ["agents", rest @ ..] => json_dump(cache::gather_agents(), rest.contains(&"--json")),
         ["sessions", rest @ ..] => {
-            json_dump(sources::sessions::all(), rest.contains(&"--json"))
+            let sessions = sources::sessions::all();
+            let runs = sources::running::live_with_sessions(&sessions);
+            json_dump(
+                sources::running::annotate_sessions(sessions, &runs),
+                rest.contains(&"--json"),
+            )
         }
         ["skills", rest @ ..] => {
             json_dump(sources::agents::skills(), rest.contains(&"--json"))
@@ -279,6 +287,7 @@ HUMANS
   prelude fleet          every agent running on this machine, and its state
   prelude fleet --status one short line for a tmux status bar
   prelude watch          notify the moment an agent stops and waits for you
+  prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
 
   Inside search:  : lists scopes · a: agents · s: sessions · f: files
                   c: clipboard · h: history · g TERM searches Google
@@ -1589,6 +1598,89 @@ mod tests {
         assert_eq!(crate::width::dwidth("宽字符测试"), 10);
         let t = crate::width::dtrunc("宽字符截断测试", 6);
         assert!(crate::width::dwidth(&t) <= 6, "got {t}");
+    }
+
+    #[test]
+    fn runs_link_to_sessions_only_when_the_evidence_is_unambiguous() {
+        use crate::item::{Item, Kind};
+        use crate::sources::running::{annotate_sessions, attach_sessions};
+
+        let session = Item::new("claude --resume abc", Kind::Session)
+            .title("the conversation")
+            .put("agent", "claude")
+            .put("id", "abc")
+            .put("session_id", "claude:abc")
+            .put("cwd", "/tmp/project")
+            .put("file", "/tmp/abc.jsonl")
+            .put("ts", "100");
+        let explicit = Item::new("kill 10", Kind::Run)
+            .put("agent", "claude")
+            .put("run_id", "claude:10:1")
+            .put("pid", "10")
+            .put("cwd", "/tmp/project")
+            .put("requested_session", "abc")
+            .put("state", "working")
+            .put("addr", "work:1.1")
+            .put("pane", "%1");
+        let mut runs = vec![explicit];
+        attach_sessions(&mut runs, std::slice::from_ref(&session));
+        assert_eq!(runs[0].get("session_id"), "claude:abc");
+        assert_eq!(runs[0].get("session_match"), "explicit");
+
+        let sessions = annotate_sessions(vec![session.clone()], &runs);
+        assert_eq!(sessions[0].get("active_run"), "claude:10:1");
+        assert_eq!(sessions[0].get("pane"), "%1");
+        assert_eq!(
+            crate::defaults::on_enter(&sessions[0], crate::defaults::Host::Shell),
+            crate::defaults::Default_::Act(crate::defaults::Verb::JumpTo),
+        );
+        let mut active_without_pane = sessions[0].clone();
+        active_without_pane.data.remove("pane");
+        assert_eq!(
+            crate::defaults::on_enter(&active_without_pane, crate::defaults::Host::Shell),
+            crate::defaults::Default_::Act(crate::defaults::Verb::CdThere),
+        );
+
+        let mut ambiguous = vec![
+            Item::new("kill 11", Kind::Run).put("agent", "claude").put("cwd", "/tmp/project"),
+            Item::new("kill 12", Kind::Run).put("agent", "claude").put("cwd", "/tmp/project"),
+        ];
+        attach_sessions(&mut ambiguous, &[session]);
+        assert!(ambiguous.iter().all(|run| run.get("session_id").is_empty()));
+        assert!(ambiguous.iter().all(|run| run.get("session_match") == "ambiguous"));
+    }
+
+    #[test]
+    fn native_agent_arguments_produce_stable_relationship_hints() {
+        use crate::sources::running::{elapsed_seconds, requested_session};
+        assert_eq!(elapsed_seconds("02:03"), Some(123));
+        assert_eq!(elapsed_seconds("1-02:03:04"), Some(93_784));
+        assert_eq!(requested_session("claude", &["--resume", "abc"]), Some("abc".into()));
+        assert_eq!(requested_session("codex", &["resume", "def"]), Some("def".into()));
+        assert_eq!(requested_session("pi", &["--session=ghi"]), Some("ghi".into()));
+        assert_eq!(requested_session("claude", &["-p", "a prompt"]), None);
+    }
+
+    #[test]
+    fn control_snapshot_exposes_edges_instead_of_flat_rows() {
+        use crate::item::{Item, Kind};
+        let run = Item::new("claude prompt-that-must-not-enter-the-graph", Kind::Run)
+            .put("agent", "claude")
+            .put("run_id", "claude:7:1")
+            .put("pid", "7")
+            .put("session_id", "claude:s1");
+        let session = Item::new("claude --resume s1", Kind::Session)
+            .put("agent", "claude")
+            .put("id", "s1")
+            .put("session_id", "claude:s1")
+            .put("active_run", "claude:7:1");
+        let graph = crate::control::Snapshot::from_items(&[run], &[session], &[], &[], &[]);
+        let claude = graph.agents.iter().find(|agent| agent.id == "claude").unwrap();
+        assert_eq!(claude.runs, ["claude:7:1"]);
+        assert_eq!(claude.sessions, ["claude:s1"]);
+        assert_eq!(graph.runs[0].session.as_deref(), Some("claude:s1"));
+        assert_eq!(graph.sessions[0].active_run.as_deref(), Some("claude:7:1"));
+        assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
     }
 
     #[test]

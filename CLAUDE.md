@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 44 tests
+cargo test                 # 47 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -270,14 +270,28 @@ tmux) and is cached. Deciding what each run is *doing* is a `stat` and a
 every gather. A cached state is a state that was true a minute ago, which for
 this view is worse than none.
 
-Three traps, each already paid for. A pane reports the pid of its *root*
+A Run and a Session are related facts, not the same record. `control.rs`
+builds the canonical Agent/Run/Session/Skill/MCP graph; launcher Items are
+views over it. Run ids are `agent:pid:started`, Session ids are
+`agent:native-id`, and both sides carry the edge. An explicit resume argument
+is exact. Cwd-latest is allowed only when one run of that agent exists in the
+directory; with two, mark it `ambiguous` rather than attaching both to the
+same conversation. Never retain the full process command or prompt while
+extracting the hint — either can hold credentials. An active Session jumps to
+its pane, or hands over its project when no pane exists, instead of starting a
+competing resume. `gather` writes the derived `sessions-linked` snapshot only
+when its bytes change; `s:` filters that file. Never repeat the join or call
+tmux in the per-keystroke helper.
+
+Four traps, each already paid for. A pane reports the pid of its *root*
 process, so an agent started by typing `claude` at that pane's shell is a
 child; matching pids alone finds none of them and lists every one twice.
 `finish` dedupes on `(kind, cmd)`, so a run's `cmd` must differ per run or
 two agents in the same project collapse into one row — precisely the case
-this source exists for. And batch runs (`claude -p`, `codex exec`) keep no
+this source exists for. Batch runs (`claude -p`, `codex exec`) keep no
 conversation file, so silence says nothing about them; they are never
-reported as stuck.
+reported as stuck. Finally, `etime` has day, hour and minute forms; parse all
+of them before deriving a stable start time.
 
 ## The bus
 

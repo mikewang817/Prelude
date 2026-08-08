@@ -122,6 +122,16 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
     if item.kind == Session && item.get("mode") == "start" {
         return Act(Verb::RunHere);
     }
+    // Resuming a conversation that is already attached to a live pane starts
+    // a competing copy. The relationship graph makes the honest default
+    // possible: go to the process that owns it instead.
+    if item.kind == Session && !item.get("active_run").is_empty() {
+        return if item.get("pane").is_empty() {
+            Act(Verb::CdThere)
+        } else {
+            Act(Verb::JumpTo)
+        };
+    }
     match (item.kind, host) {
         // A question someone is blocked on. There is exactly one thing to do
         // with it, and it is the same wherever you are standing.
@@ -309,6 +319,14 @@ fn name(item: &Item, d: Default_) -> &'static str {
     }
     if d == Default_::Act(Verb::RunInShell) && item.kind == Kind::Agent {
         return "Start now";
+    }
+    if d == Default_::Act(Verb::JumpTo) && item.kind == Kind::Session {
+        return "Go to active agent";
+    }
+    if d == Default_::Act(Verb::CdThere) && item.kind == Kind::Session
+        && !item.get("active_run").is_empty()
+    {
+        return "Go to active project";
     }
     if d == Default_::Act(Verb::CopyResult) && item.kind == Kind::Clip {
         return match item.get("clip_kind") {

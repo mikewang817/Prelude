@@ -50,6 +50,17 @@ pub fn write_cached(name: &str, items: &[Item]) {
     }
 }
 
+/// A derived cache often has identical bytes from one launch to the next.
+/// Avoid an atomic rewrite in that common case while still paying only one
+/// linear serialization over data the caller already holds.
+pub fn write_cached_if_changed(name: &str, items: &[Item]) {
+    let Ok(json) = serde_json::to_vec(items) else { return };
+    if std::fs::read(cache_file(name)).is_ok_and(|old| old == json) {
+        return;
+    }
+    let _ = write_atomic(&cache_file(name), &json);
+}
+
 const REFRESH_TTL: u64 = 5;
 
 pub fn stale(name: &str) -> bool {
@@ -138,6 +149,9 @@ pub fn gather() -> Vec<Item> {
     // local half of a gather, spent parsing the same two files over.
     let sessions = read_cached("sessions");
     let mcp = read_cached("mcp");
+    let runs = crate::sources::running::live_with_sessions(&sessions);
+    let sessions = crate::sources::running::annotate_sessions(sessions, &runs);
+    write_cached_if_changed("sessions-linked", &sessions);
     for (name, _) in SLOW {
         if stale(name) {
             spawn_self(&["_refresh", name]);
@@ -174,11 +188,11 @@ pub fn gather() -> Vec<Item> {
     // here and now, out of syscalls. A fleet view that is a minute stale is
     // worse than none — it tells you an agent is stuck that has since moved
     // on, and vice versa.
-    items.extend(crate::sources::running::live());
+    items.extend(runs.iter().cloned());
     items.extend(crate::sources::machine::apps());
     items.extend(crate::sources::machine::system());
     items.extend(crate::sources::agents::configs());
-    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions));
+    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions, &runs));
 
     // Collected by index rather than in arrival order: `finish` keeps the
     // first of any duplicate pair, so which source got there first must not
@@ -208,10 +222,13 @@ pub fn gather() -> Vec<Item> {
 pub fn gather_agents() -> Vec<Item> {
     let sessions = read_cached("sessions");
     let mcp = read_cached("mcp");
+    let runs = crate::sources::running::live_with_sessions(&sessions);
+    let sessions = crate::sources::running::annotate_sessions(sessions, &runs);
+    write_cached_if_changed("sessions-linked", &sessions);
     let skills = crate::sources::agents::skills_with(&sessions);
     let mut items = crate::bus::items();
-    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions));
-    items.extend(crate::sources::running::live());
+    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions, &runs));
+    items.extend(runs);
     items.extend(skills);
     items.extend(mcp);
     items.extend(crate::sources::agents::configs());

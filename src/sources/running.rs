@@ -210,6 +210,49 @@ fn alive(pid: &str) -> bool {
     }
 }
 
+pub(crate) fn elapsed_seconds(s: &str) -> Option<u64> {
+    let (days, clock) = match s.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, s),
+    };
+    let parts: Vec<u64> = clock.split(':').map(str::parse).collect::<Result<_, _>>().ok()?;
+    let seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes * 60 + seconds,
+        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
+        _ => return None,
+    };
+    Some(days * 86_400 + seconds)
+}
+
+/// A native session id explicitly named on this process's command line.
+/// Prompts are deliberately not retained: they can contain credentials and
+/// are irrelevant once the relation has been extracted.
+pub(crate) fn requested_session(agent: &str, args: &[&str]) -> Option<String> {
+    let value_after = |flags: &[&str]| {
+        args.windows(2)
+            .find(|w| flags.contains(&w[0]) && !w[1].starts_with('-'))
+            .map(|w| w[1].to_string())
+            .or_else(|| {
+                args.iter().find_map(|arg| {
+                    flags.iter().find_map(|flag| {
+                        arg.strip_prefix(&format!("{flag}=")).filter(|v| !v.is_empty()).map(str::to_string)
+                    })
+                })
+            })
+    };
+    match agent {
+        "claude" => value_after(&["--resume", "-r"]),
+        "pi" | "opencode" => value_after(&["--session"]),
+        "codex" => args
+            .iter()
+            .position(|a| *a == "resume")
+            .and_then(|i| args.get(i + 1))
+            .filter(|id| !id.starts_with('-'))
+            .map(|id| (*id).to_string()),
+        _ => None,
+    }
+}
+
 fn mtime_of(path: &str) -> Option<u64> {
     if path.is_empty() {
         return None;
@@ -242,10 +285,21 @@ fn panes() -> Vec<(String, String, String, u64)> {
         .collect()
 }
 
+struct Found {
+    pid: String,
+    ppid: String,
+    agent: &'static str,
+    etime: String,
+    started: u64,
+    batch: bool,
+    requested: Option<String>,
+}
+
 /// Find the fleet. Expensive, and therefore cached.
 ///
 /// Records identity only — which agent, which pid, which directory, which
-/// pane if any, which conversation file. Nothing here says what a run is
+/// pane if any, and an explicit resume id when the process supplied one.
+/// Nothing here says what a run is
 /// *doing*: that is decided live, because a state read out of a cache is a
 /// state that was true some minutes ago.
 pub fn fleet() -> Vec<Item> {
@@ -253,7 +307,7 @@ pub fn fleet() -> Vec<Item> {
         &["ps", "-Ao", "pid=,ppid=,etime=,command="],
         Duration::from_secs(5),
     );
-    let mut found: Vec<(String, String, &'static str, String, bool)> = Vec::new();
+    let mut found: Vec<Found> = Vec::new();
     for line in ps.lines() {
         let mut it = line.split_whitespace();
         let (Some(pid), Some(ppid), Some(etime)) = (it.next(), it.next(), it.next()) else {
@@ -270,7 +324,17 @@ pub fn fleet() -> Vec<Item> {
         // to jump to and an exit code to care about, so they are marked
         // rather than mixed in.
         let batch = rest.iter().any(|w| *w == "-p" || *w == "--print" || *w == "exec");
-        found.push((pid.into(), ppid.into(), agent, etime.into(), batch));
+        let started = now().saturating_sub(elapsed_seconds(etime).unwrap_or(0));
+        let requested = requested_session(agent, &rest[1..]);
+        found.push(Found {
+            pid: pid.into(),
+            ppid: ppid.into(),
+            agent,
+            etime: etime.into(),
+            started,
+            batch,
+            requested,
+        });
     }
     if found.is_empty() {
         return Vec::new();
@@ -281,29 +345,21 @@ pub fn fleet() -> Vec<Item> {
     // a pane by its own pid or its parent's; matching pids alone finds none
     // of the agents anybody actually starts.
     let panes = panes();
-    let sessions = crate::cache::read_cached("sessions");
 
     found
         .into_iter()
-        .map(|(pid, ppid, agent, etime, batch)| {
+        .map(|found| {
+            let Found { pid, ppid, agent, etime, started, batch, requested } = found;
             let cwd = cwds.get(&pid).cloned().unwrap_or_default();
             let pane = panes
                 .iter()
                 .find(|(_, root, ..)| *root == pid || *root == ppid);
-            // The conversation this run is most likely writing: same agent,
-            // same directory, most recently touched. Two agents in one
-            // directory cannot be told apart this way, and are not.
-            let session = sessions
-                .iter()
-                .filter(|s| !cwd.is_empty() && s.get("agent") == agent && s.get("cwd") == cwd)
-                .max_by(|a, b| {
-                    let x = a.get("ts").parse::<f64>().unwrap_or(0.0);
-                    let y = b.get("ts").parse::<f64>().unwrap_or(0.0);
-                    x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
-                });
+            let run_id = format!("{agent}:{pid}:{started}");
             let mut it = Item::new(format!("kill {pid}"), Kind::Run)
                 .title(agent)
                 .put("agent", agent)
+                .put("run_id", run_id)
+                .put("started", started.to_string())
                 .put("cwd", cwd.clone())
                 .put("path", cwd)
                 .put("pid", pid)
@@ -314,8 +370,8 @@ pub fn fleet() -> Vec<Item> {
             if let Some((pane_id, _, addr, _)) = pane {
                 it = it.put("pane", pane_id).put("addr", addr);
             }
-            if let Some(s) = session {
-                it = it.put("session", s.get("file")).put("subject", s.title.clone());
+            if let Some(id) = requested {
+                it = it.put("requested_session", id);
             }
             it
         })
@@ -349,23 +405,140 @@ fn cwd_of_agents() -> std::collections::HashMap<String, String> {
     map
 }
 
+fn canonical_session_id(session: &Item) -> String {
+    let existing = session.get("session_id");
+    if !existing.is_empty() {
+        existing.to_string()
+    } else {
+        format!("{}:{}", session.get("agent"), session.get("id"))
+    }
+}
+
+fn attach(run: &mut Item, session: &Item, relation: &str) {
+    run.data.insert("session".into(), session.get("file").into());
+    run.data.insert("session_native_id".into(), session.get("id").into());
+    run.data.insert("session_id".into(), canonical_session_id(session));
+    run.data.insert("session_match".into(), relation.into());
+    run.data.insert("subject".into(), session.title.clone());
+}
+
+/// Relate live processes to conversations without pretending an ambiguous
+/// cwd match is exact. An explicit resume id wins. A cwd-latest inference is
+/// made only when exactly one run of that agent exists in that directory;
+/// two Claude processes in one project otherwise remain honestly unlinked.
+pub(crate) fn attach_sessions(runs: &mut [Item], sessions: &[Item]) {
+    use std::collections::{HashMap, HashSet};
+    let mut group_size: HashMap<(String, String), usize> = HashMap::new();
+    for run in runs.iter() {
+        *group_size
+            .entry((run.get("agent").to_string(), run.get("cwd").to_string()))
+            .or_default() += 1;
+    }
+
+    let mut claimed = HashSet::new();
+    for run in runs.iter_mut().filter(|r| !r.get("requested_session").is_empty()) {
+        let requested = run.get("requested_session");
+        let candidates: Vec<&Item> = sessions
+            .iter()
+            .filter(|s| {
+                s.get("agent") == run.get("agent")
+                    && (s.get("id") == requested || s.get("id").starts_with(requested))
+            })
+            .collect();
+        if candidates.len() == 1 {
+            let id = canonical_session_id(candidates[0]);
+            attach(run, candidates[0], "explicit");
+            claimed.insert(id);
+        } else {
+            run.data.insert("session_native_id".into(), requested.to_string());
+            run.data.insert("session_match".into(), "requested-missing".into());
+        }
+    }
+
+    for run in runs.iter_mut().filter(|r| r.get("session_match").is_empty()) {
+        let key = (run.get("agent").to_string(), run.get("cwd").to_string());
+        if key.1.is_empty() {
+            continue;
+        }
+        if group_size.get(&key).copied().unwrap_or(0) != 1 {
+            run.data.insert("session_match".into(), "ambiguous".into());
+            continue;
+        }
+        let session = sessions
+            .iter()
+            .filter(|s| s.get("agent") == key.0 && s.get("cwd") == key.1)
+            .filter(|s| !claimed.contains(&canonical_session_id(s)))
+            .max_by(|a, b| {
+                let x = a.get("ts").parse::<f64>().unwrap_or(0.0);
+                let y = b.get("ts").parse::<f64>().unwrap_or(0.0);
+                x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        if let Some(session) = session {
+            let id = canonical_session_id(session);
+            attach(run, session, "cwd-latest");
+            claimed.insert(id);
+        }
+    }
+}
+
+/// Put the reverse edge on sessions so their preview can say whether the
+/// conversation is active and which process owns it.
+pub fn annotate_sessions(mut sessions: Vec<Item>, runs: &[Item]) -> Vec<Item> {
+    let active: std::collections::HashMap<&str, &Item> = runs
+        .iter()
+        .filter_map(|run| (!run.get("session_id").is_empty()).then_some((run.get("session_id"), run)))
+        .collect();
+    for session in &mut sessions {
+        let id = canonical_session_id(session);
+        session.data.insert("session_id".into(), id.clone());
+        if let Some(run) = active.get(id.as_str()) {
+            session.data.insert("active_run".into(), run.get("run_id").into());
+            session.data.insert("active_pid".into(), run.get("pid").into());
+            session.data.insert("active_state".into(), run.get("state").into());
+            session.data.insert("active_addr".into(), run.get("addr").into());
+            session.data.insert("pane".into(), run.get("pane").into());
+        }
+    }
+    sessions
+}
+
+/// Relationship-only view for per-keystroke Session search. It reads cached
+/// identities, checks pids with syscalls and attaches Sessions, but never asks
+/// tmux or starts a subprocess. State may be absent; ownership and pane are
+/// still current enough to prevent a duplicate resume.
+pub fn linked_identities(sessions: &[Item]) -> Vec<Item> {
+    let mut runs: Vec<Item> = crate::cache::read_cached("fleet")
+        .into_iter()
+        .filter(|it| alive(it.get("pid")))
+        .collect();
+    attach_sessions(&mut runs, sessions);
+    runs
+}
+
 /// The fleet as it stands *now*: cached identities, live state.
 ///
 /// Every read here is a syscall, so a hundred runs cost well under a
 /// millisecond. A run whose process has gone is dropped rather than shown.
 pub fn live() -> Vec<Item> {
+    let sessions = crate::cache::read_cached("sessions");
+    live_with_sessions(&sessions)
+}
+
+/// The same live view for a caller that already parsed the session cache.
+pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
     let now = now();
     // Which runs still exist is a `kill(pid, 0)` each and settles the common
     // case — nothing running — before tmux is asked anything. `list-panes` is
     // a subprocess, and spawning one to decorate an empty list is the whole
     // cost of this source on a machine with no agents on it.
-    let runs: Vec<Item> = crate::cache::read_cached("fleet")
+    let mut runs: Vec<Item> = crate::cache::read_cached("fleet")
         .into_iter()
         .filter(|it| alive(it.get("pid")))
         .collect();
     if runs.is_empty() {
         return Vec::new();
     }
+    attach_sessions(&mut runs, sessions);
     let panes = panes();
     runs.into_iter()
         .map(|mut it| {
