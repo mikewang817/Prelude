@@ -1590,4 +1590,14 @@ mod tests {
         let t = crate::width::dtrunc("宽字符截断测试", 6);
         assert!(crate::width::dwidth(&t) <= 6, "got {t}");
     }
+
+    #[test]
+    fn result_kind_precedes_the_final_detail_column() {
+        use crate::item::{Item, Kind};
+        let item = Item::new("demo", Kind::Skill)
+            .fields(["claude", "used once", "missing: pi", "the full description"]);
+        let rendered = crate::render::render(&[item], 140);
+        let visible = rendered.split(crate::render::SEP).next().unwrap();
+        assert!(visible.find("skill").unwrap() < visible.find("the full description").unwrap());
+    }
 }

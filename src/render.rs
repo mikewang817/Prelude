@@ -148,54 +148,72 @@ pub fn render_with(
         let title = dtrunc(&flatten(&it.title), tw);
         let pad = " ".repeat((tw + 2).saturating_sub(dwidth(&title)).max(1));
 
-        // The kind label is pinned to the right edge, as Raycast pins its
-        // result type. That gives it a single column on every row for free,
-        // and lets the middle stretch to fill everything in between.
-        let mut middle = String::new();
-        if budget >= 8 {
-            let tail = if !it.fields.is_empty() {
-                let cols: Vec<String> = it
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .take(cols_w.len())
-                    .map(|(i, f)| {
-                        // Everything left-aligned, hard against its
-                        // separator. Right-aligning numbers stacks digits
-                        // neatly within one kind, but the columns are shared
-                        // across all of them — so "2 skills" got shoved to
-                        // the far end of a column widened by "claude,
-                        // shared", metres away from the dot it belongs to.
-                        pad_to(&dtrunc(&flatten(f), cols_w[i]), cols_w[i], false)
-                    })
-                    .collect();
-                Some(cols.join(" · "))
-            } else if !it.subtitle.is_empty() {
-                Some(flatten(&it.subtitle))
-            } else {
-                None
-            };
-            if let Some(t) = tail {
-                if !t.is_empty() {
-                    middle = dtrunc(&t, budget);
-                }
-            }
-        }
-
         out.push_str(&title);
         out.push_str(&pad);
-        if middle.is_empty() {
-            out.push_str(&" ".repeat(budget + 3));
+
+        if cols_w.len() >= 2 {
+            // The type used to be the sixth and final column, after a skill's
+            // description. Put it in the fifth slot instead: the first three
+            // detail columns remain shared, then comes the stable kind, and
+            // the long description gets the flexible right edge.
+            let last = cols_w.len() - 1;
+            let prefix_w = cols_w[..last].iter().sum::<usize>() + 3 * last.saturating_sub(1);
+            let prefix = it
+                .fields
+                .iter()
+                .enumerate()
+                .take(last)
+                .map(|(i, f)| pad_to(&dtrunc(&flatten(f), cols_w[i]), cols_w[i], false))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            if prefix.is_empty() {
+                out.push_str(&" ".repeat(prefix_w + 3));
+            } else {
+                out.push_str(&format!(
+                    "{DIM}· {}{RESET} ",
+                    pad_to(&dtrunc(&prefix, prefix_w), prefix_w, false)
+                ));
+            }
+
+            // Right-aligned within a constant width, so all type labels form
+            // one column even when the rows around them have fewer fields.
+            out.push_str(color);
+            out.push_str(&pad_to(label, lw, true));
+            out.push_str(RESET);
+
+            let final_field = it.fields.get(last).map(String::as_str).or_else(|| {
+                (it.fields.is_empty() && !it.subtitle.is_empty()).then_some(it.subtitle.as_str())
+            });
+            if let Some(field) = final_field.filter(|f| !f.is_empty()) {
+                let field = dtrunc(&flatten(field), cols_w[last]);
+                out.push_str(&format!(
+                    "{DIM} · {}{RESET}",
+                    pad_to(&field, cols_w[last], false)
+                ));
+            } else {
+                out.push_str(&" ".repeat(cols_w[last] + 3));
+            }
         } else {
-            // "· " + budget + one space = budget + 3, matching the empty
-            // branch exactly so every row ends in the same column.
-            out.push_str(&format!("{DIM}· {}{RESET} ", pad_to(&middle, budget, false)));
+            // Small one-column lists have no fifth/sixth pair to swap. Keep
+            // their compact layout rather than manufacturing empty columns.
+            let mut middle = String::new();
+            if budget >= 8 {
+                let tail = it.fields.first().map(String::as_str).or_else(|| {
+                    (!it.subtitle.is_empty()).then_some(it.subtitle.as_str())
+                });
+                if let Some(t) = tail.filter(|t| !t.is_empty()) {
+                    middle = dtrunc(&flatten(t), budget);
+                }
+            }
+            if middle.is_empty() {
+                out.push_str(&" ".repeat(budget + 3));
+            } else {
+                out.push_str(&format!("{DIM}· {}{RESET} ", pad_to(&middle, budget, false)));
+            }
+            out.push_str(color);
+            out.push_str(&pad_to(label, lw, true));
+            out.push_str(RESET);
         }
-        // Right-aligned within a constant width, so the labels share an
-        // edge and every row ends in the same column.
-        out.push_str(color);
-        out.push_str(&pad_to(label, lw, true));
-        out.push_str(RESET);
 
         out.push(SEP);
         out.push_str(&serde_json::to_string(it).unwrap_or_default());

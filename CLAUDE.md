@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 43 tests
+cargo test                 # 44 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -199,7 +199,9 @@ read, and sessions are always read back from it.
 **Column widths are shared across all kinds and taken at a percentile.**
 Per-kind widths only align within a kind, so the dots scatter. And one
 outlier — a session in a deep iCloud path, 127 columns — will set the column
-for two thousand rows if you take the maximum.
+for two thousand rows if you take the maximum. The kind is the fifth column,
+before the final free-text field; descriptions and run subjects own the
+flexible sixth column at the right edge.
 
 **Drain child output.** `exec::run` reads stdout on a helper thread because
 waiting on a process while its pipe fills deadlocks past 64KB; `ps -Ao`
