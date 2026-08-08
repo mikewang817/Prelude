@@ -92,7 +92,6 @@ pub enum Verb {
     Launch,
     OpenUrl,
     CopyResult,
-    OpenConfig,
     RunSkill,
     ResumeSession,
     /// Start an agent CLI in a pane beside the conversation you are in —
@@ -149,7 +148,10 @@ pub fn on_enter(item: &Item, host: Host) -> Default_ {
         (Calc | Translate, Host::Shell) => Act(Verb::CopyResult),
         (Calc | Translate, Host::Agent) => InsertText(Text::Result),
 
-        (Mcp, Host::Shell) => Act(Verb::OpenConfig),
+        // An MCP server exists for the tools it exposes, not for the config
+        // file that happens to describe it. Details are therefore the useful
+        // default; configuration remains an explicit action.
+        (Mcp, Host::Shell) => Act(Verb::RunHere),
         (Mcp, Host::Agent) => InsertText(Text::Name),
 
         // A skill name is meaningless at a shell prompt but is exactly what
@@ -283,6 +285,18 @@ fn name(item: &Item, d: Default_) -> &'static str {
     if d == Default_::Act(Verb::Inspect) && item.kind == Kind::Proc {
         return "Show its full command";
     }
+    if d == Default_::Act(Verb::RunHere) && item.kind == Kind::Mcp {
+        return "Show what it exposes";
+    }
+    if d == Default_::Act(Verb::RunInShell) && item.kind == Kind::Agent {
+        return "Start now";
+    }
+    if d == Default_::Act(Verb::CopyResult) && item.kind == Kind::Clip {
+        return "Copy text";
+    }
+    if d == Default_::InsertText(Text::Name) && item.kind == Kind::Link {
+        return "Insert URL";
+    }
     describe_action(d)
 }
 
@@ -300,7 +314,6 @@ fn describe_action(d: Default_) -> &'static str {
         Default_::Act(Verb::Launch) => "Launch it",
         Default_::Act(Verb::OpenUrl) => "Open in browser",
         Default_::Act(Verb::CopyResult) => "Copy the result",
-        Default_::Act(Verb::OpenConfig) => "Open its config",
         Default_::Act(Verb::RunSkill) => "Hand it to an agent",
         Default_::Act(Verb::ResumeSession) => "Resume this session",
         Default_::Act(Verb::RunHere) => "Run it here and show the output",

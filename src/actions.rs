@@ -106,21 +106,34 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let mut acts = match it.kind {
         Kind::Session => {
-            // No "Resume this session": that is Enter, word for word.
-            let mut v = vec![a("run", "Resume it now", it.get("agent"))];
+            let mut v = vec![
+                a("run", "Resume now", it.get("agent")),
+                a("details", "Show conversation details", it.get("opening")),
+            ];
             if !it.get("cwd").is_empty() {
-                v.push(a("cdsession", "cd to where it ran", crate::paths::tilde(it.get("cwd"))));
-                v.push(a("newsession", "Start a fresh session there", it.get("agent")));
+                v.push(a("newsession", "Start fresh in this project", it.get("agent")));
+                v.push(a("cdsession", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
             }
-            v.push(a("copy", "Copy the session id", it.get("id")));
+            v.push(a("copy", "Copy session ID", it.get("id")));
+            v
+        }
+        // In an agent conversation Enter starts this one beside the current
+        // pane and the secondary hands over its name. Resume commands and
+        // one-off shell runners do not belong in another agent's chat box.
+        Kind::Agent if host == crate::defaults::Host::Agent => {
+            let n = it.get("agent");
+            let mut v = Vec::new();
+            if let Some(p) = crate::sources::agents::config_for(n) {
+                v.push((
+                    leak(format!("agentcfg:{n}")),
+                    "Open settings locally".to_string(),
+                    crate::paths::tilde(&p),
+                ));
+            }
             v
         }
         // An agent CLI. Enter puts its name on the prompt, because that is
-        // where you add `--resume`, a model, or an opening question. So the
-        // panel is the three of those you reach for by name rather than by
-        // typing — and nothing else. "Copy its name" is two letters you can
-        // type faster than you can open this panel, and "Ask an agent about
-        // this" would hand claude the word "pi".
+        // where you add `--resume`, a model, or an opening question.
         Kind::Agent => {
             let n = it.get("agent").to_string();
             let mut v = Vec::new();
@@ -131,15 +144,15 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             if let Some(s) = crate::sources::sessions::latest_for(&n) {
                 v.push((
                     leak(format!("resume:{n}")),
-                    "Resume its most recent session".to_string(),
+                    "Resume latest session".to_string(),
                     format!("{} · {}", crate::width::dtrunc(&s.title, 40), s.fields.get(2).cloned().unwrap_or_default()),
                 ));
             }
-            v.push((leak(format!("askagent:{n}")), format!("Ask {n} something"), "without leaving here".into()));
+            v.push((leak(format!("askagent:{n}")), format!("Ask {n} a one-off question"), "answer here".into()));
             if let Some(p) = crate::sources::agents::config_for(&n) {
                 v.push((
                     leak(format!("agentcfg:{n}")),
-                    "Open its settings".to_string(),
+                    "Open settings".to_string(),
                     crate::paths::tilde(&p),
                 ));
             }
@@ -154,12 +167,19 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // No "go to it" row: Enter already is that, and the panel
             // states Enter's action at the top.
             if !it.get("pane").is_empty() {
-                v.push(a("say", "Send it a line, without going there", "typed into its pane"));
-                v.push(a("zoom", "Go to it, zoomed full-screen", addr));
+                v.push(a("say", "Send a message…", "without switching panes"));
             }
-            v.push(a("cdrun", "cd to its project", crate::paths::tilde(it.get("cwd"))));
-            v.push(a("killrun", "End it", format!("{} · pid {}", it.get("agent"), it.get("pid"))));
-            v.push(a("copy", "Copy its address", addr));
+            v.push(a("details", "Show last response", it.get("subject")));
+            if !it.get("pane").is_empty() {
+                v.push(a("zoom", "Go to pane full-screen", addr));
+            }
+            if !it.get("cwd").is_empty() {
+                v.push(a("cdrun", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
+            }
+            if !addr.is_empty() {
+                v.push(a("copy", "Copy pane address", addr));
+            }
+            v.push(a("killrun", "End agent…", format!("{} · pid {}", it.get("agent"), it.get("pid"))));
             v
         }
         // A question an agent is blocked on. Enter already answers it, so
@@ -167,52 +187,78 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // it came out of, go there, or decline so it stops waiting.
         Kind::Msg => {
             let mut v = Vec::new();
+            v.push(a("msg:go", "Answer “go ahead”", "unblocks it immediately"));
+            v.push(a("msg:no", "Answer “no”", "unblocks it immediately"));
+            v.push(a("details", "Show conversation context", ""));
             if !it.get("pane").is_empty() {
-                v.push(a("zoom", "Go to it, zoomed full-screen", it.get("pane")));
+                v.push(a("zoom", "Go to agent full-screen", it.get("pane")));
             }
-            v.push(a("msg:no", "Answer \"no\"", "unblocks it immediately"));
-            v.push(a("msg:go", "Answer \"go ahead\"", "unblocks it immediately"));
-            v.push(a("cdrun", "cd to its project", crate::paths::tilde(it.get("cwd"))));
-            v.push(a("copy", "Copy the question", ""));
+            v.push(a("copy", "Copy question", ""));
             v
         }
         Kind::Config => open_actions(it.kind, it.get("path"), &editor),
         Kind::Port => vec![
-            a("run", "Kill it now", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
-            a("copy", "Copy the pid", it.get("pid")),
+            a("copy", "Copy PID", it.get("pid")),
+            a("run", "Kill process…", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
         ],
         Kind::Proc => vec![
-            a("run", "Kill it now", format!("{} · {}% CPU", it.get("name"), it.get("cpu"))),
-            a("copy", "Copy the pid", it.get("pid")),
+            a("copy", "Copy PID", it.get("pid")),
+            a("run", "Kill process…", format!("{} · {}% CPU", it.get("name"), it.get("cpu"))),
         ],
         Kind::Container => vec![
-            a("logs", "Follow its logs", format!("docker logs -f {}", it.get("name"))),
-            a("stop", "Stop it", format!("docker stop {}", it.get("name"))),
-            a("restart", "Restart it", format!("docker restart {}", it.get("name"))),
-            a("copy", "Copy name", it.get("name")),
+            a("logs", "Insert follow-logs command", format!("docker logs -f {}", it.get("name"))),
+            a("restart", "Insert restart command", format!("docker restart {}", it.get("name"))),
+            a("copy", "Copy container name", it.get("name")),
+            a("stop", "Insert stop command", format!("docker stop {}", it.get("name"))),
         ],
+        Kind::Skill if host == crate::defaults::Host::Agent => {
+            let target = first_nonempty(it, &["file", "dir"]);
+            let mut v = Vec::new();
+            if !it.get("desc").is_empty() {
+                v.push(a("desc", "Read instructions", ""));
+            }
+            if !target.is_empty() {
+                v.push(a("open", "Open SKILL.md locally", &target));
+            }
+            with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
+            with_options(&mut v, it, "rm", "Delete {} copy…", "Delete a copy…",
+                         "moves it to the Trash");
+            v
+        }
         Kind::Skill => {
             let target = first_nonempty(it, &["file", "dir"]);
             let mut v = Vec::new();
-            with_options(&mut v, it, "run", "Run it with {}", "Run it with…", "");
+            with_options(&mut v, it, "run", "Run with {}", "Run with…", "");
             // Borrowing comes before copying: it is the lighter of the two,
             // and the one that is nearly always what was meant. Copying puts
             // a second copy of the skill on disk, to be maintained forever;
             // borrowing lasts exactly one run and leaves nothing behind.
-            with_options(&mut v, it, "lend", "Use it in {}, just this run",
-                         "Use it in…, just this run", "nothing is installed");
-            with_options(&mut v, it, "cp", "Copy it to {}", "Copy it to…", "");
+            with_options(&mut v, it, "lend", "Prepare one-off run with {}",
+                         "Prepare one-off run with…", "inserts command · nothing installed");
+            with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
             if !it.get("desc").is_empty() {
-                v.push(a("desc", "Show full description", ""));
+                v.push(a("desc", "Read instructions", ""));
             }
-            v.push(a("open", "Open in editor", &target));
-            v.push(a("reveal", "cd to its folder", parent_of(&target)));
+            if !target.is_empty() {
+                v.push(a("open", "Open SKILL.md in editor", &target));
+            }
             // Last, and one entry per agent that actually has a copy. A
             // skill merged across four agents is four separate decisions —
             // "delete it" would otherwise mean something different depending
             // on a number the row only hints at.
-            with_options(&mut v, it, "rm", "Delete {}'s copy…", "Delete a copy…",
-                         "to the Trash, after confirming");
+            with_options(&mut v, it, "rm", "Delete {} copy…", "Delete a copy…",
+                         "moves it to the Trash");
+            v
+        }
+        Kind::Mcp if host == crate::defaults::Host::Agent => {
+            let target = first_nonempty(it, &["file", "dir", "config"]);
+            let mut v = vec![
+                a("mcptools", "Show what it exposes", format!("{} mcp get", it.get("agent"))),
+                a("copy", "Copy server name", ""),
+            ];
+            if !target.is_empty() {
+                v.push(a("open", "Open owner configuration locally", &target));
+            }
             v
         }
         Kind::Mcp => {
@@ -224,28 +270,25 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // particular server can be lent at all takes a subprocess to
             // find out, so that answer arrives when the action runs rather
             // than being guessed at here.
-            with_options(&mut v, it, "lend", "Lend it to {} for one run",
-                         "Lend it for one run…", &format!("from {owner}"));
+            with_options(&mut v, it, "lend", "Prepare one-off use with {}",
+                         "Prepare one-off use with…", &format!("inserts command · from {owner}"));
             // Slot 7. Lending lasts one run; this is the other half, and it
             // uses the agent's own `mcp add` rather than editing anyone's
             // config file — the CLI knows the format and we do not have to.
-            with_options(&mut v, it, "install", "Install it in {} for good",
-                         "Install it for good…", "");
-            // Slot 3. A row can say `✔ connected` and never say connected to
-            // *what*, which is the only reason an MCP server exists.
-            v.push(a("mcptools", "Show what it exposes", format!("{owner} mcp get")));
-            // Slot 3 again: a row that says `⚠ not logged in` and offers no
-            // way to log in is a diagnosis with no treatment.
+            with_options(&mut v, it, "install", "Insert install command for {}",
+                         "Insert install command…", "review before running");
+            // Inspection is Enter at a shell and is stated in the header, so
+            // it is not repeated as a selectable action here.
+            // A row that says `⚠ not logged in` must offer a route forward.
             if matches!(it.get("health"), "needsauth" | "failed") {
-                v.push(a("mcplogin", "Log in to it", format!("{owner} mcp login")));
+                v.push(a("mcplogin", "Insert login command", format!("{owner} mcp login")));
             }
-            // Slot 9. Inserted rather than run: it edits the agent's config,
-            // and a command line on your prompt is this launcher's own form
-            // of confirmation.
-            v.push(a("mcpremove", "Remove it…", format!("{owner} mcp remove")));
-            v.push(a("open", "Open in editor", &target));
-            v.push(a("reveal", "cd to its folder", parent_of(&target)));
-            v.push(a("copy", "Copy name", ""));
+            // Configuration changes are inserted for review rather than run.
+            if !target.is_empty() {
+                v.push(a("open", "Open owner configuration", &target));
+            }
+            v.push(a("copy", "Copy server name", ""));
+            v.push(a("mcpremove", "Insert remove command…", format!("{owner} mcp remove")));
             v
         }
         Kind::File | Kind::Find => open_actions(it.kind, it.get("path"), &editor),
@@ -276,11 +319,10 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // slot 9 none at all — yet dragging an .app to the Trash is how you
         // uninstall on this platform.
         Kind::App => vec![
-            a("insert", "Insert the open command", &it.cmd),
             a("reveal-finder", "Reveal in Finder", it.get("path")),
-            a("reveal", "cd to its folder", it.get("path")),
-            a("copy", "Copy its path", it.get("path")),
-            a("trash", "Move it to the Trash…", "uninstalls it, recoverably"),
+            a("copy", "Copy application path", it.get("path")),
+            a("insert", "Insert open command", &it.cmd),
+            a("trash", "Move to Trash…", "uninstalls it, recoverably"),
         ],
         Kind::Sys => vec![
             a("copy", "Copy the command", ""),
@@ -288,8 +330,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // No "Open in browser": that is Enter, stated above. The insert is
         // the `open …` command, which the secondary's bare URL is not.
         Kind::Link => vec![
-            a("insert", "Insert the open command", &it.cmd),
-            a("copy", "Copy the URL", it.get("url")),
+            a("copy", "Copy URL", it.get("url")),
+            a("insert", "Insert open command", &it.cmd),
         ],
         // History, scripts, $PATH, branches, folders. Enter inserts them and
         // the secondary runs them, which is the whole of what they are — so
@@ -301,24 +343,23 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // third row repeats its first is teaching you not to read it.
         _ => vec![],
     };
-    // Enter's action leads, and names its key — Raycast's convention, and
-    // for Raycast's reason: the panel is searchable, fuzzy matching flattens
-    // it into one list, and a primary that is not in the list cannot be
-    // found by typing its name. The panel has to be the complete inventory
-    // of what is possible here, not the inventory-minus-one.
+    // Enter is already stated in the main footer and again in this panel's
+    // non-selectable header. Listing it as the first action made ^K start by
+    // repeating the key the person had just declined. The secondary remains
+    // here because it has no reliable terminal key of its own.
     //
-    // The secondary follows, and names no key because it has none — that is
-    // the whole reason this row exists. It says what it does rather than
-    // announcing itself as "the other one", which was an internal word for
-    // it leaking onto the screen.
-    acts.insert(0, a("default", crate::defaults::describe(it, host), "Enter"));
-    if let Some(label) = crate::defaults::describe_secondary(it, host) {
-        acts.insert(1, a("secondary", label, ""));
+    // Some rich agent kinds already expose that same behaviour under a more
+    // useful, specific label, so they do not get a generic secondary row.
+    let specific_alternative = matches!(it.kind, Kind::Run | Kind::Msg | Kind::Session | Kind::App)
+        || (host == crate::defaults::Host::Shell && matches!(it.kind, Kind::Skill | Kind::Mcp));
+    if !specific_alternative {
+        if let Some(label) = crate::defaults::describe_secondary(it, host) {
+            acts.insert(0, a("secondary", label, ""));
+        }
     }
-    // Everything the removed shortcuts used to do stays reachable here — but
-    // only where it means anything. Offering to run a translation, or to
-    // paint an agent's TUI into a preview pane, is not a fallback.
-    // `docs/ACTIONS.md`, R3 and R5.
+    // Output-in-Prelude is useful for small non-interactive commands, not as
+    // a generic fallback for every row that happens to carry command-shaped
+    // text.
     // A port's and a process's command line *is* the kill, and both kinds
     // already offer it, named, at the bottom. Adding "Run here, inside this
     // window" is a second route to the same kill wearing a harmless label —
@@ -337,38 +378,50 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     // Three verbs all end in `emit("RUN", cmd)`, so any of them above means
     // the generic runner is the same keystroke with a duller label.
     let runs_it = already(Verb::RunInShell) || already(Verb::Launch) || already(Verb::OpenUrl);
-    if it.kind.is_command_line()
-        && !it.kind.is_interactive()
+    let useful_in_preview = matches!(
+        it.kind,
+        Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Sys | Kind::Git
+    );
+    if useful_in_preview
         && !generic_run_would_kill
         && !already(Verb::RunHere)
         && !acts.iter().any(|(id, ..)| *id == "runhere")
     {
-        acts.push(a("runhere", "Run here, inside this window", ""));
+        acts.push(a("runhere", "Run and show output", "inside Prelude"));
     }
-    if it.kind.is_command_line() && !runs_it && !acts.iter().any(|(id, ..)| *id == "run") {
-        acts.push(a("run", "Run in the shell below", ""));
+    let runnable = matches!(
+        it.kind,
+        Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Ssh
+            | Kind::Container | Kind::Git | Kind::Sys | Kind::Agent | Kind::Session
+    );
+    if runnable && !runs_it && !acts.iter().any(|(id, ..)| *id == "run") {
+        acts.push(a("run", "Run now", ""));
     }
     // `copyabs` already copies the path, and for a file that is exactly what
     // `copy` copies too — the same action twice, worded differently. Nor is
     // there anything to copy off an agent row: `pi` is two letters you can
     // type faster than you can open this panel.
-    if it.kind != Kind::Agent
+    let generic_copy_is_useful = matches!(
+        it.kind,
+        Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Ssh
+            | Kind::Container | Kind::Git | Kind::Sys | Kind::Clip | Kind::Translate
+            | Kind::Calc | Kind::Dir
+    );
+    if generic_copy_is_useful
         && !already(Verb::CopyResult)
         && !acts.iter().any(|(id, ..)| *id == "copy" || *id == "copyabs")
     {
         acts.push(a("copy", "Copy to clipboard", ""));
     }
-    if it.kind.worth_asking_about() {
-        acts.push(a("ask", "Ask an agent about this", "hands it to claude"));
-    }
-    if let Some(cwd) = &it.cwd {
-        acts.push(a("cd", "Go to project folder", cwd.clone()));
-    }
-    // No "Insert path without cd" for a folder: that is precisely what the
-    // secondary hands you, and it is stated two rows above.
-    // The order is the five questions, in the order a person asks them.
-    // Stable, so each kind's own sequencing survives inside its group.
-    acts.sort_by_key(|(id, ..)| group(it.kind, id));
+    // Do not append generic "Ask an agent" or "Go to project" rows. They
+    // made every panel look complete while usually being unrelated to why
+    // this particular item was selected. Kinds that genuinely need project
+    // navigation name it explicitly above.
+    //
+    // Each kind above is written in the order a person actually reaches for
+    // its actions. Preserve that order; the only global rule is that danger
+    // stays at the bottom, away from a fast Enter.
+    acts.sort_by_key(|(id, ..)| is_destructive(it.kind, id));
     acts
 }
 
@@ -379,7 +432,10 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
 /// is red but not confirmed, because `docker start` exists; killing a
 /// process is both, because nothing brings it back.
 pub fn is_destructive(kind: Kind, id: &str) -> bool {
-    group(kind, id) == 5
+    matches!(id, "killrun" | "stop" | "trash" | "mcpremove")
+        || id.starts_with("rm:")
+        || id == "menu:rm"
+        || (id == "run" && matches!(kind, Kind::Port | Kind::Proc))
 }
 
 /// …and of those, the ones with no way back at all.
@@ -394,44 +450,11 @@ pub fn needs_confirming(kind: Kind, id: &str) -> Option<(&'static str, &'static 
     }
 }
 
-/// Which of the five questions in `docs/ACTIONS.md` an entry answers.
+/// The short list of useful alternatives for a file.
 ///
-/// Kept as one function over ids rather than as structure in each kind's
-/// list, so the ordering is a property of the panel rather than of
-/// twenty-five independent decisions that agreed for a while.
-///
-/// It needs the kind because one id is genuinely two verbs: `run` means
-/// "start it" nearly everywhere and "kill it now" on a port or a process.
-fn group(kind: Kind, id: &str) -> u8 {
-    const ACT: u8 = 2;
-    const TAKE: u8 = 3;
-    const GO: u8 = 4;
-    const DESTROY: u8 = 5;
-    match id {
-        "default" => 0,
-        "secondary" => 1,
-        // Irreversible, so last however the kind happened to list it.
-        "killrun" | "stop" | "trash" | "mcpremove" => DESTROY,
-        _ if id.starts_with("rm:") || id == "menu:rm" => DESTROY,
-        "mcptools" | "mcplogin" => ACT,
-        "run" if matches!(kind, Kind::Port | Kind::Proc) => DESTROY,
-        // Text out of the row.
-        "insert" | "copy" | "copyabs" | "here" | "desc" | "inspect" | "tr_src" => TAKE,
-        // Where it lives.
-        "reveal" | "reveal-finder" | "cd" | "cdrun" | "cdsession" | "zoom" | "jump" | "editsnips"
-        | "editssh" => GO,
-        // Everything else is another way to act on it, including the two
-        // tenses of "not like that": `openwith` and `openalways`.
-        _ => ACT,
-    }
-}
-
-/// Everything you might want to do with a file, in the order you want it.
-///
-/// This is the half of the launcher that behaves like a Finder rather than a
-/// shell: which application opens this, and should that stick. The chosen
-/// application is named rather than implied, so the first row says what
-/// Enter already does instead of leaving you to find out.
+/// This is the half of the launcher that behaves like Finder rather than a
+/// shell: open it another way, locate it, extract its path, or change what
+/// application owns its extension next time.
 fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
     let chosen = crate::openwith::chosen_for(path);
     let ext = crate::openwith::ext_of(path);
@@ -441,11 +464,10 @@ fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
             Some(app) => format!("currently {app}"),
             None => "currently the system default".into(),
         }),
-        (leak("openalways".into()), format!("Always open {scope} with…"), "makes it stick".into()),
+        a("open", "Open in editor", editor),
         a("reveal-finder", "Reveal in Finder", parent_of(path)),
-        a("open", "Open in $EDITOR", editor),
-        a("copyabs", "Copy absolute path", path),
-        a("reveal", "cd to its folder", parent_of(path)),
+        a("copyabs", "Copy path", path),
+        (leak("openalways".into()), format!("Change default app for {scope}…"), "used next time".into()),
     ];
     // Slot 9. A skill could be deleted and the kind the launcher spends most
     // of its rows on could not. Not offered for a config: deleting the file
@@ -474,10 +496,11 @@ fn parent_of(p: impl AsRef<str>) -> String {
     p.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default()
 }
 
+/// The action panel is a modal over the main search. Esc means "back", not
+/// "close Prelude"; the caller uses this distinct code to reopen the list.
+pub const PANEL_BACK: i32 = 131;
+
 pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
-    // The panel reflects where you opened it from, exactly as the footer
-    // does — in a popup over an agent, Enter means something else and the
-    // header has to say so.
     let host = if paste_target.is_some() {
         crate::defaults::Host::Agent
     } else {
@@ -488,58 +511,78 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
         .iter()
         .map(|(id, label, sub)| {
             let tail = if sub.is_empty() { String::new() } else { format!("{DIM}· {sub}{RESET}") };
-            // Red is the whole of what Raycast's "Danger zone" section title
-            // achieves that we can have: fzf has no unselectable separator
-            // row, but it does render colour, and the point of the title was
-            // never the word — it was that these rows look different from
-            // the ones above them.
+            let padded = crate::width::pad_to(
+                &crate::width::dtrunc(&crate::width::flatten(label), 28), 28, false
+            );
             let label = if is_destructive(it.kind, id) {
-                format!("{RED}{label:<28}{RESET}")
+                format!("{RED}{padded}{RESET}")
             } else {
-                format!("{label:<28}")
+                padded
             };
             format!("{label}{tail}{SEP}{id}\n")
         })
         .collect();
 
-    let short = crate::width::dtrunc(&crate::width::flatten(&it.cmd), 56);
-    // The panel's payload is a bare action id, not JSON, so take the raw
-    // selection rather than trying to parse an Item out of it.
-    match ui::pick_raw(
-        feed.trim_end(),
-        &format!(" {short} "),
-        "⌘ ",
-        "Run  Enter   ·   Back  Esc",
-        "",
-    ) {
-        Some(id) => apply(&id, it, &paste_target),
-        None => 130,
+    let title = crate::width::dtrunc(&crate::width::flatten(&it.title), 48);
+    let kind = it.kind.style().1;
+    let default = crate::defaults::describe(it, host);
+    let header = format!("{DIM}Default: {default} · Enter{RESET}");
+
+    loop {
+        let Some(mut id) = ui::pick_raw(
+            feed.trim_end(),
+            &format!(" {title} · {kind} "),
+            "Action › ",
+            "Choose  Enter   ·   Back  Esc",
+            &header,
+        ) else {
+            return PANEL_BACK;
+        };
+
+        // A submenu is a parameter picker, not a second modal. Esc from it
+        // returns to this list instead of throwing the user back to the shell.
+        if let Some(verb) = id.strip_prefix("menu:") {
+            let opts = agent_options(it, verb);
+            let choices: String = opts
+                .iter()
+                .map(|(oid, name, detail)| {
+                    let name = crate::width::pad_to(name, 28, false);
+                    let tail = if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{DIM}· {detail}{RESET}")
+                    };
+                    format!("{name}{tail}{SEP}{oid}\n")
+                })
+                .collect();
+            let Some(chosen) = ui::pick_raw(
+                choices.trim_end(),
+                &format!(" {title} "),
+                "Choose › ",
+                "Choose  Enter   ·   Back  Esc",
+                "",
+            ) else {
+                continue;
+            };
+            id = chosen;
+        }
+
+        let code = apply(&id, it, &paste_target);
+        if code == 130 {
+            // A canceled confirmation returns to the actions too.
+            continue;
+        }
+        if code != 0 || !stays_in_panel(&id) {
+            return code;
+        }
     }
 }
 
+fn stays_in_panel(id: &str) -> bool {
+    matches!(id, "copy" | "copyabs" | "desc" | "details" | "mcptools")
+}
+
 pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
-    // A verb that needed an agent: ask which, then carry on as if that row
-    // had been chosen directly.
-    if let Some(verb) = id.strip_prefix("menu:") {
-        let opts = agent_options(it, verb);
-        let feed: String = opts
-            .iter()
-            .map(|(oid, name, detail)| {
-                let tail = if detail.is_empty() { String::new() } else { format!("{DIM}· {detail}{RESET}") };
-                format!("{name:<28}{tail}{SEP}{oid}\n")
-            })
-            .collect();
-        let Some(chosen) = ui::pick_raw(
-            feed.trim_end(),
-            &format!(" {} ", it.get("name")),
-            "⌘ ",
-            "Choose  Enter   ·   Back  Esc",
-            "",
-        ) else {
-            return 130;
-        };
-        return apply(&chosen, it, paste);
-    }
     // Anything with no way back says so before it happens, naming what is
     // lost. Cancel is the default, so a stray Enter cancels.
     if let Some((verb, loss)) = needs_confirming(it.kind, id) {
@@ -561,6 +604,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             ui::emit("RUN", &it.cmd, paste);
         }
         "runhere" => return crate::runhere::run_item(it),
+        "details" => show_details(it),
         "copy" => ui::copy(&copy_text(it)),
         "copyabs" => ui::copy(it.get("path")),
         "cd" => ui::emit("INSERT", &format!("cd {}", shq(it.cwd.as_deref().unwrap_or(""))), paste),
@@ -576,7 +620,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "logs" => ui::emit("INSERT", &format!("docker logs -f {}", shq(it.get("name"))), paste),
         "stop" => ui::emit("INSERT", &format!("docker stop {}", shq(it.get("name"))), paste),
         "restart" => ui::emit("INSERT", &format!("docker restart {}", shq(it.get("name"))), paste),
-        "open" if !target.is_empty() => ui::emit("INSERT", &format!("{editor} {}", shq(&target)), paste),
+        "open" if !target.is_empty() => run_or_emit(&format!("{editor} {}", shq(&target)), paste),
         "reveal" if !target.is_empty() => ui::emit("INSERT", &format!("cd {}", shq(&parent_of(&target))), paste),
         "desc" => show_description(it),
         "editsnips" => ui::emit("INSERT", &format!("{editor} {}", shq(&crate::paths::config().join("snippets.toml").to_string_lossy())), paste),
@@ -612,7 +656,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             return crate::bus::answer(it.get("id"), text);
         }
         "cdsession" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd"))), paste),
-        "newsession" => ui::emit("INSERT",
+        "newsession" => ui::emit("RUN",
             &crate::sources::sessions::start_cmd(it.get("agent"),
                 Some(it.get("cwd")).filter(|s| !s.is_empty()), None), paste),
         "ask" => {
@@ -621,23 +665,32 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             ui::emit("INSERT", &format!("claude {}", shq(&format!("about this: {subject}"))), paste);
         }
         _ if id.starts_with("askagent:") => {
-            ui::emit("INSERT", &format!("@{} ", &id[9..]), paste);
+            let agent = &id[9..];
+            let Some(prompt) = ui::prompt_line(&format!(" ask {agent} ")) else {
+                return 130;
+            };
+            let Some(args) = crate::sources::sessions::ask_cmd(agent, &prompt) else {
+                ui::note(&format!("don't know how to ask {agent}"), paste);
+                return 2;
+            };
+            let cmd = args.iter().map(|s| shq(s)).collect::<Vec<_>>().join(" ");
+            return crate::runhere::run_cmd(&cmd);
         }
         _ if id.starts_with("resume:") => {
             match crate::sources::sessions::latest_for(&id[7..]) {
-                Some(s) => ui::emit("INSERT", &s.cmd, paste),
+                Some(s) => ui::emit("RUN", &s.cmd, paste),
                 None => ui::note("no sessions recorded for that agent yet", paste),
             }
         }
         _ if id.starts_with("agentcfg:") => {
             match crate::sources::agents::config_for(&id[9..]) {
-                Some(p) => ui::emit("RUN", &crate::openwith::open_default(&p), paste),
+                Some(p) => run_or_emit(&crate::openwith::open_default(&p), paste),
                 None => ui::note("that agent has no settings file here", paste),
             }
         }
         _ if id.starts_with("run:") => {
             let agent = &id[4..];
-            ui::emit("INSERT", &format!("{agent} {}", shq(&it.cmd)), paste);
+            ui::emit("RUN", &format!("{agent} {}", shq(&it.cmd)), paste);
         }
         "jump" => return ui::act_jump(it, paste, false),
         "zoom" => return ui::act_jump(it, paste, true),
@@ -673,8 +726,8 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         }
         // The application half. `openit` is what Enter does, repeated here so
         // the panel states it; the other two are how you change it.
-        "openit" => ui::emit("RUN", &crate::openwith::open_default(&target), paste),
-        "reveal-finder" => ui::emit("RUN", &format!("open -R {}", shq(&target)), paste),
+        "openit" => run_or_emit(&crate::openwith::open_default(&target), paste),
+        "reveal-finder" => run_or_emit(&format!("open -R {}", shq(&target)), paste),
         "openwith" | "openalways" => {
             let Some(app) = crate::openwith::pick_app(short_name(&target)) else { return 130 };
             if id == "openalways" {
@@ -686,7 +739,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 let scope = if ext.is_empty() { "files like that".into() } else { format!(".{ext} files") };
                 ui::note(&format!("{scope} now open in {app}"), paste);
             }
-            ui::emit("RUN", &crate::openwith::open_cmd(&target, Some(&app)), paste);
+            run_or_emit(&crate::openwith::open_cmd(&target, Some(&app)), paste);
         }
         // Borrow: build the one command that starts `agent` with someone
         // else's capability attached, and hand it over unrun. Nothing is
@@ -845,28 +898,34 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
     0
 }
 
+/// RUN normally travels back to the shell widget. In a popup over an agent,
+/// that route would type the command into the conversation and press Enter;
+/// local file-management actions must instead run inside the popup process.
+fn run_or_emit(cmd: &str, paste: &Option<String>) {
+    if paste.is_some() {
+        let _ = std::process::Command::new("sh").arg("-c").arg(cmd).status();
+    } else {
+        ui::emit("RUN", cmd, paste);
+    }
+}
+
 fn copy_text(it: &Item) -> String {
+    if it.kind == Kind::Dir {
+        return crate::defaults::text_for(it, crate::defaults::Text::AbsolutePath);
+    }
     let by_kind = match it.kind {
         Kind::Port | Kind::Proc => it.get("pid"),
         Kind::Ssh => it.get("host"),
         Kind::Container => it.get("name"),
         Kind::Mcp => it.get("name"),
         Kind::Link => it.get("url"),
-        Kind::File | Kind::Find => it.get("path"),
+        Kind::File | Kind::Find | Kind::App => it.get("path"),
         _ => "",
     };
     if by_kind.is_empty() { it.cmd.clone() } else { by_kind.to_string() }
 }
 
-/// Skill descriptions are long; page them rather than truncating.
-fn show_description(it: &Item) {
-    let text = format!(
-        "{}  [{}]\n\n{}\n\n{}\n",
-        it.cmd,
-        it.get("agent"),
-        it.get("desc"),
-        it.get("file")
-    );
+fn page(text: &str) {
     let mut cmd = std::process::Command::new("less");
     cmd.arg("-R").stdin(std::process::Stdio::piped());
     if let Ok(mut child) = cmd.spawn() {
@@ -878,4 +937,20 @@ fn show_description(it: &Item) {
     } else {
         print!("{text}");
     }
+}
+
+/// Details are a view, not a terminal action: page them and return to ^K.
+fn show_details(it: &Item) {
+    page(&crate::preview::text(it));
+}
+
+/// Skill instructions are long; page them rather than truncating.
+fn show_description(it: &Item) {
+    page(&format!(
+        "{}  [{}]\n\n{}\n\n{}\n",
+        it.cmd,
+        it.get("agent"),
+        it.get("desc"),
+        it.get("file")
+    ));
 }

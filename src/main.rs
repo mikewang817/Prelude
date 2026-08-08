@@ -602,28 +602,69 @@ mod tests {
             "claude.ai Gmail:\n  Scope: claude.ai config\n  Status: ✔ Connected").is_none());
     }
 
-    /// The panel is the complete inventory of what is possible on a row, so
-    /// Enter's own action is in it — Raycast's convention, and for Raycast's
-    /// reason: the panel is searchable, and a primary that is not in the
-    /// list cannot be found by typing its name.
-    ///
-    /// The secondary follows it and names no key, because it has none. That
-    /// is the whole reason its row exists.
+    /// Enter is already named in the main footer and in the action panel's
+    /// non-selectable header. ^K therefore starts with a real alternative,
+    /// not the action the user just declined by opening the panel.
     #[test]
-    fn the_panel_leads_with_enter_then_the_secondary() {
+    fn the_panel_contains_alternatives_not_the_default_again() {
         use crate::defaults::{describe, describe_secondary, Host};
         use crate::item::{Item, Kind};
         let it = Item::new("/tmp/x.txt", Kind::File).title("x.txt").put("path", "/tmp/x.txt");
         let acts = crate::actions::actions_for(&it);
-        assert_eq!(acts[0].0, "default");
-        assert_eq!(acts[0].1, describe(&it, Host::Shell));
-        assert_eq!(acts[0].2, "Enter", "the primary names the key that runs it");
-        assert_eq!(acts[1].0, "secondary");
-        assert_eq!(acts[1].1, describe_secondary(&it, Host::Shell).unwrap());
-        // No sub-label: "the other one" was an internal name for this row
-        // leaking onto the screen. To the reader it is simply an action.
-        assert_eq!(acts[1].2, "", "the secondary announces what it does, not what it is");
-        assert_ne!(acts[0].1, acts[1].1, "two rows saying the same thing is worse than one");
+        assert!(!acts.iter().any(|(id, ..)| *id == "default"));
+        assert!(!acts.iter().any(|(_, label, ..)| label == describe(&it, Host::Shell)));
+        assert_eq!(acts[0].0, "secondary");
+        assert_eq!(acts[0].1, describe_secondary(&it, Host::Shell).unwrap());
+        assert_eq!(acts[0].2, "");
+    }
+
+    /// Representative menus are product surfaces, not merely collections
+    /// that satisfy generic invariants. Pin their order and keep them short.
+    #[test]
+    fn common_objects_have_intentional_action_menus() {
+        use crate::item::{Item, Kind};
+        let ids = |it: &Item| -> Vec<String> {
+            crate::actions::actions_for(it).iter().map(|(id, ..)| id.to_string()).collect()
+        };
+
+        let file = Item::new("/tmp/readme.md", Kind::File).put("path", "/tmp/readme.md");
+        assert_eq!(
+            ids(&file),
+            ["secondary", "openwith", "open", "reveal-finder", "copyabs", "openalways", "trash"]
+        );
+
+        let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
+        assert_eq!(ids(&app), ["reveal-finder", "copy", "insert", "trash"]);
+
+        let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
+        let clip_ids = ids(&clip);
+        assert_eq!(clip_ids, ["secondary", "tr_en", "tr_zh"]);
+        assert!(!clip_ids.iter().any(|id| id == "run" || id == "runhere"));
+    }
+
+    /// A popup over an agent is a conversation, not a shell prompt. Never
+    /// offer a command there that would be pasted as prose and submitted.
+    #[test]
+    fn agent_host_gets_conversation_safe_actions() {
+        use crate::defaults::Host;
+        use crate::item::{Item, Kind};
+        let ids = |it: &Item| -> Vec<String> {
+            crate::actions::actions_for_host(it, Host::Agent)
+                .iter().map(|(id, ..)| id.to_string()).collect()
+        };
+
+        let agent = Item::new("claude", Kind::Agent).put("agent", "claude");
+        let ai = ids(&agent);
+        assert!(!ai.iter().any(|id| id.starts_with("resume:") || id.starts_with("askagent:")), "{ai:?}");
+
+        let skill = Item::new("/review", Kind::Skill)
+            .put("name", "review").put("agent", "claude").put("missing", "codex");
+        let si = ids(&skill);
+        assert!(!si.iter().any(|id| id.starts_with("run:") || id.starts_with("lend:")), "{si:?}");
+
+        let mcp = Item::new("claude mcp get tools", Kind::Mcp)
+            .put("name", "tools").put("agent", "claude");
+        assert!(ids(&mcp).contains(&"mcptools".to_string()));
     }
 
     /// What the ^K panel actually offers, without standing up an fzf to
@@ -902,9 +943,8 @@ mod tests {
                     it.kind
                 );
             }
-            // Enter's action leads and names its key; the secondary follows
-            // and names none, because it has none.
-            assert_eq!(ids[0], "default", "{:?}", it.kind);
+            // Enter belongs in the panel header, never as a selectable row.
+            assert!(!ids.iter().any(|id| id == "default"), "{:?}", it.kind);
         }
     }
 
@@ -916,27 +956,22 @@ mod tests {
     #[test]
     fn running_is_offered_only_where_it_means_something() {
         use crate::item::Kind;
+        let previewable = [Kind::History, Kind::Script, Kind::Path, Kind::Snippet, Kind::Sys, Kind::Git];
         for it in every_kind_row() {
             let ids: Vec<&str> =
                 crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
-            if !it.kind.is_command_line() {
-                assert!(
-                    !ids.contains(&"runhere"),
-                    "{:?} has no command line, so nothing to run here: {ids:?}",
-                    it.kind
-                );
-            }
-            // A full-screen TUI cannot be painted into a preview pane.
-            if it.kind.is_interactive() {
-                assert!(!ids.contains(&"runhere"), "{:?} is interactive: {ids:?}", it.kind);
-            }
+            assert_eq!(
+                ids.contains(&"runhere"),
+                previewable.contains(&it.kind),
+                "{:?} has the wrong run-and-show action: {ids:?}",
+                it.kind
+            );
         }
-        // The specific rows that were wrong, named so they stay fixed.
-        for k in [Kind::Calc, Kind::Translate, Kind::Skill, Kind::Msg] {
-            assert!(!k.is_command_line(), "{k:?} is not a command line");
-        }
-        for k in [Kind::History, Kind::Script, Kind::Port, Kind::Sys] {
-            assert!(k.is_command_line() && !k.is_interactive(), "{k:?} runs");
+        // Results, prose and capability rows are never treated as commands.
+        for k in [Kind::Calc, Kind::Translate, Kind::Skill, Kind::Msg, Kind::Clip] {
+            let it = every_kind_row().into_iter().find(|i| i.kind == k).unwrap();
+            let ids: Vec<&str> = crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+            assert!(!ids.contains(&"run") && !ids.contains(&"runhere"), "{k:?}: {ids:?}");
         }
     }
 
@@ -1042,32 +1077,36 @@ mod tests {
         assert!(!is_protected(&tmp) || tmp.starts_with("/var"), "{}", tmp.display());
     }
 
-    /// The gaps the checklist found, closed. Each is a slot that had no
-    /// answer for one kind while its neighbour answered it.
+    /// High-value management actions stay reachable after pruning the panel;
+    /// a shorter menu must not make files, apps, or MCP servers dead ends.
     #[test]
-    fn the_checklist_gaps_are_closed() {
+    fn important_management_actions_remain_reachable() {
         use crate::item::{Item, Kind};
         let ids = |it: &Item| -> Vec<String> {
             crate::actions::actions_for(it).iter().map(|(i, ..)| i.to_string()).collect()
         };
-        // Slot 9 on a file: a skill could be deleted and a file could not.
+        // Ordinary files can be removed recoverably.
         let f = Item::new("/tmp/x.txt", Kind::File).put("path", "/tmp/x.txt");
         assert!(ids(&f).contains(&"trash".to_string()), "{:?}", ids(&f));
         // …but not on a config: deleting the file your agent is configured
         // by, out of a fuzzy list, is a foot-gun with nothing on the far side.
         let c = Item::new("/x/.claude.json", Kind::Config).put("path", "/x/.claude.json");
         assert!(!ids(&c).contains(&"trash".to_string()), "{:?}", ids(&c));
-        // Slot 5 on an app, which a file two rows away already answered.
+        // Applications can be located and uninstalled recoverably.
         let ap = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
         assert!(ids(&ap).contains(&"reveal-finder".to_string()), "{:?}", ids(&ap));
         assert!(ids(&ap).contains(&"trash".to_string()), "{:?}", ids(&ap));
-        // Slots 3, 3b, 7 and 9 on an MCP server — five of nine were empty.
+        // MCP inspection is the default; auth, installation and removal are alternatives.
         let m = Item::new("codex mcp get n", Kind::Mcp)
             .put("name", "n")
             .put("agent", "codex")
             .put("health", "needsauth");
         let mi = ids(&m);
-        assert!(mi.contains(&"mcptools".to_string()), "what it exposes: {mi:?}");
+        assert_eq!(
+            crate::defaults::describe(&m, crate::defaults::Host::Shell),
+            "Show what it exposes",
+            "inspection is the MCP default, not another action row"
+        );
         assert!(mi.contains(&"mcplogin".to_string()), "not logged in, no way in: {mi:?}");
         assert!(mi.contains(&"mcpremove".to_string()), "{mi:?}");
         assert!(mi.iter().any(|i| i.starts_with("install:") || i == "menu:install"), "{mi:?}");
@@ -1169,7 +1208,7 @@ mod tests {
 
         // Destructive entries come last, never next to the default.
         let first_rm = ids.iter().position(|i| i.starts_with("menu:rm")).unwrap();
-        assert!(first_rm > 2, "delete must not sit near the top: {ids:?}");
+        assert_eq!(first_rm, ids.len() - 1, "delete must be last: {ids:?}");
 
         // One copy is not a choice: a submenu over a single option asks a
         // question with one answer.

@@ -122,57 +122,6 @@ impl Kind {
         }
     }
 
-    /// Is `cmd` something a shell could actually run?
-    ///
-    /// The panel used to append "Run in the shell" to every kind that had
-    /// not already claimed it, which is not a fallback but a bug with a
-    /// fallback's manners: a calculator row is `424.81`, a translation row
-    /// is the translation, and a skill row is `/cnipa-ooa`, which a shell
-    /// answers with "no such file". See `docs/ACTIONS.md`, R3.
-    /// `App`, `Link`, `Dir` and `Mcp` are deliberately absent. Their `cmd` reads
-    /// like a command — `open -a Zed`, `open https://…`, `cd /tmp` — but the
-    /// row denotes an application, a URL and a folder. Enter already launches
-    /// the first two, so "Run in the shell below" was the same action under a
-    /// worse name; and `cd` in a subshell that exits immediately does
-    /// nothing at all. An MCP row's `cmd` is `<agent> mcp get <name>`, and
-    /// the panel has a purpose-built entry for it — `Show what it exposes` —
-    /// so the generic runners were three more ways to say the same thing.
-    pub fn is_command_line(self) -> bool {
-        use Kind::*;
-        matches!(
-            self,
-            History | Script | Path | Snippet | Ssh | Container | Git | Port | Proc | Sys | Clip
-                | Agent | Session
-        )
-    }
-
-    /// Is "ask an agent about this" a sentence that means anything?
-    ///
-    /// It hands over `about this: <the row>`, which is a real question for a
-    /// command you did not write, a port you did not open, or a file you do
-    /// not recognise. It is not one for a row that *is* an agent, a skill, a
-    /// sum, or a translation: `about this: pi` asks claude about the word
-    /// "pi", and the panel offered exactly that.
-    pub fn worth_asking_about(self) -> bool {
-        use Kind::*;
-        matches!(
-            self,
-            History | Script | Path | Sys | Port | Proc | Container | File | Find | Config | Git
-                | Ssh | Snippet | Clip
-        )
-    }
-
-    /// Does running it take over the terminal?
-    ///
-    /// "Run here" renders output inside the launcher, which is right for a
-    /// command that prints and wrong for one that paints: an agent, a
-    /// resumed session, ssh and `docker exec -it` are all full-screen, and
-    /// belong in a real terminal or not at all.
-    pub fn is_interactive(self) -> bool {
-        use Kind::*;
-        matches!(self, Ssh | Agent | Session | Container)
-    }
-
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[

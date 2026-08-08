@@ -43,9 +43,8 @@ pub fn copies_of(it: &Item) -> Vec<(String, String)> {
 ///
 /// Wide enough that a single one clears anything the launcher's own frecency
 /// can add (`MAX_BONUS`, 60), because the two are not the same evidence.
-/// Selecting a skill row in Prelude is usually reading its description,
-/// inserting its name, or lending it somewhere — the row has nine actions
-/// and only one of them runs the thing. Actually invoking it in a
+/// Selecting a skill row in Prelude may mean reading its instructions,
+/// installing it, or preparing a one-off loan. Actually invoking it in a
 /// conversation is the only unambiguous statement that this is a skill you
 /// use, so it decides, and clicks only separate skills you use equally.
 const PER_USE: f64 = 100.0;

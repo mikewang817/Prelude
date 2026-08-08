@@ -226,22 +226,32 @@ pub fn search(paste_target: Option<String>) -> i32 {
         args.push("ctrl-p:toggle-preview".into());
     }
 
-    let out = run_fzf(&feed, args, cols);
-    if out.failed {
-        let msg = out.stderr.trim().lines().last().unwrap_or("").to_string();
-        eprintln!("prelude: fzf could not start{}", if msg.is_empty() { String::new() } else { format!(": {msg}") });
-        return 2;
-    }
-    let Some(item) = out.item else { return 130 };
-
-    match out.key.as_str() {
-        "ctrl-k" => crate::actions::panel(&item, paste_target),
-        "ctrl-x" => {
-            crate::frecency::bump(&item.cmd);
-            emit("RUN", &item.cmd, &paste_target);
-            0
+    loop {
+        let out = run_fzf(&feed, args.clone(), cols);
+        if out.failed {
+            let msg = out.stderr.trim().lines().last().unwrap_or("").to_string();
+            eprintln!("prelude: fzf could not start{}", if msg.is_empty() { String::new() } else { format!(": {msg}") });
+            return 2;
         }
-        _ => apply_default(&item, &paste_target),
+        let Some(item) = out.item else { return 130 };
+
+        match out.key.as_str() {
+            "ctrl-k" => {
+                let code = crate::actions::panel(&item, paste_target.clone());
+                if code == crate::actions::PANEL_BACK {
+                    // ^K is a modal over the list. Esc backs out one level
+                    // instead of closing the launcher entirely.
+                    continue;
+                }
+                return code;
+            }
+            "ctrl-x" => {
+                crate::frecency::bump(&item.cmd);
+                emit("RUN", &item.cmd, &paste_target);
+                return 0;
+            }
+            _ => return apply_default(&item, &paste_target),
+        }
     }
 }
 
@@ -272,7 +282,6 @@ pub fn perform(item: &Item, what: crate::defaults::Default_, paste: &Option<Stri
 
 fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 {
     use crate::defaults::Verb::*;
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     match verb {
         // Opening a file, launching an app and following a link are all
         // harmless and reversible, unlike running a shell command — which is
@@ -338,17 +347,20 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             crate::exec::run(&argv, d);
         }
         Launch | OpenUrl => emit("RUN", &item.cmd, paste),
-        OpenConfig => {
-            let p = first_of(item, &["config", "path", "file"]);
-            emit("RUN", &format!("{editor} {}", shq(&p)), paste);
-        }
         CopyResult => {
             copy(&item.cmd);
             eprintln!("copied: {}", item.cmd);
         }
         ResumeSession => emit("INSERT", &item.cmd, paste),
         RunHere => return crate::runhere::run_item(item),
-        RunInShell => emit("RUN", &item.cmd, paste),
+        RunInShell => {
+            let cmd = if item.kind == Kind::Snippet {
+                fill_placeholders(&item.cmd)
+            } else {
+                item.cmd.clone()
+            };
+            emit("RUN", &cmd, paste);
+        }
         Inspect => {
             let c = if item.kind == Kind::Proc {
                 format!("ps -p {} -o command=", item.get("pid"))

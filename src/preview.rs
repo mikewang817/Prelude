@@ -11,6 +11,12 @@ use crate::item::{Item, Kind};
 use crate::paths::tilde;
 
 pub fn show(it: &Item) {
+    println!("{}", text(it));
+}
+
+/// Render the same detail view as text so the action panel can page it and
+/// then return to the actions instead of closing the launcher.
+pub fn text(it: &Item) -> String {
     let (color, label) = it.kind.style();
     let mut out = vec![format!("{color}{label}{RESET}"), String::new()];
     fn kv(out: &mut Vec<String>, k: &str, v: &str) {
@@ -178,7 +184,7 @@ pub fn show(it: &Item) {
         out.push(format!("{DIM}runs{RESET}"));
         out.push(it.cmd.clone());
     }
-    println!("{}", out.join("\n"));
+    out.join("\n")
 }
 
 fn group(n: u64) -> String {

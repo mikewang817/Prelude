@@ -27,11 +27,32 @@ pub fn run_cmd(cmd: &str) -> i32 {
 }
 
 fn run_in_window(cmd: &str, cwd: Option<&str>) -> i32 {
-    let cmd = cmd.to_string();
+    use std::io::Write;
+    use std::process::Stdio;
 
-    println!("{DIM}$ {RESET}{cmd}\n");
+    let cmd = cmd.to_string();
+    // The zsh widget invokes Prelude inside `$(...)`, so ordinary stdout is
+    // captured as the INSERT/RUN protocol. An action-panel command that
+    // printed an agent's answer there therefore appeared to return nothing.
+    // Write the whole transient view to the controlling terminal instead.
+    let mut terminal = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok();
+    if let Some(t) = terminal.as_mut() {
+        let _ = writeln!(t, "{DIM}$ {RESET}{cmd}\n");
+    } else {
+        println!("{DIM}$ {RESET}{cmd}\n");
+    }
+
     let mut c = std::process::Command::new("sh");
-    c.arg("-c").arg(&cmd);
+    c.arg("-c").arg(&cmd).stdin(Stdio::null());
+    if let Some(t) = terminal.as_ref() {
+        if let (Ok(out), Ok(err)) = (t.try_clone(), t.try_clone()) {
+            c.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+    }
     if let Some(dir) = cwd {
         if std::path::Path::new(dir).is_dir() {
             c.current_dir(dir);
@@ -40,7 +61,11 @@ fn run_in_window(cmd: &str, cwd: Option<&str>) -> i32 {
     let code = match c.status() {
         Ok(s) => s.code().unwrap_or(-1),
         Err(e) => {
-            println!("{YELLOW}failed: {e}{RESET}");
+            if let Some(t) = terminal.as_mut() {
+                let _ = writeln!(t, "{YELLOW}failed: {e}{RESET}");
+            } else {
+                println!("{YELLOW}failed: {e}{RESET}");
+            }
             1
         }
     };
@@ -49,7 +74,11 @@ fn run_in_window(cmd: &str, cwd: Option<&str>) -> i32 {
     } else {
         format!("{RED}exit {code}{RESET}")
     };
-    println!("\n{mark}  {DIM}press any key to go back{RESET}");
+    if let Some(t) = terminal.as_mut() {
+        let _ = writeln!(t, "\n{mark}  {DIM}press any key to go back{RESET}");
+    } else {
+        println!("\n{mark}  {DIM}press any key to go back{RESET}");
+    }
     wait_key();
     0
 }
