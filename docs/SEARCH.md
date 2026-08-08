@@ -42,7 +42,7 @@ row whose displayed text does not contain `c:`.
 | `r:` | running agents, classified live |
 | `s:` | all conversation sessions |
 | `f:` | current-project files and the indexed roots |
-| `c:` | clipboard history |
+| `c:` | text, Finder files and images, strictly newest first |
 | `h:` | shell history |
 | `app:` | applications |
 | `cmd:` | `$PATH` and system commands |

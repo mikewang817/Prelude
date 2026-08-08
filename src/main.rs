@@ -201,7 +201,7 @@ fn main() -> ExitCode {
                 .is_some_and(|i| i.get("mode") == "start" && !i.get("prompt").is_empty());
             let me = exec::shq(&std::env::current_exe().unwrap_or_default().to_string_lossy());
             if ask {
-                println!("change-preview-window(right,55%,wrap,border-left)+preview({me} _ask {{2}})");
+                println!("show-preview+change-preview-window(down,99%,wrap,border-top)+preview({me} _ask {{2}})");
             } else {
                 println!("accept");
             }
@@ -405,9 +405,8 @@ fn bench() -> i32 {
 /// Asking fd 1 alone is not enough: the zsh widget runs us inside `$(...)`,
 /// so stdout is a pipe and the ioctl fails. The fallback then laid every row
 /// out for 100 columns on a 260-column terminal — two thirds of the window
-/// blank — and, because the detail pane is gated on the same number, turned
-/// the pane off as well. Ask the other standard descriptors, then the
-/// controlling terminal itself, before giving up.
+/// blank. Ask the other standard descriptors, then the controlling terminal
+/// itself, before giving up.
 pub fn term_width() -> usize {
     if let Ok(c) = std::env::var("COLUMNS") {
         if let Ok(n) = c.parse::<usize>() {
@@ -550,6 +549,31 @@ mod tests {
         assert!(scoped_rows(Scope::Clipboard, "missing", &all).is_empty());
         let agents = scoped_rows(Scope::Agent, "", &all);
         assert!(agents.iter().all(|i| i.kind != Kind::Session), "sessions have their own s: scope");
+    }
+
+    #[test]
+    fn clipboard_is_strictly_recent_and_preserves_file_objects() {
+        let history = concat!(
+            r#"{"ts":100.0,"kind":"text","t":"older"}"#, "\n",
+            r#"{"ts":101.0,"kind":"text","t":"newer"}"#, "\n",
+        );
+        let clips = crate::sources::user::clips_from(history);
+        assert_eq!(clips.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["newer", "older"]);
+        assert!(clips[0].score - clips[1].score > 60.0,
+                "even the maximum frecency bonus must not reorder clipboard history");
+
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let history = serde_json::json!({
+            "ts": 102.0,
+            "kind": "files",
+            "paths": [path.to_string_lossy()],
+        })
+        .to_string();
+        let files = crate::sources::user::clips_from(&history);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].get("clip_kind"), "files");
+        assert_eq!(files[0].title, "Cargo.toml");
+        assert!(files[0].cmd.contains("Cargo.toml"));
     }
 
     #[test]
@@ -825,17 +849,17 @@ mod tests {
         let file = Item::new("/tmp/readme.md", Kind::File).put("path", "/tmp/readme.md");
         assert_eq!(
             ids(&file),
-            ["secondary", "openwith", "open", "reveal-finder", "copyabs", "openalways", "quicklink-create", "trash"]
+            ["secondary", "openwith", "open", "reveal-finder", "copy-file", "copyabs", "openalways", "quicklink-create", "trash"]
         );
 
         let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
-        assert_eq!(ids(&app), ["reveal-finder", "copy", "insert", "quicklink-create", "trash"]);
+        assert_eq!(ids(&app), ["reveal-finder", "copy-file", "copy", "insert", "quicklink-create", "trash"]);
 
         let link = Item::new("https://example.com", Kind::Link).put("url", "https://example.com");
         assert_eq!(ids(&link), ["secondary", "copy", "quicklink-create"]);
 
         let dir = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
-        assert_eq!(ids(&dir), ["secondary", "insert", "copy", "quicklink-create"]);
+        assert_eq!(ids(&dir), ["secondary", "copy-file", "insert", "copy", "quicklink-create"]);
 
         let linked = Item::new("/tmp/readme.md", Kind::File)
             .put("path", "/tmp/readme.md")
@@ -849,6 +873,11 @@ mod tests {
         let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
         let clip_ids = ids(&clip);
         assert_eq!(clip_ids, ["secondary", "tr_en", "tr_zh"]);
+
+        let image_clip = Item::new("'/tmp/image.png'", Kind::Clip)
+            .put("clip_kind", "image")
+            .put("path", "/tmp/image.png");
+        assert_eq!(ids(&image_clip), ["secondary", "openit", "reveal-finder", "copyabs"]);
         assert!(!clip_ids.iter().any(|id| id == "run" || id == "runhere"));
     }
 

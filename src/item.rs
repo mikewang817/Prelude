@@ -152,7 +152,7 @@ pub struct Item {
     pub fields: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// Kind-specific payload; drives the action panel and the detail pane.
+    /// Kind-specific payload; drives the action panel and Quick Look.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub data: Map,
     #[serde(skip)]

@@ -1,4 +1,4 @@
-//! The detail pane.
+//! Quick Look for the selected item.
 //!
 //! 90% of titles are under 17 columns, so a wide terminal left most of the
 //! panel empty while Chinese skill descriptions were cut at eight characters.
@@ -9,9 +9,117 @@
 use crate::ansi::*;
 use crate::item::{Item, Kind};
 use crate::paths::tilde;
+use std::io::Write;
 
 pub fn show(it: &Item) {
+    if image_path(it).is_some_and(show_image) {
+        return;
+    }
     println!("{}", text(it));
+}
+
+fn image_path(it: &Item) -> Option<&str> {
+    let path = match it.kind {
+        Kind::File | Kind::Find => it.get("path"),
+        Kind::Clip if matches!(it.get("clip_kind"), "image" | "files") => it.get("path"),
+        _ => return None,
+    };
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic"
+            | "heif" | "avif" | "svg"
+    )
+    .then_some(path)
+}
+
+/// Render an image inside fzf's Quick Look area. Chafa gives the best result
+/// and handles animation and scaling; when it is not installed, Ghostty/
+/// Kitty and iTerm still get their native inline-image protocol. Every other
+/// terminal falls back to the ordinary path and metadata view.
+fn show_image(path: &str) -> bool {
+    if !std::path::Path::new(path).is_file() {
+        return false;
+    }
+    let cols = std::env::var("FZF_PREVIEW_COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(80)
+        .saturating_sub(2)
+        .max(1);
+    let rows = std::env::var("FZF_PREVIEW_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(24)
+        .saturating_sub(2)
+        .max(1);
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
+    let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
+
+    if crate::exec::which("chafa").is_some() {
+        let format = if program.contains("iterm") {
+            "iterm"
+        } else if program.contains("ghostty") || term.contains("kitty") {
+            "kitty"
+        } else {
+            "symbols"
+        };
+        if std::process::Command::new("chafa")
+            .args([
+                "--animate=off",
+                "--exact-size=off",
+                "--format", format,
+                "--size", &format!("{cols}x{rows}"),
+                path,
+            ])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return true;
+        }
+    }
+
+    if program.contains("ghostty") || term.contains("kitty") {
+        let encoded = base64(path.as_bytes());
+        print!("\x1b_Ga=T,f=100,t=f,q=2,C=1,c={cols},r={rows};{encoded}\x1b\\");
+        let _ = std::io::stdout().flush();
+        return true;
+    }
+    if program.contains("iterm") {
+        if let Ok(bytes) = std::fs::read(path) {
+            print!(
+                "\x1b]1337;File=inline=1;width={cols};height={rows};preserveAspectRatio=1:{}\x07",
+                base64(&bytes)
+            );
+            let _ = std::io::stdout().flush();
+            return true;
+        }
+    }
+    false
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        out.push(ALPHABET[(a >> 2) as usize] as char);
+        out.push(ALPHABET[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(((b & 15) << 2) | (c >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 { ALPHABET[(c & 63) as usize] as char } else { '=' });
+    }
+    out
 }
 
 /// Render the same detail view as text so the action panel can page it and

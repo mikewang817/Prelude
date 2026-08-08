@@ -311,7 +311,11 @@ fn name(item: &Item, d: Default_) -> &'static str {
         return "Start now";
     }
     if d == Default_::Act(Verb::CopyResult) && item.kind == Kind::Clip {
-        return "Copy text";
+        return match item.get("clip_kind") {
+            "files" => "Copy files",
+            "image" => "Copy image",
+            _ => "Copy text",
+        };
     }
     if d == Default_::InsertText(Text::Name) && item.kind == Kind::Link {
         return "Insert URL";

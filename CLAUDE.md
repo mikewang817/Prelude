@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 42 tests
+cargo test                 # 43 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -54,12 +54,14 @@ and the local work underneath it is free. That is the only shape worth
 optimising for: shaving a source that is not the slowest changes nothing,
 and the profile has to be re-read after every win because the floor moves.
 
-**Two keys: Enter is the primary action, Ctrl+K is the panel.** Raycast has
-a third — the secondary action on its own key — and Prelude keeps the
-action but not the key: where useful, it is the first selectable row below
-Enter's non-selectable header. Neither action is a fixed verb; both are
+**Two action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a mode.**
+Raycast has a third action — the secondary on its own key — and Prelude keeps
+that action but not the key: where useful, it is the first selectable row
+below Enter's non-selectable header. Neither action is a fixed verb; both are
 per-item, and they are opposites — where one acts, the other hands you text.
-A test asserts they never coincide.
+A test asserts they never coincide. Ctrl+P is different: Quick Look replaces
+the result area until Ctrl+P is pressed again, without selecting or acting on
+anything. The preview is hidden by default and never owns a permanent column.
 
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
@@ -110,7 +112,9 @@ anything that cannot be resolved falls through to the subprocess, because
 the failure to avoid is a missing row, not a slow one.
 
 **Never index or transmit credentials.** `secrets.rs` filters history and
-clipboard. Route any new source that reads user data through it.
+text/file clipboard records. Route any new source that reads user data through
+it. Clipboard image bytes stay as private 0600 files under Prelude's own data
+directory; their pixels are not OCRed, indexed or transmitted.
 
 **No hard-coded personal paths.** Everything goes through `paths.rs` and the
 XDG variables. The repository is meant to be publishable.
@@ -153,9 +157,20 @@ fuzzy matches. `{}` in a binding is the *transformed* text, so bindings use
 `{2}` to reach the payload.
 
 **Layout must be computed once and passed down.** The per-keystroke helper
-runs in a separate process. If both sides measure their own widths they
-drift, and computed rows land in a different column. With the detail pane
-showing, measure the *list* width, not the terminal's.
+runs in a separate process. If both sides measure their own widths they drift,
+and computed rows land in a different column. Quick Look is hidden and
+replaces the result area instead of splitting it, so rows are always measured
+against the full terminal width.
+
+**Clipboard is typeful and strictly chronological.** `pbpaste` sees only
+text, so `clipd` keeps one sleeping JXA/AppKit process and watches
+`NSPasteboard.changeCount`. It preserves `NSFilenamesPboardType` lists and
+PNG/TIFF data rather than flattening them into strings. Clipboard timestamps
+are source ranks at a scale wider than the whole frecency bonus: selecting an
+old clipping must never move it above something copied later. Image payloads
+are private, bounded, and removed when their history rows age out. Bump the
+pidfile protocol version whenever an old daemon cannot produce the new record
+format, or upgrades will leave obsolete watchers alive indefinitely.
 
 **Kind decides the band; frecency only orders things inside it.** The two
 questions — *what kind of thing is this* and *how much do you use this one* —

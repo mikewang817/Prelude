@@ -152,25 +152,92 @@ pub fn snippets() -> Vec<Item> {
 }
 
 /// Clipboard history, newest first. Populated by `prelude clipd`.
+///
+/// The timestamp is recorded as the source rank at microsecond scale so the
+/// largest possible frecency bonus cannot lift an old clipping above a newer
+/// one. Clipboard history answers "what did I just copy?", not "what have I
+/// selected most often?".
 pub fn clips() -> Vec<Item> {
     let Ok(text) = std::fs::read_to_string(paths::data().join("clipboard.jsonl")) else {
         return Vec::new();
     };
+    clips_from(&text)
+}
+
+pub(crate) fn clips_from(text: &str) -> Vec<Item> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
     for line in text.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let Some(t) = v.get("t").and_then(|x| x.as_str()) else { continue };
-        if t.is_empty() || !seen.insert(t.to_string()) {
-            continue;
-        }
         let ts = v.get("ts").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        items.push(
-            Item::new(t, Kind::Clip)
-                .title(crate::width::flatten(t))
-                .sub(ago(ts))
-                .put("full", t),
-        );
+        let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("text");
+        let base = match kind {
+            "files" => {
+                let Some(raw) = v.get("paths").and_then(|x| x.as_array()) else { continue };
+                let paths: Vec<String> = raw
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .filter(|p| std::path::Path::new(p).exists() && !crate::secrets::looks_secret(p))
+                    .map(str::to_string)
+                    .collect();
+                if paths.is_empty() {
+                    continue;
+                }
+                let key = format!("files:{}", paths.join("\0"));
+                if !seen.insert(key) {
+                    continue;
+                }
+                let title = if paths.len() == 1 {
+                    std::path::Path::new(&paths[0])
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&paths[0])
+                        .to_string()
+                } else {
+                    format!("{} files", paths.len())
+                };
+                let full = paths.join("\n");
+                let cmd = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
+                Item::new(cmd, Kind::Clip)
+                    .title(crate::width::flatten(&title))
+                    .sub(ago(ts))
+                    .put("clip_kind", "files")
+                    .put("paths", serde_json::to_string(&paths).unwrap_or_default())
+                    .put("path", paths[0].clone())
+                    .put("full", full)
+            }
+            "image" => {
+                let Some(path) = v.get("path").and_then(|x| x.as_str()) else { continue };
+                if crate::clipd::private_asset(path).is_none() || !seen.insert(format!("image:{path}")) {
+                    continue;
+                }
+                let width = v.get("width").and_then(|x| x.as_u64()).unwrap_or(0);
+                let height = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
+                let dimensions = if width > 0 && height > 0 {
+                    format!("{width}×{height}")
+                } else {
+                    String::new()
+                };
+                Item::new(shq(path), Kind::Clip)
+                    .title("Image")
+                    .fields([dimensions, ago(ts)])
+                    .put("clip_kind", "image")
+                    .put("path", path)
+                    .put("full", path)
+            }
+            _ => {
+                let Some(t) = v.get("t").and_then(|x| x.as_str()) else { continue };
+                if t.is_empty() || !seen.insert(format!("text:{t}")) {
+                    continue;
+                }
+                Item::new(t, Kind::Clip)
+                    .title(crate::width::flatten(t))
+                    .sub(ago(ts))
+                    .put("clip_kind", "text")
+                    .put("full", t)
+            }
+        };
+        items.push(base.put("ts", format!("{ts:.3}")).rank(ts * 1_000_000.0));
         if items.len() >= 200 {
             break;
         }

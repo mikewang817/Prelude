@@ -188,8 +188,8 @@ A ten-minute test run never reports as stuck.
 
 **None of that needs tmux.** The backbone is the process list — `ps` for what
 is alive, one bulk `lsof` for where each one is — and the clock is the mtime
-of the conversation file each agent is appending to. The detail pane reads
-that file too, so you can see what an agent last said without going anywhere
+of the conversation file each agent is appending to. Quick Look reads that
+file too, so you can see what an agent last said without going anywhere
 near its terminal:
 
 ```
@@ -373,12 +373,13 @@ Same conversation, borrowed skill available. `s:` finds the session id.
 
 ## Keys
 
-Two, and neither needs anything configured:
+Two action keys, plus one Quick Look mode; none needs terminal configuration:
 
 | Key | Prelude |
 |---|---|
 | `Enter` | The obvious thing for what you selected |
 | `Ctrl+K` | Everything else for this item |
+| `Ctrl+P` | Show or hide Quick Look in the result area |
 | `Esc` | Close |
 
 Ctrl, because Ctrl is what a terminal reliably receives. macOS spends Option
@@ -435,14 +436,18 @@ Keys are spelled out rather than drawn as glyphs. A row of symbols is only
 legible to someone who already knows what they mean.
 
 ```
-⏎ open it               ^K actions   esc close     ← on a file
-⏎ hand it to an agent   ^K actions   esc close     ← on a skill
+Open it  Enter   ·   Actions  Ctrl+K   ·   Preview  Ctrl+P
 ```
 
-A launcher whose header is a row of shortcuts has already failed to have an
-obvious default. `^O` (run here), `^X` (run in the shell), `^Y` (copy) and
-`^P` (detail pane) still work if you learned them; they are simply no longer
-advertised. Their useful item-specific equivalents are named in `^K`.
+Quick Look is not a permanent second column. The list uses the full window;
+`Ctrl+P` replaces only the result area with the selected item's detail, and
+pressing it again returns to the list. This keeps long rows searchable and
+gives images enough room without sacrificing half the launcher when no
+preview is needed.
+
+`^O` (run here), `^X` (run in the shell) and `^Y` (copy) remain compatibility
+shortcuts for anyone who learned them. Their useful item-specific equivalents
+are named in `^K`.
 
 Open the launcher itself with `^R`.
 
@@ -485,7 +490,7 @@ rules that keep computed rows from being filtered out by fzf.
 | **Sessions** | `s:` | Conversations from Claude Code, Codex and pi |
 | **Project** | `proj:` | Scripts from `package.json`, Makefile, justfile, Cargo, Python and Compose; current files and Git |
 | **Files** | `f:` | The current project, plus the roots built by `prelude index` |
-| **Clipboard** | `c:` | The last things you copied |
+| **Clipboard** | `c:` | Text, Finder files and images, strictly newest first |
 | **History** | `h:` | Deduped, newest first |
 | **Apps** | `app:` | Every installed `.app` |
 | **Commands** | `cmd:` | `$PATH` executables and system commands |
@@ -495,6 +500,12 @@ rules that keep computed rows from being filtered out by fzf.
 | **Ports / processes** | `port:` / `proc:` | Listening TCP ports and the heaviest processes |
 | **Containers** | `docker:` | Running Docker containers |
 | **MCP / config** | `mcp:` / `cfg:` | Agent integrations and settings |
+
+Clipboard history is chronological rather than frecent: the thing copied most
+recently is always first. Text is retained as text; one or several files remain
+Finder file objects; screenshots and copied bitmap data remain images. Enter
+inserts text or shell-quoted paths, while `Ctrl+K` can restore the original
+file/image object to the system clipboard. `Ctrl+P` renders images in place.
 
 Plus rows computed from what you type: web addresses, arithmetic, unit and
 currency conversion, date arithmetic, on-device translation, and quicklinks.
@@ -558,7 +569,8 @@ gh prelude          → GitHub search
 | **running agent** | Send a message… · Show last response · Go to pane full-screen · **End agent…** |
 | **skill** | Run with claude · Prepare one-off run with pi · Install in pi · Read instructions · Open SKILL.md in editor · **Delete a copy…** |
 | **mcp** | Prepare one-off use with codex · Insert install command · Insert login command · **Insert remove command…** |
-| **file** | Open with… · Open in editor · Reveal in Finder · Copy path · Create Quicklink… · Change default app… · **Move it to the Trash…** |
+| **file** | Open with… · Open in editor · Reveal in Finder · Copy file · Copy path · Create Quicklink… · Change default app… · **Move it to the Trash…** |
+| **clipboard file / image** | Restore the original clipboard object · Open · Reveal in Finder · Copy path |
 | **port / process** | Copy PID · **Kill process…** |
 | **container** | Insert follow-logs command · Insert restart command · **Insert stop command** |
 
@@ -844,8 +856,7 @@ run for themselves.
 | `PRELUDE_KEY='^T'` | Change the hotkey (default `^R`) |
 | `PRELUDE_HEIGHT=80%` | How much of the terminal the inline view uses |
 | `PRELUDE_NO_POPUP=1` | Never open a tmux popup; render inline |
-| `PRELUDE_PREVIEW_MIN=150` | Terminal width at which the detail pane appears |
-| `PRELUDE_NO_PREVIEW=1` | Never show the detail pane |
+| `PRELUDE_NO_PREVIEW=1` | Disable `Ctrl+P` Quick Look |
 | `PRELUDE_DEBUG=1` | Report source failures and fzf fallbacks on stderr |
 
 Files, all under the usual XDG locations:
@@ -856,7 +867,8 @@ Files, all under the usual XDG locations:
 | `$XDG_CONFIG_HOME/prelude/quicklinks.toml` | Your quicklinks |
 | `$XDG_CONFIG_HOME/prelude/roots.txt` | Which folders `f:` indexes |
 | `$XDG_DATA_HOME/prelude/frecency.tsv` | What you pick, so it learns |
-| `$XDG_DATA_HOME/prelude/clipboard.jsonl` | Clipboard history |
+| `$XDG_DATA_HOME/prelude/clipboard.jsonl` | Clipboard history metadata |
+| `$XDG_DATA_HOME/prelude/clipboard/` | Private image payloads retained by clipboard history |
 | `$XDG_DATA_HOME/prelude/bus/` | Questions agents are waiting on — data, not cache, because an unanswered question must survive a cleared cache |
 | `$XDG_CACHE_HOME/prelude/` | Source caches |
 
@@ -883,7 +895,10 @@ fine for casual text but unreliable for legal or technical register.
 
 **macOS only, for now.** The core is portable, but ports, processes, apps,
 clipboard, the system commands and translation all use macOS-specific
-interfaces. Linux support is welcome but not present.
+interfaces. Clipboard history reads `NSPasteboard`, so copied Finder objects
+remain real files and images rather than being flattened into path text.
+Images use Chafa when available, then Ghostty/Kitty or iTerm's native inline
+protocol. Linux support is welcome but not present.
 
 ## Notes on the awkward parts
 

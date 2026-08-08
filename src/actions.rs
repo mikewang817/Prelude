@@ -292,9 +292,19 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             v
         }
         Kind::File | Kind::Find => open_actions(it.kind, it.get("path"), &editor),
-        // Enter pastes it and the secondary puts it back on the clipboard,
-        // both stated above. What is left is the thing you cannot get any
-        // other way: reading it in a language you have.
+        // Enter inserts the payload path(s); the secondary restores the
+        // original pasteboard object. Object clips also get Finder verbs,
+        // while only actual text can be translated.
+        Kind::Clip if it.get("clip_kind") == "files" => vec![
+            a("openit", "Open first file", it.get("path")),
+            a("reveal-finder", "Reveal first file in Finder", it.get("path")),
+            a("copyabs", "Copy paths as text", it.get("full")),
+        ],
+        Kind::Clip if it.get("clip_kind") == "image" => vec![
+            a("openit", "Open image", it.get("path")),
+            a("reveal-finder", "Reveal image in Finder", it.get("path")),
+            a("copyabs", "Copy image path", it.get("path")),
+        ],
         Kind::Clip => vec![
             a("tr_en", "Translate to English", ""),
             a("tr_zh", "Translate to Chinese", ""),
@@ -324,16 +334,19 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         // uninstall on this platform.
         Kind::App => vec![
             a("reveal-finder", "Reveal in Finder", it.get("path")),
+            a("copy-file", "Copy application", it.get("path")),
             a("copy", "Copy application path", it.get("path")),
             a("insert", "Insert open command", &it.cmd),
             a("trash", "Move to Trash…", "uninstalls it, recoverably"),
         ],
         Kind::Dir if host == crate::defaults::Host::Agent => vec![
             a("openit", "Open locally in Finder", it.get("path")),
+            a("copy-file", "Copy folder", it.get("path")),
             a("insert", "Insert cd command", &it.cmd),
             a("copy", "Copy path", it.get("path")),
         ],
         Kind::Dir => vec![
+            a("copy-file", "Copy folder", it.get("path")),
             a("insert", "Insert cd command", &it.cmd),
             a("copy", "Copy path", it.get("path")),
         ],
@@ -493,6 +506,7 @@ fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
         }),
         a("open", "Open in editor", editor),
         a("reveal-finder", "Reveal in Finder", parent_of(path)),
+        a("copy-file", "Copy file", path),
         a("copyabs", "Copy path", path),
         (leak("openalways".into()), format!("Change default app for {scope}…"), "used next time".into()),
     ];
@@ -606,7 +620,7 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
 }
 
 fn stays_in_panel(id: &str) -> bool {
-    matches!(id, "copy" | "copyabs" | "desc" | "details" | "mcptools")
+    matches!(id, "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools")
 }
 
 pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
@@ -633,7 +647,17 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "runhere" => return crate::runhere::run_item(it),
         "details" => show_details(it),
         "copy" => ui::copy(&copy_text(it)),
-        "copyabs" => ui::copy(it.get("path")),
+        "copyabs" => ui::copy(if it.kind == Kind::Clip { it.get("full") } else { it.get("path") }),
+        "copy-file" => {
+            let path = first_nonempty(it, &["path", "file", "dir"]);
+            match crate::clipd::copy_files(&[path]) {
+                Ok(()) => ui::note("copied as a Finder object", paste),
+                Err(e) => {
+                    ui::note(&e, paste);
+                    return 2;
+                }
+            }
+        }
         "cd" => ui::emit("INSERT", &format!("cd {}", shq(it.cwd.as_deref().unwrap_or(""))), paste),
         "here" => ui::emit("INSERT", it.cmd.split_once(' ').map(|(_, r)| r).unwrap_or(&it.cmd), paste),
         "inspect" => {

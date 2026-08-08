@@ -8,27 +8,25 @@ use crate::render::{self, SEP};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Two keys. Enter does the obvious thing, ^K reaches everything else, esc
-/// leaves. The old ^O/^X/^Y/^P still work for anyone who learned them, they
-/// are simply no longer advertised — a launcher whose header is a row of
-/// shortcuts has already failed to have an obvious default.
+/// Enter does the obvious thing, ^K reaches every alternative, ^P briefly
+/// replaces the list with Quick Look, and esc leaves. Preview earns a place
+/// in the footer because it is a mode rather than an item action: it does not
+/// belong in ^K, and a hidden one-key view is not discoverable.
 ///
-/// The footer says what the action is, then the key that runs it, along the
-/// bottom of the panel. Keys are spelled out rather than drawn as glyphs — a
-/// row of symbols is only legible to someone who already knows what they
-/// mean. And since Enter does something different per item, the row has to
-/// say which.
+/// Keys are spelled out rather than drawn as glyphs — a row of symbols is
+/// only legible to someone who already knows what they mean. And since Enter
+/// does something different per item, the row has to say which.
 pub fn footer_for(primary: &str) -> String {
     let sep = format!("{DIM}   ·   {RESET}");
-    [
+    let mut parts = vec![
         format!("{primary}{DIM}  Enter{RESET}"),
         format!("Actions{DIM}  Ctrl+K{RESET}"),
-    ]
-    .join(&sep)
+    ];
+    if !env_flag("PRELUDE_NO_PREVIEW") {
+        parts.push(format!("Preview{DIM}  Ctrl+P{RESET}"));
+    }
+    parts.join(&sep)
 }
-
-/// Share of the width the list keeps when the detail pane is showing.
-const PREVIEW_LIST_PCT: usize = 55;
 
 /// The prefix language, stated once, where it cannot be missed.
 ///
@@ -162,13 +160,12 @@ pub fn search(paste_target: Option<String>) -> i32 {
         return 2;
     }
     let term = crate::term_width();
-    // Only on terminals wide enough that the list doesn't get cramped.
-    let preview_min: usize = std::env::var("PRELUDE_PREVIEW_MIN").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(150);
-    let preview = term >= preview_min && !env_flag("PRELUDE_NO_PREVIEW");
-    // Lay out against the *list* width, not the terminal's. With a detail
-    // pane taking 45%, measuring the whole terminal overflows every row.
-    let cols = if preview { term * PREVIEW_LIST_PCT / 100 } else { term };
+    let preview = !env_flag("PRELUDE_NO_PREVIEW");
+    // Quick Look is hidden until requested and replaces the result area
+    // rather than taking a permanent right-hand column. The list therefore
+    // owns the full width at all times; laying it out for a pane that is not
+    // there threw almost half of a wide terminal away.
+    let cols = term;
 
     // Compute the layout once and hand it to the per-keystroke helper. Both
     // sides must agree; if each measured its own, computed rows would land
@@ -232,7 +229,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
         args.push("--preview".into());
         args.push(format!("{} _preview {{2}}", shq(&me)));
         args.push("--preview-window".into());
-        args.push(format!("right,{}%,wrap,border-left", 100 - PREVIEW_LIST_PCT));
+        args.push("down,99%,wrap,border-top,hidden".into());
         args.push("--bind".into());
         args.push("ctrl-p:toggle-preview".into());
     }
@@ -380,8 +377,16 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             }
         }
         CopyResult => {
-            copy(&item.cmd);
-            eprintln!("copied: {}", item.cmd);
+            if item.kind == Kind::Clip && item.get("clip_kind") != "text" {
+                if let Err(e) = crate::clipd::restore(item) {
+                    note(&e, paste);
+                    return 2;
+                }
+                eprintln!("restored to clipboard: {}", item.title);
+            } else {
+                copy(if item.kind == Kind::Clip { item.get("full") } else { &item.cmd });
+                eprintln!("copied: {}", item.title);
+            }
         }
         ResumeSession => emit("INSERT", &item.cmd, paste),
         RunHere => return crate::runhere::run_item(item),

@@ -221,11 +221,13 @@ entry. Agent TUIs, SSH and interactive containers do not.
 These stay intentionally short:
 
 - Link: Enter opens the default browser directly; the panel inserts or copies the URL.
-- Directory: Enter opens Finder; the panel inserts `cd`, inserts the path, or copies it.
+- Directory: Enter opens Finder; the panel copies the Finder object, inserts `cd`, or copies the path.
 - Files, folders, links, configs and applications can create a Quicklink.
+- Files, folders and applications can be copied as real Finder objects, separately from copying path text.
 - Calculator: insert or copy the result.
 - Translation: insert the translation or copy its source.
-- Clipboard: copy or insert the text, and translate it locally.
+- Clipboard text: copy or insert it, and translate it locally.
+- Clipboard files/images: insert their path(s), restore the original pasteboard object, open or reveal it.
 
 A two-line action panel is an honest result, not a gap to fill.
 
@@ -253,7 +255,7 @@ rewritten by Prelude.
 | `actions.rs::panel` | modal loop, submenus, header and stay/close behavior |
 | `actions.rs::is_destructive` | danger styling and last-position invariant |
 | `ui.rs::confirm` | confirmation with Cancel first |
-| `preview.rs::text` | reusable detail text for preview and action views |
+| `preview.rs` | full-area Quick Look text and image rendering; reusable detail text for action views |
 
 `prelude _actions '<row json>'` prints a shell-host panel without opening fzf.
 Tests pin the important invariants and representative category menus.
