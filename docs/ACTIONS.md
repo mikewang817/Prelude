@@ -151,10 +151,14 @@ unlinks the file.
 - Run with an owner agent
 - Prepare a one-off borrowed run
 - Install into another agent
+- Compare divergent copies with a recursive, read-only Diff
+- Replace one divergent copy from another only after showing that Diff; the old target moves to the Trash
 - Read the instructions
 - Open `SKILL.md` in the editor
 - Delete a copy, recoverably
 
+Replacement re-hashes source and target and refuses if either changed after
+the comparison. A source with credential-like material is never copied.
 Agent choices use a submenu. A submenu with one possible target is collapsed
 into a direct action.
 
@@ -167,12 +171,19 @@ Alternatives are:
 
 - Prepare one-off use with another supported agent
 - Insert an install command for review
+- Compare redacted definitions when several Agents own the same server
+- Prepare a remove-and-install replacement command only after showing that comparison
 - Insert a login command when authentication is required
 - Open the owning configuration when one exists
 - Copy the server name
 - Insert a remove command
 
-Definitions containing credentials are never put on a command line.
+Complete MCP definitions are never retained in an Item or cache. Definition
+fingerprints omit env/header values and credential-bearing arguments. A
+replacement command is inserted for review, never run automatically, and is
+refused when the source cannot be represented without private fields.
+Account-hosted servers without a transferable local definition offer no
+borrow, install or replacement action.
 
 ### File and config
 

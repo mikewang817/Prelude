@@ -26,6 +26,23 @@ pub fn run_cmd(cmd: &str) -> i32 {
     run_in_window(cmd, None)
 }
 
+pub fn show_text(title: &str, lines: &[String]) -> i32 {
+    use std::io::Write;
+    let mut terminal = std::fs::OpenOptions::new()
+        .read(true).write(true).open("/dev/tty").ok();
+    if let Some(output) = terminal.as_mut() {
+        let _ = writeln!(output, "{CYAN}{title}{RESET}\n");
+        for line in lines { let _ = writeln!(output, "{line}"); }
+        let _ = writeln!(output, "\n{DIM}press any key to go back{RESET}");
+    } else {
+        println!("{CYAN}{title}{RESET}\n");
+        for line in lines { println!("{line}"); }
+        println!("\n{DIM}press any key to go back{RESET}");
+    }
+    wait_key();
+    0
+}
+
 fn run_in_window(cmd: &str, cwd: Option<&str>) -> i32 {
     use std::io::Write;
     use std::process::Stdio;

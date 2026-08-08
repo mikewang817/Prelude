@@ -76,11 +76,21 @@ pub fn run() -> i32 {
         }
     }
 
-    let skills = items.iter().filter(|i| i.kind == Kind::Skill).count();
-    let mcps: Vec<&str> = items.iter().filter(|i| i.kind == Kind::Mcp).map(|i| i.title.as_str()).collect();
+    let skill_rows: Vec<&crate::item::Item> = items.iter().filter(|i| i.kind == Kind::Skill).collect();
+    let skills = skill_rows.len();
+    let divergent = skill_rows.iter().filter(|skill| skill.get("integrity") == "divergent").count();
+    let unknown = skill_rows.iter().filter(|skill| skill.get("integrity") == "unknown").count();
+    let sensitive = skill_rows.iter().flat_map(|skill| crate::capability::copies(skill))
+        .filter(|copy| copy.sensitive_files > 0).count();
+    let mcp_rows: Vec<&crate::item::Item> = items.iter().filter(|i| i.kind == Kind::Mcp).collect();
+    let mcps: Vec<&str> = mcp_rows.iter().map(|i| i.title.as_str()).collect();
+    let unhealthy = mcp_rows.iter().filter(|server| server.get("health") != "ok").count();
+    let private = mcp_rows.iter().filter(|server| server.get("sensitive") == "true").count();
     println!("\n  {CYAN}agents{RESET}");
-    println!("    {DIM}skills:{RESET} {skills} unique");
+    println!("    {DIM}skills:{RESET} {skills} unique · {divergent} divergent · {unknown} unhashed");
+    println!("    {DIM}skill privacy:{RESET} {sensitive} copies contain redacted credential-like lines");
     println!("    {DIM}mcp servers:{RESET} {}", if mcps.is_empty() { "none".into() } else { mcps.join("  ") });
+    println!("    {DIM}mcp health:{RESET} {unhealthy} need attention · {private} definitions keep private fields out of cache");
     let clis: Vec<&str> = ["claude", "codex", "pi", "cursor-agent", "opencode", "gemini"]
         .iter().copied().filter(|c| which(c).is_some()).collect();
     println!("    {DIM}CLIs on PATH:{RESET} {}", clis.join("  "));

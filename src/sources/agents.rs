@@ -32,6 +32,7 @@ struct Skill {
     /// that silently took one of them would leave the row on screen and look
     /// like it had failed.
     copies: Vec<(&'static str, String)>,
+    copy_info: Vec<crate::capability::SkillCopy>,
 }
 
 /// Where each agent keeps its copy of a skill, off the row.
@@ -85,6 +86,11 @@ pub fn skills() -> Vec<Item> {
 /// keeps a gather from parsing it once for the skills, once for the agent
 /// summary, and once again for the recent list.
 pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
+    let hashes: std::collections::HashMap<String, crate::capability::SkillCopy> =
+        crate::cache::read_cached("skill-hashes")
+            .iter()
+            .map(|item| (item.get("dir").to_string(), crate::capability::copy_from_item(item)))
+            .collect();
     let mut merged: BTreeMap<String, Skill> = BTreeMap::new();
     for (dir, agent) in skill_dirs() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -111,7 +117,11 @@ pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
             if rec.desc.is_empty() && !desc.is_empty() {
                 rec.desc = desc;
             }
-            rec.copies.push((agent, sub.to_string_lossy().into_owned()));
+            let sub_path = sub.to_string_lossy().into_owned();
+            rec.copies.push((agent, sub_path.clone()));
+            rec.copy_info.push(hashes.get(&sub_path).cloned().unwrap_or_else(|| {
+                crate::capability::SkillCopy { agent: agent.into(), dir: sub_path, ..Default::default() }
+            }));
             if rec.file.is_empty() {
                 if let Some(p) = &md {
                     rec.file = p.to_string_lossy().into_owned();
@@ -133,11 +143,40 @@ pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
             };
             let agents = rec.agents.join(", ");
             let missing = missing_agents(&agents);
-            let gap = if missing.is_empty() {
-                String::new()
+            let known: Vec<&str> = rec.copy_info.iter()
+                .map(|copy| copy.fingerprint.as_str())
+                .filter(|hash| !hash.is_empty())
+                .collect();
+            let unique: std::collections::BTreeSet<&str> = known.iter().copied().collect();
+            let integrity = if known.len() != rec.copy_info.len() {
+                "unknown"
+            } else if rec.copy_info.len() <= 1 {
+                "single"
+            } else if rec.copy_info.iter().any(|copy| copy.sensitive_files > 0) {
+                "private-unknown"
+            } else if unique.len() == 1 {
+                "identical"
             } else {
-                format!("missing: {}", missing.join(", "))
+                "divergent"
             };
+            let mut notes = Vec::new();
+            if integrity == "divergent" {
+                notes.push("divergent copies".to_string());
+            } else if integrity == "private-unknown" {
+                notes.push("private lines omitted".to_string());
+            }
+            if !missing.is_empty() {
+                notes.push(format!("missing: {}", missing.join(", ")));
+            }
+            let gap = notes.join(" · ");
+            let fingerprint = if unique.len() == 1 {
+                unique.iter().next().copied().unwrap_or("")
+            } else {
+                ""
+            };
+            let source_sensitive = rec.copy_info.iter()
+                .find(|copy| copy.dir == rec.dir)
+                .is_some_and(|copy| copy.sensitive_files > 0);
             Item::new(format!("/{name}"), Kind::Skill)
                 .rank(usage_rank(times, last))
                 .title(&name)
@@ -148,9 +187,47 @@ pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
                 .put("dir", rec.dir)
                 .put("file", rec.file)
                 .put("copies", serde_json::to_string(&rec.copies).unwrap_or_default())
+                .put("copy_info", serde_json::to_string(&rec.copy_info).unwrap_or_default())
+                .put("integrity", integrity)
+                .put("fingerprint", fingerprint)
+                .put("source_sensitive", source_sensitive.to_string())
                 .put("desc", rec.desc)
         })
         .collect()
+}
+
+/// Full Skill-tree fingerprints. This is a background cache source: scripts,
+/// references and symlinks are part of a capability, so hashing only
+/// `SKILL.md` would call divergent copies identical.
+pub fn skill_hashes() -> Vec<Item> {
+    let previous: std::collections::HashMap<String, crate::capability::SkillCopy> =
+        crate::cache::read_cached("skill-hashes").iter()
+            .map(|item| (item.get("dir").to_string(), crate::capability::copy_from_item(item)))
+            .collect();
+    let mut out = Vec::new();
+    for (root, agent) in skill_dirs() {
+        let Ok(entries) = std::fs::read_dir(root) else { continue };
+        let mut dirs: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        dirs.sort();
+        for dir in dirs.into_iter().filter(|dir| {
+            dir.is_dir() && !dir.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        }) {
+            let path = dir.to_string_lossy().into_owned();
+            let stamp = crate::capability::skill_stamp(&dir);
+            let copy = match previous.get(&path).filter(|copy| {
+                !stamp.is_empty() && copy.stamp == stamp && !copy.fingerprint.is_empty()
+            }) {
+                Some(copy) => copy.clone(),
+                None => {
+                    let mut copy = crate::capability::hash_skill(agent, &dir);
+                    copy.stamp = stamp;
+                    copy
+                }
+            };
+            out.push(crate::capability::cache_item(&copy));
+        }
+    }
+    out
 }
 
 /// Remove a skill, recoverably.
@@ -172,6 +249,47 @@ pub fn skills_with(sessions: &[Item]) -> Vec<Item> {
 ///
 /// **One copy at a time.** The caller names the agent, so deleting a skill
 /// shared by four of them is four decisions, not one.
+pub fn sync_skill(
+    from: &str,
+    to: &str,
+    expected_source: &str,
+    expected_target: &str,
+) -> Result<std::path::PathBuf, String> {
+    let source = std::path::Path::new(from);
+    let target = std::path::Path::new(to);
+    if source == target || !is_skill_dir(source) || !is_skill_dir(target) {
+        return Err("both source and target must be distinct installed Skill directories".into());
+    }
+    let source_hash = crate::capability::hash_skill("source", source);
+    let target_hash = crate::capability::hash_skill("target", target);
+    if source_hash.fingerprint.is_empty() || target_hash.fingerprint.is_empty() {
+        return Err("one of those Skill copies could not be read completely".into());
+    }
+    if source_hash.sensitive_files > 0 {
+        return Err("the source contains credential-like material; refusing to copy it".into());
+    }
+    if source_hash.fingerprint != expected_source || target_hash.fingerprint != expected_target {
+        return Err("a Skill copy changed after the comparison; compare again".into());
+    }
+    if source_hash.fingerprint == target_hash.fingerprint {
+        return Err("those Skill copies are already identical".into());
+    }
+    let trashed = crate::paths::trash(target)?;
+    if let Err(error) = copy_tree(source, target) {
+        // A failed recursive copy must not leave a half-Skill looking
+        // installed. It too goes to the Trash; the original target is still
+        // recoverable at `trashed`.
+        if target.exists() {
+            let _ = crate::paths::trash(target);
+        }
+        return Err(format!(
+            "copy failed: {error}; the previous target is safe at {}",
+            crate::paths::tilde(&trashed.to_string_lossy())
+        ));
+    }
+    Ok(trashed)
+}
+
 pub fn delete_skill(dir: &str) -> Result<std::path::PathBuf, String> {
     let path = std::path::Path::new(dir);
     if !is_skill_dir(path) {
@@ -241,6 +359,7 @@ pub fn mcp() -> Vec<Item> {
     let mut items = Vec::new();
     mcp_claude(&mut items);
     mcp_codex(&mut items);
+    enrich_mcp_matrix(&mut items);
     items
 }
 
@@ -274,13 +393,28 @@ impl Health {
     }
 }
 
+pub(crate) fn safe_mcp_detail(detail: &str) -> String {
+    let credential_url = detail.split_once("://").is_some_and(|(_, rest)| {
+        rest.split('/').next().is_some_and(|authority| authority.contains('@'))
+    });
+    if credential_url || crate::secrets::looks_secret(detail) {
+        "private target omitted".into()
+    } else {
+        detail.to_string()
+    }
+}
+
 fn mcp_item(agent: &str, name: &str, detail: &str, health: Health) -> Item {
+    let detail = safe_mcp_detail(detail);
     Item::new(format!("{agent} mcp get {}", shq(name)), Kind::Mcp)
         .title(name)
-        .fields([agent.to_string(), health.label().to_string(), detail.to_string()])
+        .fields([agent.to_string(), health.label().to_string(), detail.clone()])
         .put("agent", agent)
         .put("name", name)
         .put("health", health.key())
+        .put("portable", "false")
+        .put("definition_hash", crate::capability::fingerprint(detail.as_bytes()))
+        .put("definition_source", "display")
 }
 
 /// `claude mcp list` prints `<name>: <target> - <status>` per server.
@@ -292,7 +426,7 @@ fn mcp_claude(out: &mut Vec<Item>) {
     for line in text.lines() {
         let line = line.trim();
         let Some((name, rest)) = line.split_once(": ") else { continue };
-        if name.is_empty() || name.contains("Checking") {
+        if name.is_empty() || name.contains("Checking") || crate::secrets::looks_secret(name) {
             continue;
         }
         let (target, status) = match rest.rsplit_once(" - ") {
@@ -309,7 +443,10 @@ fn mcp_claude(out: &mut Vec<Item>) {
         } else {
             Health::Failed
         };
-        out.push(mcp_item("claude", name, target, health));
+        // claude.ai-hosted servers expose a display URL but their account
+        // credentials are not a transferable local definition.
+        let portable = !name.starts_with("claude.ai ");
+        out.push(mcp_item("claude", name, target, health).put("portable", portable.to_string()));
     }
 }
 
@@ -322,7 +459,7 @@ fn mcp_codex(out: &mut Vec<Item>) {
     let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return };
     for s in list {
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if name.is_empty() {
+        if name.is_empty() || crate::secrets::looks_secret(name) {
             continue;
         }
         let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -351,11 +488,74 @@ fn mcp_codex(out: &mut Vec<Item>) {
         // here — the alternative is a second `mcp get` per server at the
         // moment someone asks, on a path that has to feel instant.
         if let Some(def) = tr.and_then(|t| crate::lend::Mcp::from_codex(name, t)) {
-            if let Ok(j) = serde_json::to_string(&def) {
-                it = it.put("def", j);
-            }
+            let sensitive = def.has_sensitive_fields();
+            it = it
+                .put("portable", "true")
+                .put("definition_hash", def.public_fingerprint())
+                .put("definition_source", "semantic")
+                .put("sensitive", sensitive.to_string());
+            // Complete definitions never enter an Item or cache. Even a
+            // currently plain argument can become a credential after an
+            // Agent upgrade; resolve from the owner CLI on explicit action.
         }
         out.push(it);
+    }
+}
+
+fn enrich_mcp_matrix(items: &mut [Item]) {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        groups.entry(item.get("name").to_lowercase()).or_default().push(index);
+    }
+    let installed: Vec<&str> = super::sessions::installed()
+        .into_iter()
+        .filter(|agent| matches!(*agent, "claude" | "codex"))
+        .collect();
+    for (name, indexes) in groups {
+        let variants: Vec<crate::capability::McpVariant> = indexes.iter().map(|index| {
+            let item = &items[*index];
+            crate::capability::McpVariant {
+                agent: item.get("agent").to_string(),
+                health: item.get("health").to_string(),
+                summary: item.fields.get(2).cloned().unwrap_or_default(),
+                fingerprint: item.get("definition_hash").to_string(),
+                source: item.get("definition_source").to_string(),
+                sensitive: item.get("sensitive") == "true",
+                portable: item.get("portable") == "true",
+            }
+        }).collect();
+        let owners: Vec<String> = variants.iter().map(|variant| variant.agent.clone()).collect();
+        let missing: Vec<&str> = installed.iter().copied()
+            .filter(|agent| !owners.iter().any(|owner| owner == agent))
+            .collect();
+        let sources: std::collections::BTreeSet<&str> = variants.iter()
+            .map(|variant| variant.source.as_str()).filter(|source| !source.is_empty()).collect();
+        let hashes: std::collections::BTreeSet<&str> = variants.iter()
+            .map(|variant| variant.fingerprint.as_str()).filter(|hash| !hash.is_empty()).collect();
+        let known = variants.iter().filter(|variant| !variant.fingerprint.is_empty()).count();
+        let comparison = if variants.len() == 1 {
+            "single"
+        } else if known != variants.len() {
+            "unknown"
+        } else if sources.len() != 1 {
+            "incomparable"
+        } else if hashes.len() == 1 && variants.iter().any(|variant| variant.sensitive) {
+            "private-unknown"
+        } else if hashes.len() == 1 {
+            "identical"
+        } else {
+            "divergent"
+        };
+        let variants_json = serde_json::to_string(&variants).unwrap_or_default();
+        let owners_json = serde_json::to_string(&owners).unwrap_or_default();
+        let missing_json = serde_json::to_string(&missing).unwrap_or_default();
+        for index in indexes {
+            items[index].data.insert("capability_id".into(), format!("mcp:{name}"));
+            items[index].data.insert("owners".into(), owners_json.clone());
+            items[index].data.insert("missing_agents".into(), missing_json.clone());
+            items[index].data.insert("variants".into(), variants_json.clone());
+            items[index].data.insert("comparison".into(), comparison.into());
+        }
     }
 }
 
@@ -387,8 +587,16 @@ pub fn copy_skill(from_dir: &str, agent: &str, name: &str) -> Result<String, Str
     if dest.exists() {
         return Err(format!("{agent} already has {name}"));
     }
+    let source = std::path::Path::new(from_dir);
+    let scan = crate::capability::hash_skill("source", source);
+    if scan.fingerprint.is_empty() {
+        return Err("the Skill could not be read completely".into());
+    }
+    if scan.sensitive_files > 0 {
+        return Err("the Skill contains credential-like material; refusing to copy it".into());
+    }
     std::fs::create_dir_all(&dest_root).map_err(|e| e.to_string())?;
-    copy_tree(std::path::Path::new(from_dir), &dest).map_err(|e| e.to_string())?;
+    copy_tree(source, &dest).map_err(|e| e.to_string())?;
     Ok(crate::paths::tilde(&dest.to_string_lossy()))
 }
 
@@ -396,6 +604,9 @@ pub fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resul
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
+        if crate::capability::ignored_path(&e.path()) {
+            continue;
+        }
         let to = dst.join(e.file_name());
         if e.path().is_dir() {
             copy_tree(&e.path(), &to)?;

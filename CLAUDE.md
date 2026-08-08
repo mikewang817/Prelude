@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 50 tests
+cargo test                 # 54 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -353,7 +353,14 @@ including a run first seen already quiet.
 
 MCP status is asked of each agent (`claude mcp list`, `codex mcp list
 --json`), never read from config files — the config misses claude.ai-hosted
-servers entirely and cannot report whether anything works.
+servers entirely and cannot report whether anything works. Complete MCP
+definitions must never survive in an Item or cache: command arguments, env,
+headers and even URLs can hold credentials. Cache only a redacted semantic
+fingerprint and display summary; `lend::resolve` asks the owner CLI again on
+an explicit action. Account-hosted servers with no local definition are
+`portable=false` and must expose no borrow/install target. `privacy_migrations`
+scrubs old MCP and derived search caches once. Prelude's 0600 `borrow/` staging files are the deliberate
+exception and are never search input.
 
 Each agent has its own invocation syntax. `opencode` needs a subcommand
 where the others take a prompt positionally; `codex exec` refuses to run
@@ -381,6 +388,22 @@ directory, `$HOME`, `/`, `/etc` and a traversal. The panel offers one entry
 per agent that has a copy (`copies_of`), because a skill merged across four
 agents is four directories behind one row — `dir` is only ever the first one
 found, which is all borrowing needed and not enough to delete with.
+
+**Capability identity belongs behind the cache tier.** `capability.rs`
+fingerprints every effective Skill file except VCS metadata, treating
+symlinks as links rather than following them. Credential-like paths and lines
+contribute only a redaction marker. Full-tree hashing runs in the
+`skill-hashes` background source; unchanged trees use a recursive metadata
+stamp. Never move this work into `skills_with` or a per-keystroke helper.
+
+Copies with one known public fingerprint are identical; more than one are
+divergent; a missing or unreadable hash is unknown. If redacted private lines
+exist across copies, equality is `private-unknown`, never identical. Replacement must show `diff -ru`,
+re-hash both copies around that comparison, reject changed or sensitive
+sources, move the target to Trash, and only then copy. `copy_tree` excludes
+VCS/cache metadata but not runtime dependencies. MCP matrices use the same
+principle with redacted public fingerprints; incomparable source formats say
+so instead of claiming equality.
 
 **Borrowing is the lighter half of that, and the one to reach for first.**
 Every agent has a flag for taking a capability it does not own, for one run

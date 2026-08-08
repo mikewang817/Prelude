@@ -43,6 +43,7 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
         "run" => has.iter().map(|n| (format!("run:{n}"), (*n).to_string(), String::new())).collect(),
         "lend" => match it.kind {
             // A skill can only be borrowed by an agent that lacks it.
+            Kind::Skill if it.get("source_sensitive") == "true" => Vec::new(),
             Kind::Skill => missing
                 .iter()
                 .filter(|n| **n != "shared" && crate::lend::can_borrow_skill(n))
@@ -50,12 +51,18 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
                 .map(|n| (format!("lend:{n}"), (*n).to_string(), String::new()))
                 .collect(),
             // An MCP server can go to any other agent that has a flag for it.
-            _ => crate::sources::sessions::installed()
-                .into_iter()
-                .filter(|n| *n != it.get("agent") && crate::lend::can_borrow_mcp(n))
-                .map(|n| (format!("lend:{n}"), n.to_string(), String::new()))
-                .collect(),
+            _ if it.get("portable") == "false" => Vec::new(),
+            _ => {
+                let mut owners: Vec<String> = serde_json::from_str(it.get("owners")).unwrap_or_default();
+                if owners.is_empty() { owners.push(it.get("agent").to_string()); }
+                crate::sources::sessions::installed()
+                    .into_iter()
+                    .filter(|n| !owners.iter().any(|owner| owner == n) && crate::lend::can_borrow_mcp(n))
+                    .map(|n| (format!("lend:{n}"), n.to_string(), String::new()))
+                    .collect()
+            }
         },
+        "cp" if it.kind == Kind::Skill && it.get("source_sensitive") == "true" => Vec::new(),
         "cp" => {
             let mut v: Vec<(String, String, String)> = missing
                 .iter()
@@ -67,11 +74,60 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
             v
         }
         // Every other installed agent that has an `mcp add` of its own.
-        "install" => crate::sources::sessions::installed()
-            .into_iter()
-            .filter(|n| *n != it.get("agent") && matches!(*n, "claude" | "codex"))
-            .map(|n| (format!("install:{n}"), n.to_string(), String::new()))
-            .collect(),
+        "install" if it.kind == Kind::Mcp
+            && (it.get("portable") == "false" || it.get("sensitive") == "true") => Vec::new(),
+        "install" => {
+            let mut owners: Vec<String> = serde_json::from_str(it.get("owners")).unwrap_or_default();
+            if owners.is_empty() { owners.push(it.get("agent").to_string()); }
+            crate::sources::sessions::installed()
+                .into_iter()
+                .filter(|n| !owners.iter().any(|owner| owner == n) && matches!(*n, "claude" | "codex"))
+                .map(|n| (format!("install:{n}"), n.to_string(), String::new()))
+                .collect()
+        }
+        "mcpsync" if it.get("portable") == "false" || it.get("sensitive") == "true" => Vec::new(),
+        "mcpsync" => {
+            let variants = crate::capability::mcp_variants(it);
+            let owner = it.get("agent");
+            let source_hash = it.get("definition_hash");
+            variants.into_iter()
+                .filter(|variant| variant.agent != owner && variant.fingerprint != source_hash)
+                .map(|variant| (
+                    format!("mcp-sync:{}", variant.agent),
+                    variant.agent.clone(),
+                    format!("replace {} with {owner}'s definition", variant.agent),
+                ))
+                .collect()
+        }
+        "diff" | "sync" => {
+            let copies = crate::capability::copies(it);
+            let mut options = Vec::new();
+            for (left, source) in copies.iter().enumerate() {
+                for (right, target) in copies.iter().enumerate() {
+                    if left == right || source.fingerprint == target.fingerprint {
+                        continue;
+                    }
+                    if verb == "diff" && right < left {
+                        continue;
+                    }
+                    let option = if verb == "diff" {
+                        (
+                            format!("diff:{}:{}", source.agent, target.agent),
+                            format!("{} ↔ {}", source.agent, target.agent),
+                            "read-only recursive diff".to_string(),
+                        )
+                    } else {
+                        (
+                            format!("sync:{}:{}", source.agent, target.agent),
+                            format!("replace {} from {}", target.agent, source.agent),
+                            crate::paths::tilde(&target.dir),
+                        )
+                    };
+                    options.push(option);
+                }
+            }
+            options
+        }
         // Only agents that actually have a copy to delete.
         "rm" => crate::sources::agents::copies_of(it)
             .into_iter()
@@ -246,6 +302,12 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
                 v.push(a("open", "Open SKILL.md locally", &target));
             }
             with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
+            if it.get("integrity") == "divergent" {
+                with_options(&mut v, it, "diff", "Compare {}", "Compare copies…",
+                             "before replacing either copy");
+                with_options(&mut v, it, "sync", "Replace {}", "Replace a divergent copy…",
+                             "shows diff · old copy goes to Trash");
+            }
             with_options(&mut v, it, "rm", "Delete {} copy…", "Delete a copy…",
                          "moves it to the Trash");
             v
@@ -261,6 +323,12 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             with_options(&mut v, it, "lend", "Prepare one-off run with {}",
                          "Prepare one-off run with…", "inserts command · nothing installed");
             with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
+            if it.get("integrity") == "divergent" {
+                with_options(&mut v, it, "diff", "Compare {}", "Compare copies…",
+                             "before replacing either copy");
+                with_options(&mut v, it, "sync", "Replace {}", "Replace a divergent copy…",
+                             "shows diff · old copy goes to Trash");
+            }
             if !it.get("desc").is_empty() {
                 v.push(a("desc", "Read instructions", ""));
             }
@@ -281,6 +349,9 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
                 a("mcptools", "Show what it exposes", format!("{} mcp get", it.get("agent"))),
                 a("copy", "Copy server name", ""),
             ];
+            if crate::capability::mcp_variants(it).len() > 1 {
+                v.push(a("mcpcompare", "Compare Agent definitions", "redacted capability matrix"));
+            }
             if !target.is_empty() {
                 v.push(a("open", "Open owner configuration locally", &target));
             }
@@ -302,10 +373,17 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // config file — the CLI knows the format and we do not have to.
             with_options(&mut v, it, "install", "Insert install command for {}",
                          "Insert install command…", "review before running");
+            if crate::capability::mcp_variants(it).len() > 1 {
+                v.push(a("mcpcompare", "Compare Agent definitions", "redacted capability matrix"));
+            }
+            if it.get("comparison") == "divergent" {
+                with_options(&mut v, it, "mcpsync", "Prepare replacement for {}",
+                             "Prepare definition replacement…", "shows redacted comparison first");
+            }
             // Inspection is Enter at a shell and is stated in the header, so
             // it is not repeated as a selectable action here.
             // A row that says `⚠ not logged in` must offer a route forward.
-            if matches!(it.get("health"), "needsauth" | "failed") {
+            if matches!(it.get("health"), "auth" | "needsauth" | "failed") {
                 v.push(a("mcplogin", "Insert login command", format!("{owner} mcp login")));
             }
             // Configuration changes are inserted for review rather than run.
@@ -499,7 +577,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
 pub fn is_destructive(kind: Kind, id: &str) -> bool {
     matches!(id, "killrun" | "stop" | "trash" | "session-trash" | "mcpremove" | "quicklink-remove")
         || id.starts_with("rm:")
-        || id == "menu:rm"
+        || id.starts_with("sync:")
+        || matches!(id, "menu:rm" | "menu:sync")
         || (id == "run" && matches!(kind, Kind::Port | Kind::Proc))
 }
 
@@ -543,6 +622,26 @@ fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
         v.push(a("trash", "Move it to the Trash…", "recoverable from Finder"));
     }
     v
+}
+
+fn mcp_matrix_lines(it: &Item) -> Vec<String> {
+    crate::capability::mcp_variants(it).into_iter().map(|variant| {
+        let hash = variant.fingerprint.strip_prefix("fnv1a64-v1:").unwrap_or(&variant.fingerprint);
+        format!(
+            "{:<10} {:<10} {} · {}{}",
+            variant.agent,
+            variant.health,
+            variant.summary,
+            hash,
+            if !variant.portable {
+                " · owner-account only"
+            } else if variant.sensitive {
+                " · private fields omitted"
+            } else {
+                ""
+            },
+        )
+    }).collect()
 }
 
 fn first_nonempty(it: &Item, keys: &[&str]) -> String {
@@ -645,7 +744,8 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
 }
 
 fn stays_in_panel(id: &str) -> bool {
-    matches!(id, "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools")
+    matches!(id, "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcpcompare")
+        || id.starts_with("diff:")
 }
 
 pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
@@ -962,6 +1062,87 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 2;
             }
         }
+        "mcpcompare" => return crate::runhere::show_text(
+            &format!("MCP definitions · {}", it.get("name")),
+            &mcp_matrix_lines(it),
+        ),
+        _ if id.starts_with("mcp-sync:") => {
+            let target_agent = &id[9..];
+            let _ = crate::runhere::show_text(
+                &format!("MCP definitions · {}", it.get("name")),
+                &mcp_matrix_lines(it),
+            );
+            if !ui::confirm(
+                &format!("prepare replacement for {target_agent}?"),
+                "Prepare command",
+                "the command is inserted for review, not run",
+            ) {
+                return 130;
+            }
+            let definition = match crate::lend::resolve(it) {
+                Ok(definition) => definition,
+                Err(error) => { ui::note(&error, paste); return 2; }
+            };
+            let install = match crate::lend::install_cmd(target_agent, &definition) {
+                Ok(command) => command,
+                Err(error) => { ui::note(&error, paste); return 2; }
+            };
+            let remove = format!("{target_agent} mcp remove {}", shq(it.get("name")));
+            ui::emit("INSERT", &format!("{remove} && {install}"), paste);
+        }
+        _ if id.starts_with("diff:") || id.starts_with("sync:") => {
+            let mut parts = id.split(':');
+            let verb = parts.next().unwrap_or("");
+            let from = parts.next().unwrap_or("");
+            let to = parts.next().unwrap_or("");
+            let copies = crate::capability::copies(it);
+            let source = copies.iter().find(|copy| copy.agent == from);
+            let target = copies.iter().find(|copy| copy.agent == to);
+            let (Some(source), Some(target)) = (source, target) else {
+                ui::note("those Skill copies are no longer present", paste);
+                return 2;
+            };
+            let expected = if verb == "sync" {
+                let source_now = crate::capability::hash_skill(&source.agent, std::path::Path::new(&source.dir));
+                let target_now = crate::capability::hash_skill(&target.agent, std::path::Path::new(&target.dir));
+                if source_now.fingerprint.is_empty() || target_now.fingerprint.is_empty() {
+                    ui::note("one of those Skill copies cannot be read completely", paste);
+                    return 2;
+                }
+                if source_now.sensitive_files > 0 {
+                    ui::note("the source contains credential-like material; refusing to copy it", paste);
+                    return 2;
+                }
+                Some((source_now.fingerprint, target_now.fingerprint))
+            } else {
+                None
+            };
+            let command = format!("diff -ru {} {}", shq(&source.dir), shq(&target.dir));
+            let _ = crate::runhere::run_cmd(&command);
+            if verb == "diff" {
+                return 0;
+            }
+            if !ui::confirm(
+                &format!("replace {to}'s copy of {}?", it.get("name")),
+                &format!("Replace {to} from {from}"),
+                "the old copy moves to the Trash",
+            ) {
+                return 130;
+            }
+            let (source_hash, target_hash) = expected.unwrap_or_default();
+            match crate::sources::agents::sync_skill(
+                &source.dir, &target.dir, &source_hash, &target_hash,
+            ) {
+                Ok(trashed) => {
+                    let _ = crate::cache::refresh_named("skill-hashes");
+                    ui::note(
+                        &format!("replaced {to}; old copy at {}", crate::paths::tilde(&trashed.to_string_lossy())),
+                        paste,
+                    );
+                }
+                Err(error) => { ui::note(&error, paste); return 2; }
+            }
+        }
         // Borrow: build the one command that starts `agent` with someone
         // else's capability attached, and hand it over unrun. Nothing is
         // installed, nothing is written to either agent's directories, and
@@ -1084,10 +1265,13 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 130;
             }
             match crate::sources::agents::delete_skill(dir) {
-                Ok(p) => ui::note(
-                    &format!("{} deleted — now in {}", it.get("name"), crate::paths::tilde(&p.to_string_lossy())),
-                    paste,
-                ),
+                Ok(p) => {
+                    let _ = crate::cache::refresh_named("skill-hashes");
+                    ui::note(
+                        &format!("{} deleted — now in {}", it.get("name"), crate::paths::tilde(&p.to_string_lossy())),
+                        paste,
+                    )
+                },
                 Err(e) => {
                     ui::note(&e, paste);
                     return 2;
@@ -1107,11 +1291,15 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 ui::note("nothing to copy from", paste);
                 return 2;
             }
+            let mut changed = false;
             for agent in targets {
                 match crate::sources::agents::copy_skill(dir, &agent, name) {
-                    Ok(p) => eprintln!("copied {name} -> {p}"),
+                    Ok(p) => { changed = true; eprintln!("copied {name} -> {p}"); }
                     Err(e) => ui::note(&e.to_string(), paste),
                 }
+            }
+            if changed {
+                let _ = crate::cache::refresh_named("skill-hashes");
             }
         }
         _ => return 130,

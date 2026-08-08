@@ -22,6 +22,17 @@
 use crate::exec::shq;
 use std::path::{Path, PathBuf};
 
+fn sensitive_text(value: &str) -> bool {
+    if crate::secrets::looks_secret(value) {
+        return true;
+    }
+    // Credentials in URL authority (`scheme://user:pass@host`) need no
+    // keyword such as "token" to be dangerous.
+    value.split_once("://").is_some_and(|(_, rest)| {
+        rest.split('/').next().is_some_and(|authority| authority.contains('@'))
+    })
+}
+
 /// An MCP server, in the only two shapes anyone ships.
 ///
 /// Deliberately not a passthrough of either agent's own schema: the whole
@@ -62,15 +73,49 @@ impl Mcp {
     /// wrong is asymmetric: staging a harmless definition in a file costs a
     /// path instead of a blob on screen, while inlining a secret one puts a
     /// key in shell history for good.
-    fn has_env(&self) -> bool {
+    pub fn has_sensitive_fields(&self) -> bool {
         match self {
-            Mcp::Stdio { env, .. } => !env.is_empty(),
-            Mcp::Http { headers, .. } => !headers.is_empty(),
+            Mcp::Stdio { command, args, env, .. } => {
+                !env.is_empty() || sensitive_text(command) || args.iter().any(|arg| sensitive_text(arg))
+            }
+            Mcp::Http { url, headers, .. } => !headers.is_empty() || sensitive_text(url),
         }
+    }
+
+    /// Stable comparison identity with all env/header names and values
+    /// removed. A count says the definitions have private material without
+    /// turning that material into indexed data.
+    pub fn public_fingerprint(&self) -> String {
+        let value = match self {
+            Mcp::Stdio { command, args, env, .. } => {
+                let command = if sensitive_text(command) { "<redacted>" } else { command };
+                let args: Vec<&str> = args.iter().map(|arg| {
+                    if sensitive_text(arg) { "<redacted>" } else { arg.as_str() }
+                }).collect();
+                serde_json::json!({
+                    "type": "stdio", "command": command, "args": args,
+                    "private_fields": env.len(),
+                })
+            }
+            Mcp::Http { url, headers, .. } => serde_json::json!({
+                "type": "http", "url": if sensitive_text(url) { "<redacted>" } else { url },
+                "private_fields": headers.len(),
+            }),
+        };
+        crate::capability::fingerprint(value.to_string().as_bytes())
     }
 
     /// The name of the first field that `secrets` calls a credential.
     pub fn secret_field(&self) -> Option<String> {
+        match self {
+            Mcp::Stdio { command, args, .. }
+                if sensitive_text(command) || args.iter().any(|arg| sensitive_text(arg)) =>
+            {
+                return Some("command argument".into());
+            }
+            Mcp::Http { url, .. } if sensitive_text(url) => return Some("URL credential".into()),
+            _ => {}
+        }
         let pairs: &[(String, String)] = match self {
             Mcp::Stdio { env, .. } => env,
             Mcp::Http { headers, .. } => headers,
@@ -235,10 +280,10 @@ impl Mcp {
 
 /// The lendable definition of the server a row stands for.
 ///
-/// codex's is captured during the gather that built the row. claude's is not:
-/// `claude mcp list` prints a display target rather than a definition, so it
-/// is resolved here, on an explicit keystroke, where a subprocess is
-/// affordable and a per-keystroke one would not be.
+/// Complete definitions are never retained in launcher Items or caches:
+/// command arguments, env and headers can all carry credentials. Resolve
+/// from the owning CLI here, on an explicit keystroke, where a subprocess is
+/// affordable and private data remains transient.
 pub fn resolve(it: &crate::item::Item) -> Result<Mcp, String> {
     if let Ok(m) = serde_json::from_str::<Mcp>(it.get("def")) {
         return Ok(m);
@@ -291,7 +336,7 @@ pub fn mcp_flags(agent: &str, m: &Mcp) -> Result<Vec<String>, String> {
         // safe to type after.
         "claude" => {
             let json = m.to_claude_json();
-            if !m.has_env() {
+            if !m.has_sensitive_fields() {
                 return Ok(vec![format!("--mcp-config={json}")]);
             }
             let p = private_file(&format!("{}.json", m.key()), json.as_bytes())
@@ -299,7 +344,8 @@ pub fn mcp_flags(agent: &str, m: &Mcp) -> Result<Vec<String>, String> {
             Ok(vec![format!("--mcp-config={}", p.to_string_lossy())])
         }
         "codex" => {
-            if let Some(k) = m.secret_field() {
+            if m.has_sensitive_fields() {
+                let k = m.secret_field().unwrap_or_else(|| "private fields".into());
                 return Err(format!(
                     "{} carries {k}, and codex can only be handed a server inline — \
                      it would end up in your shell history. Lend it to claude \
@@ -471,9 +517,10 @@ fn pairs(v: Option<&serde_json::Value>) -> Vec<(String, String)> {
 /// is no form of this that keeps the key off the command line — and off the
 /// shell history this launcher reads back.
 pub fn install_cmd(agent: &str, m: &Mcp) -> Result<String, String> {
-    if let Some(k) = m.secret_field() {
+    if m.has_sensitive_fields() {
+        let field = m.secret_field().unwrap_or_else(|| "private fields".into());
         return Err(format!(
-            "{} carries {k} — installing it would put the key on your command line",
+            "{} carries {field} — installing it would put private data on your command line",
             m.name()
         ));
     }

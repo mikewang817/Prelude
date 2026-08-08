@@ -647,9 +647,11 @@ prelude control
 prelude control --json
 ```
 
-It contains installed Agent executables, Run ids and state, active Session
-edges, Skill ownership, MCP health and config paths. Process prompts and full
-command lines are deliberately absent because they may contain credentials.
+Its versioned `schema: 2` snapshot contains installed Agent executables, Run
+ids and state, active Session edges, Skill fingerprints and copy state, MCP
+owner/health/definition variants, effective borrow/install targets and config
+paths. Process prompts, full command lines and complete MCP definitions are
+deliberately absent because they may contain credentials.
 
 **MCP servers report real status**, asked of each agent rather than read out
 of config files: `✔ connected`, `⏸ disabled`, `⚠ not logged in`. Reading the
@@ -785,10 +787,29 @@ labelled with which agents have it, rather than duplicated or silently
 deduped.
 
 Skills come from `~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`,
-`~/.pi/agent/skills` and `~/.config/opencode/skills`. MCP inventory and health
-come from each agent's own CLI (`claude mcp list`, `codex mcp list --json`),
-which includes hosted servers and real connection state. `prelude doctor`
-prints the inventory.
+`~/.pi/agent/skills` and `~/.config/opencode/skills`. Each installed copy gets
+a full-tree content fingerprint covering instructions, scripts, references and
+symlinks while ignoring VCS metadata. The work runs behind `skill-hashes.json`;
+unchanged trees need only a metadata stamp and never enter the launch path.
+`Ctrl+P` shows the copy matrix and marks copies as single, identical, divergent,
+unknown, or private-unknown when redaction prevents a truthful equality claim.
+
+A divergent Skill offers a recursive read-only Diff first. Replacement is an
+explicit second action: Prelude hashes both copies around the comparison,
+refuses if either changed, moves the target to the Trash, then copies. It also
+refuses to copy a source containing credential-like files or lines.
+
+MCP inventory and health come from each agent's own CLI (`claude mcp list`,
+`codex mcp list --json`), which includes hosted servers and real connection
+state. Servers with the same name form one capability matrix across owners,
+health and redacted definition fingerprints. Complete definitions—arguments,
+env and headers included—are never retained in launcher Items or caches; an
+explicit lend/install action asks the owner CLI again. Account-hosted servers
+with no transferable local definition show as owner-only and have no fake
+borrow or install targets. A one-time migration
+removes definitions and derived search rows written by older builds.
+`prelude doctor` reports drift, unknown hashes, redactions and unhealthy MCP
+servers.
 
 ## It learns
 
@@ -912,7 +933,8 @@ Files, all under the usual XDG locations:
 | `$XDG_DATA_HOME/prelude/clipboard.jsonl` | Clipboard history metadata |
 | `$XDG_DATA_HOME/prelude/clipboard/` | Private image payloads retained by clipboard history |
 | `$XDG_DATA_HOME/prelude/bus/` | Questions agents are waiting on — data, not cache, because an unanswered question must survive a cleared cache |
-| `$XDG_CACHE_HOME/prelude/` | Source caches |
+| `$XDG_CACHE_HOME/prelude/skill-hashes.json` | Background Skill-tree fingerprints and metadata stamps |
+| `$XDG_CACHE_HOME/prelude/` | Other source caches |
 
 ## Translation
 

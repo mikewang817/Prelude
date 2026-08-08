@@ -209,7 +209,29 @@ pub fn text(it: &Item) -> String {
         }
         Kind::Skill => {
             kv(&mut out, "agents", it.get("agent"));
+            kv(&mut out, "integrity", it.get("integrity"));
+            kv(&mut out, "fingerprint", it.get("fingerprint"));
             kv(&mut out, "file", &tilde(it.get("file")));
+            let copies = crate::capability::copies(it);
+            if !copies.is_empty() {
+                out.push(String::new());
+                out.push(format!("{DIM}installed copies{RESET}"));
+                for copy in copies {
+                    let hash = copy.fingerprint.strip_prefix("fnv1a64-v1:").unwrap_or(&copy.fingerprint);
+                    let warning = if copy.sensitive_files > 0 {
+                        format!(" · {} sensitive file(s) redacted", copy.sensitive_files)
+                    } else if copy.unreadable > 0 {
+                        format!(" · {} unreadable", copy.unreadable)
+                    } else {
+                        String::new()
+                    };
+                    out.push(format!(
+                        "{:<10} {} · {} files · {} bytes{}",
+                        copy.agent, hash, copy.files, copy.bytes, warning
+                    ));
+                    out.push(format!("           {}", tilde(&copy.dir)));
+                }
+            }
             if !it.get("desc").is_empty() {
                 out.push(String::new());
                 out.push(it.get("desc").to_string());
@@ -219,6 +241,34 @@ pub fn text(it: &Item) -> String {
             kv(&mut out, "agent", it.get("agent"));
             kv(&mut out, "name", it.get("name"));
             kv(&mut out, "config", &tilde(it.get("config")));
+            kv(&mut out, "comparison", it.get("comparison"));
+            let variants = crate::capability::mcp_variants(it);
+            if !variants.is_empty() {
+                out.push(String::new());
+                out.push(format!("{DIM}availability{RESET}"));
+                for variant in variants {
+                    let hash = variant.fingerprint.strip_prefix("fnv1a64-v1:")
+                        .unwrap_or(&variant.fingerprint);
+                    let identity = if variant.summary.is_empty() {
+                        hash.to_string()
+                    } else {
+                        format!("{} · {hash}", variant.summary)
+                    };
+                    out.push(format!(
+                        "{:<10} {:<10} {}{}",
+                        variant.agent,
+                        variant.health,
+                        identity,
+                        if !variant.portable {
+                            " · owner-account only"
+                        } else if variant.sensitive {
+                            " · private fields omitted"
+                        } else {
+                            ""
+                        },
+                    ));
+                }
+            }
         }
         Kind::Proc => {
             kv(&mut out, "pid", it.get("pid"));

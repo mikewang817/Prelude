@@ -8,6 +8,7 @@ mod ansi;
 mod bus;
 mod cache;
 mod calc;
+mod capability;
 mod clipd;
 mod compute;
 mod control;
@@ -43,6 +44,7 @@ fn main() -> ExitCode {
         unsafe fn signal(sig: i32, handler: usize) -> usize;
     }
     unsafe { signal(13, 0) }; // SIGPIPE -> SIG_DFL
+    cache::privacy_migrations();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -680,6 +682,12 @@ mod tests {
         for s in ["git push origin main", "npm run build", "psql -U admin"] {
             assert!(!crate::secrets::looks_secret(s), "{s}");
         }
+        assert!(!crate::secrets::looks_secret_material(
+            "NOTICE_TOKEN = re.compile(r\"notice\")"
+        ));
+        assert!(crate::secrets::looks_secret_material(
+            "access_token=abcdefghijklmnopqrstuvwxyz"
+        ));
     }
 
     /// Copying a skill is the only place Prelude writes to user files, so
@@ -808,6 +816,12 @@ mod tests {
         for tok in mcp_flags("claude", &secret).unwrap() {
             assert!(!tok.contains("abc123"), "secret leaked into {tok}");
         }
+        let unrecognised = Mcp::Http {
+            name: "private".into(),
+            url: "https://example.test/mcp".into(),
+            headers: vec![("X-Custom".into(), "opaque-value".into())],
+        };
+        assert!(mcp_flags("codex", &unrecognised).unwrap_err().contains("private fields"));
     }
 
     /// Every agent has a different door, and three of the eight pairings
@@ -1754,6 +1768,82 @@ mod tests {
     }
 
     #[test]
+    fn capability_hashes_detect_drift_without_indexing_secret_values() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("prelude-capability-hash-{}", std::process::id()));
+        let left = root.join("left");
+        let right = root.join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("SKILL.md"), "hello\nAPI_KEY=sk-aaaaaaaaaaaaaaaaaaaa\n").unwrap();
+        fs::write(right.join("SKILL.md"), "hello\nAPI_KEY=sk-bbbbbbbbbbbbbbbbbbbb\n").unwrap();
+        let a = crate::capability::hash_skill("claude", &left);
+        let b = crate::capability::hash_skill("codex", &right);
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.sensitive_files, 1);
+        fs::write(right.join("SKILL.md"), "changed\nAPI_KEY=sk-bbbbbbbbbbbbbbbbbbbb\n").unwrap();
+        let changed = crate::capability::hash_skill("codex", &right);
+        assert_ne!(a.fingerprint, changed.fingerprint);
+        assert!(!crate::capability::skill_stamp(&right).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn divergent_skill_copies_require_a_diff_before_replacement() {
+        use crate::capability::SkillCopy;
+        use crate::item::{Item, Kind};
+        let copies = vec![
+            SkillCopy { agent: "claude".into(), dir: "/tmp/claude/x".into(), fingerprint: "a".into(), ..Default::default() },
+            SkillCopy { agent: "codex".into(), dir: "/tmp/codex/x".into(), fingerprint: "b".into(), ..Default::default() },
+        ];
+        let skill = Item::new("/x", Kind::Skill)
+            .put("name", "x")
+            .put("agent", "claude,codex")
+            .put("integrity", "divergent")
+            .put("copy_info", serde_json::to_string(&copies).unwrap());
+        let diff = crate::actions::agent_options(&skill, "diff");
+        let sync = crate::actions::agent_options(&skill, "sync");
+        assert_eq!(diff.len(), 1);
+        assert_eq!(sync.len(), 2);
+        assert_eq!(diff[0].0, "diff:claude:codex");
+        assert!(sync.iter().any(|option| option.0 == "sync:claude:codex"));
+        assert!(sync.iter().any(|option| option.0 == "sync:codex:claude"));
+    }
+
+    #[test]
+    fn mcp_fingerprints_omit_private_definition_values() {
+        use crate::lend::Mcp;
+        let one = Mcp::Stdio {
+            name: "server".into(), command: "node".into(), args: vec!["run.js".into()],
+            env: vec![("API_KEY".into(), "first-secret-value".into())],
+        };
+        let two = Mcp::Stdio {
+            name: "server".into(), command: "node".into(), args: vec!["run.js".into()],
+            env: vec![("OTHER_KEY".into(), "another-secret-value".into())],
+        };
+        assert_eq!(one.public_fingerprint(), two.public_fingerprint());
+        assert!(one.has_sensitive_fields());
+        assert!(!one.public_fingerprint().contains("secret"));
+        let credential_url = Mcp::Http {
+            name: "remote".into(),
+            url: "https://user:pass@example.test/mcp".into(),
+            headers: vec![],
+        };
+        assert!(credential_url.has_sensitive_fields());
+        assert_eq!(credential_url.secret_field().as_deref(), Some("URL credential"));
+        assert_eq!(
+            crate::sources::agents::safe_mcp_detail("https://user:pass@example.test/mcp"),
+            "private target omitted",
+        );
+        let hosted = crate::item::Item::new("claude mcp get hosted", crate::item::Kind::Mcp)
+            .put("agent", "claude")
+            .put("name", "hosted")
+            .put("portable", "false");
+        assert!(crate::actions::agent_options(&hosted, "lend").is_empty());
+        assert!(crate::actions::agent_options(&hosted, "install").is_empty());
+    }
+
+    #[test]
     fn control_snapshot_exposes_edges_instead_of_flat_rows() {
         use crate::item::{Item, Kind};
         let run = Item::new("claude prompt-that-must-not-enter-the-graph", Kind::Run)
@@ -1770,6 +1860,7 @@ mod tests {
             .put("archived", "true")
             .put("active_run", "claude:7:1");
         let graph = crate::control::Snapshot::from_items(&[run], &[session], &[], &[], &[]);
+        assert_eq!(graph.schema, 2);
         let claude = graph.agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(claude.runs, ["claude:7:1"]);
         assert_eq!(claude.sessions, ["claude:s1"]);
@@ -1778,6 +1869,30 @@ mod tests {
         assert_eq!(graph.sessions[0].native_title.as_deref(), Some("native"));
         assert!(graph.sessions[0].pinned && graph.sessions[0].archived);
         assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
+    }
+
+    #[test]
+    fn control_snapshot_groups_mcp_variants_without_private_definitions() {
+        use crate::capability::McpVariant;
+        use crate::item::{Item, Kind};
+        let variants = vec![
+            McpVariant { agent: "claude".into(), health: "ok".into(), summary: "node a.js".into(), fingerprint: "a".into(), source: "semantic".into(), sensitive: false, portable: true },
+            McpVariant { agent: "codex".into(), health: "auth".into(), summary: "node b.js".into(), fingerprint: "b".into(), source: "semantic".into(), sensitive: true, portable: true },
+        ];
+        let common = serde_json::to_string(&variants).unwrap();
+        let claude = Item::new("claude mcp get shared", Kind::Mcp)
+            .put("agent", "claude").put("name", "shared").put("capability_id", "mcp:shared")
+            .put("comparison", "divergent").put("variants", &common);
+        let codex = Item::new("codex mcp get shared", Kind::Mcp)
+            .put("agent", "codex").put("name", "shared").put("capability_id", "mcp:shared")
+            .put("comparison", "divergent").put("variants", common)
+            .put("def", "private-definition-must-not-be-in-control");
+        let graph = crate::control::Snapshot::from_items(&[], &[], &[], &[claude, codex], &[]);
+        assert_eq!(graph.mcp.len(), 1);
+        assert_eq!(graph.mcp[0].owners, ["claude", "codex"]);
+        assert_eq!(graph.mcp[0].comparison, "divergent");
+        let json = serde_json::to_string(&graph).unwrap();
+        assert!(!json.contains("private-definition-must-not-be-in-control"));
     }
 
     #[test]

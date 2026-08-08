@@ -28,6 +28,24 @@ fn cache_file(name: &str) -> std::path::PathBuf {
     paths::cache().join(format!("{name}.json"))
 }
 
+/// One-time removal of derived rows written by builds that retained complete
+/// MCP definitions. The private `borrow/` staging area is intentional and is
+/// not touched; list/search caches must never contain those values.
+pub fn privacy_migrations() {
+    if std::env::var_os("PRELUDE_PRIVACY_MIGRATED").is_some() {
+        return;
+    }
+    let marker = paths::cache().join("capability-privacy-v1");
+    if !marker.exists() {
+        let _ = read_cached("mcp"); // rewrites the MCP cache without `def`
+        for name in ["search-items.json", "list.txt", "home.txt"] {
+            let _ = std::fs::remove_file(paths::cache().join(name));
+        }
+        let _ = write_atomic(&marker, b"1\n");
+    }
+    std::env::set_var("PRELUDE_PRIVACY_MIGRATED", "1");
+}
+
 /// `score` is `#[serde(skip)]`, so anything read back from disk arrives at
 /// zero and sorts below all two thousand live rows — which is why an MCP
 /// server with priority 985 was never once seen near the top. The band is
@@ -38,8 +56,27 @@ pub fn read_cached(name: &str) -> Vec<Item> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
+    let mut scrubbed = false;
     for it in &mut items {
+        // Older MCP caches retained complete definitions for fast lending.
+        // Purge every one while reading so an upgrade stops exposing private
+        // arguments before the background refresh lands.
+        if name == "mcp" && !it.get("def").is_empty() {
+            it.data.remove("def");
+            // Old caches did not distinguish why a definition was private.
+            // Conservatively mark it until the authoritative CLI refreshes.
+            it.data.insert("sensitive".into(), "true".into());
+            scrubbed = true;
+        }
         it.score = it.kind.priority() as f64 + it.get("rank").parse::<f64>().unwrap_or(0.0);
+    }
+    if scrubbed {
+        if let Ok(json) = serde_json::to_vec(&items) {
+            let _ = write_atomic(&cache_file(name), &json);
+        }
+        for derived in ["search-items.json", "list.txt", "home.txt"] {
+            let _ = std::fs::remove_file(paths::cache().join(derived));
+        }
     }
     items
 }
@@ -93,6 +130,9 @@ const SLOW: &[Source] = &[
     ("sessions", crate::sources::sessions::all),
     // `claude mcp list` runs a network health check on every server.
     ("mcp", crate::sources::agents::mcp),
+    // Full Skill trees can contain scripts and references. Hash them away
+    // from the launch path; gather reads only the small fingerprint cache.
+    ("skill-hashes", crate::sources::agents::skill_hashes),
     // ps with full command lines plus a bulk lsof for their working
     // directories: ~95ms, and worth having only for completeness.
     ("fleet", crate::sources::running::fleet),

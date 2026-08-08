@@ -77,15 +77,23 @@ pub struct SkillRecord {
     pub name: String,
     pub owners: Vec<String>,
     pub missing: Vec<String>,
-    pub copies: Vec<(String, String)>,
+    pub integrity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    pub copies: Vec<crate::capability::SkillCopy>,
+    pub borrow_targets: Vec<String>,
+    pub install_targets: Vec<String>,
 }
 
 #[derive(Serialize)]
 pub struct McpRecord {
     pub id: String,
     pub name: String,
-    pub agent: String,
-    pub health: String,
+    pub owners: Vec<String>,
+    pub variants: Vec<crate::capability::McpVariant>,
+    pub comparison: String,
+    pub borrow_targets: Vec<String>,
+    pub install_targets: Vec<String>,
 }
 
 fn some(value: &str) -> Option<String> {
@@ -143,7 +151,15 @@ impl Snapshot {
             .collect();
         let skill_records: Vec<SkillRecord> = skills
             .iter()
-            .map(|skill| SkillRecord {
+            .map(|skill| {
+                let mut copies = crate::capability::copies(skill);
+                if copies.is_empty() {
+                    copies = crate::sources::agents::copies_of(skill).into_iter()
+                        .map(|(agent, dir)| crate::capability::SkillCopy {
+                            agent, dir, ..Default::default()
+                        }).collect();
+                }
+                SkillRecord {
                 id: format!("skill:{}", skill.get("name")),
                 name: skill.get("name").to_string(),
                 owners: skill
@@ -160,18 +176,76 @@ impl Snapshot {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .collect(),
-                copies: crate::sources::agents::copies_of(skill),
+                integrity: skill.get("integrity").to_string(),
+                fingerprint: some(skill.get("fingerprint")),
+                copies,
+                borrow_targets: if skill.get("source_sensitive") == "true" {
+                    Vec::new()
+                } else {
+                    skill.get("missing").split(',').map(str::trim)
+                        .filter(|agent| !agent.is_empty() && crate::lend::can_borrow_skill(agent))
+                        .map(str::to_string).collect()
+                },
+                install_targets: if skill.get("source_sensitive") == "true" {
+                    Vec::new()
+                } else {
+                    skill.get("missing").split(',').map(str::trim)
+                        .filter(|agent| !agent.is_empty()).map(str::to_string).collect()
+                },
+                }
             })
             .collect();
-        let mcp_records: Vec<McpRecord> = mcp
-            .iter()
-            .map(|server| McpRecord {
-                id: format!("{}:{}", server.get("agent"), server.get("name")),
+        let mut mcp_records: Vec<McpRecord> = Vec::new();
+        let mut seen_mcp = std::collections::BTreeSet::new();
+        for server in mcp {
+            let id = if server.get("capability_id").is_empty() {
+                format!("mcp:{}", server.get("name").to_lowercase())
+            } else {
+                server.get("capability_id").to_string()
+            };
+            if !seen_mcp.insert(id.clone()) {
+                continue;
+            }
+            let variants = {
+                let variants = crate::capability::mcp_variants(server);
+                if variants.is_empty() {
+                    vec![crate::capability::McpVariant {
+                        agent: server.get("agent").to_string(),
+                        health: server.get("health").to_string(),
+                        summary: server.fields.get(2).cloned().unwrap_or_default(),
+                        fingerprint: server.get("definition_hash").to_string(),
+                        source: server.get("definition_source").to_string(),
+                        sensitive: server.get("sensitive") == "true",
+                        portable: server.get("portable") == "true",
+                    }]
+                } else {
+                    variants
+                }
+            };
+            let owners: Vec<String> = variants.iter().map(|variant| variant.agent.clone()).collect();
+            let targets: Vec<String> = crate::sources::sessions::installed().into_iter()
+                .filter(|agent| matches!(*agent, "claude" | "codex"))
+                .filter(|agent| !owners.iter().any(|owner| owner == agent))
+                .map(str::to_string)
+                .collect();
+            let borrow_targets = targets.iter().filter(|target| {
+                variants.iter().any(|variant| {
+                    variant.portable && (target.as_str() == "claude" || !variant.sensitive)
+                })
+            }).cloned().collect();
+            let install_targets = targets.iter().filter(|_| {
+                variants.iter().any(|variant| variant.portable && !variant.sensitive)
+            }).cloned().collect();
+            mcp_records.push(McpRecord {
+                id,
                 name: server.get("name").to_string(),
-                agent: server.get("agent").to_string(),
-                health: server.get("health").to_string(),
-            })
-            .collect();
+                owners,
+                variants,
+                comparison: server.get("comparison").to_string(),
+                borrow_targets,
+                install_targets,
+            });
+        }
 
         let agents = crate::sources::sessions::AGENTS
             .iter()
@@ -199,7 +273,7 @@ impl Snapshot {
                         .collect(),
                     mcp: mcp_records
                         .iter()
-                        .filter(|server| server.agent == spec.name)
+                        .filter(|server| server.owners.iter().any(|owner| owner == spec.name))
                         .map(|server| server.id.clone())
                         .collect(),
                     configs: configs
@@ -212,7 +286,7 @@ impl Snapshot {
             .collect();
 
         Self {
-            schema: 1,
+            schema: 2,
             generated_at: crate::frecency::now() as u64,
             agents,
             runs: run_records,
