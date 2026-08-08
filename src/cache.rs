@@ -160,7 +160,12 @@ pub fn gather() -> Vec<Item> {
     items.extend(read_cached("ports"));
     // Sessions are numerous enough to swamp the list; only the newest
     // few go in, and `s:` searches the rest.
-    items.extend(sessions.iter().take(crate::sources::sessions::IN_MAIN_LIST).cloned());
+    items.extend(
+        sessions.iter()
+            .filter(|session| crate::sources::sessions::visible(session))
+            .take(crate::sources::sessions::IN_MAIN_LIST)
+            .cloned(),
+    );
     items.extend(mcp.iter().cloned());
     // The `fleet` cache is deliberately *not* extended here, unlike its three
     // neighbours. It records who is running, not what they are doing, and

@@ -675,7 +675,24 @@ AI-generated titles where available:
 ```
 
 Sessions do not fill the empty-query home. `s:` shows the newest conversations
-and searches all of them.
+and searches all of them. `Ctrl+K` turns that browser into a lifecycle surface:
+fork through the Agent's own CLI, pin important conversations above recency,
+give them local names, archive them, export the untouched JSONL, reveal the
+native file, or move an inactive one to the Trash. A local name never rewrites the Agent's record, and its native title
+remains searchable.
+
+```text
+s:is:pinned       pinned conversations
+s:is:active       Sessions owned by a live Run
+s:is:archived     archived conversations
+s:is:all oauth    include archived Sessions while searching for oauth
+```
+
+Archive is only Prelude metadata. Native Claude, Codex and pi files remain the
+authority. Trash is deliberately narrower: it is unavailable while the Session
+is active, re-finds the fleet before acting, accepts only canonical JSONL files
+inside those Agents' known Session roots, asks first, and moves rather than
+unlinks.
 
 **Lend a skill or an MCP server to an agent that lacks it.** Prelude knows
 which agents have a capability and which do not. Where the receiving CLI has
@@ -890,6 +907,8 @@ Files, all under the usual XDG locations:
 | `$XDG_CONFIG_HOME/prelude/quicklinks.toml` | Your quicklinks |
 | `$XDG_CONFIG_HOME/prelude/roots.txt` | Which folders `f:` indexes |
 | `$XDG_DATA_HOME/prelude/frecency.tsv` | What you pick, so it learns |
+| `$XDG_DATA_HOME/prelude/sessions.json` | Local Session names, pins and archive state |
+| `$XDG_DATA_HOME/prelude/exports/` | Private raw Session exports |
 | `$XDG_DATA_HOME/prelude/clipboard.jsonl` | Clipboard history metadata |
 | `$XDG_DATA_HOME/prelude/clipboard/` | Private image payloads retained by clipboard history |
 | `$XDG_DATA_HOME/prelude/bus/` | Questions agents are waiting on — data, not cache, because an unanswered question must survive a cleared cache |

@@ -65,6 +65,18 @@ Agent sessions intentionally do not appear under `a:`. Hundreds of old
 conversations turned the agent overview into a session browser; `s:` already
 has that job.
 
+Session filters are explicit words inside that scope:
+
+| Query | Meaning |
+|---|---|
+| `s:is:pinned` | pinned, non-archived conversations |
+| `s:is:active` | conversations attached to a live Run |
+| `s:is:archived` | archived conversations only |
+| `s:is:all` | include archived conversations in ordinary text search |
+
+Archived Sessions are excluded from bare `s:` and from the small recent set
+in the general catalogue. Renamed Sessions still match their native title.
+
 ## Search providers
 
 A template Quicklink has two states:

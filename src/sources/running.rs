@@ -515,6 +515,15 @@ pub fn linked_identities(sessions: &[Item]) -> Vec<Item> {
     runs
 }
 
+/// Fresh identities for a destructive decision. This deliberately pays for
+/// `ps`, lsof and tmux again: a launcher row may have been open long enough
+/// for a Session to start after its snapshot was built.
+pub fn fresh_identities_with_sessions(sessions: &[Item]) -> Vec<Item> {
+    let mut runs = fleet();
+    attach_sessions(&mut runs, sessions);
+    runs
+}
+
 /// The fleet as it stands *now*: cached identities, live state.
 ///
 /// Every read here is a syscall, so a hundred runs cost well under a

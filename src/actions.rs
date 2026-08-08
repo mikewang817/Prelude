@@ -110,12 +110,36 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             if it.get("active_run").is_empty() {
                 v.push(a("run", "Resume now", it.get("agent")));
             }
+            if crate::sources::sessions::fork_cmd(it.get("agent"), it.get("id")).is_some() {
+                v.push(a("session-fork", "Fork conversation", "new Session with this context"));
+            }
+            if it.get("pinned") == "true" {
+                v.push(a("session-unpin", "Unpin conversation", "return to recency order"));
+            } else {
+                v.push(a("session-pin", "Pin conversation", "keep above recent sessions"));
+            }
+            v.push(a("session-rename", "Rename conversation…", it.title.clone()));
+            if !it.get("native_title").is_empty() {
+                v.push(a("session-reset-name", "Restore native name", it.get("native_title")));
+            }
+            if it.get("archived") == "true" {
+                v.push(a("session-unarchive", "Restore from archive", "return to normal session search"));
+            } else if it.get("active_run").is_empty() {
+                v.push(a("session-archive", "Archive conversation", "find later with s:is:archived"));
+            }
             v.push(a("details", "Show conversation details", it.get("opening")));
             if !it.get("cwd").is_empty() {
                 v.push(a("newsession", "Start fresh in this project", it.get("agent")));
                 v.push(a("cdsession", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
             }
+            if !it.get("file").is_empty() {
+                v.push(a("session-export", "Export raw conversation", "private Prelude exports folder"));
+                v.push(a("reveal-finder", "Reveal native session file", it.get("file")));
+            }
             v.push(a("copy", "Copy session ID", it.get("id")));
+            if it.get("active_run").is_empty() && !it.get("file").is_empty() {
+                v.push(a("session-trash", "Move native conversation to Trash…", "recoverable · removes it from the agent"));
+            }
             v
         }
         // In an agent conversation Enter starts this one beside the current
@@ -473,7 +497,7 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
 /// is red but not confirmed, because `docker start` exists; killing a
 /// process is both, because nothing brings it back.
 pub fn is_destructive(kind: Kind, id: &str) -> bool {
-    matches!(id, "killrun" | "stop" | "trash" | "mcpremove" | "quicklink-remove")
+    matches!(id, "killrun" | "stop" | "trash" | "session-trash" | "mcpremove" | "quicklink-remove")
         || id.starts_with("rm:")
         || id == "menu:rm"
         || (id == "run" && matches!(kind, Kind::Port | Kind::Proc))
@@ -778,6 +802,63 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             return crate::bus::answer(it.get("id"), text);
         }
         "cdsession" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd"))), paste),
+        "session-fork" => match crate::sources::sessions::fork_cmd(it.get("agent"), it.get("id")) {
+            Some(command) => ui::emit("RUN", &command, paste),
+            None => { ui::note("that agent has no known fork command", paste); return 2; }
+        },
+        "session-pin" | "session-unpin" => {
+            let pinned = id == "session-pin";
+            match crate::sources::sessions::set_pinned(it.get("session_id"), pinned) {
+                Ok(()) => ui::note(if pinned { "pinned conversation" } else { "unpinned conversation" }, paste),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
+        "session-rename" => {
+            let Some(title) = ui::prompt_line_initial(" conversation name ", &it.title) else {
+                return 130;
+            };
+            match crate::sources::sessions::rename(it.get("session_id"), &title) {
+                Ok(()) => ui::note("renamed conversation", paste),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
+        "session-reset-name" => match crate::sources::sessions::rename(it.get("session_id"), "") {
+            Ok(()) => ui::note("restored native conversation name", paste),
+            Err(e) => { ui::note(&e, paste); return 2; }
+        },
+        "session-archive" | "session-unarchive" => {
+            let archived = id == "session-archive";
+            match crate::sources::sessions::set_archived(it.get("session_id"), archived) {
+                Ok(()) => ui::note(
+                    if archived { "archived · find it with s:is:archived" } else { "restored conversation" },
+                    paste,
+                ),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
+        "session-export" => match crate::sources::sessions::export_raw(it) {
+            Ok(path) => {
+                if let Err(e) = crate::openwith::reveal_now(&path.to_string_lossy()) {
+                    ui::note(&format!("exported to {} ({e})", crate::paths::tilde(&path.to_string_lossy())), paste);
+                } else {
+                    ui::note(&format!("exported to {}", crate::paths::tilde(&path.to_string_lossy())), paste);
+                }
+            }
+            Err(e) => { ui::note(&e, paste); return 2; }
+        },
+        "session-trash" => {
+            if !ui::confirm(
+                &format!("move {} to the Trash?", crate::width::dtrunc(&it.title, 40)),
+                "Move conversation",
+                "recoverable from Finder · the agent will no longer list it",
+            ) {
+                return 130;
+            }
+            match crate::sources::sessions::trash_session(it) {
+                Ok(path) => ui::note(&format!("moved to {}", crate::paths::tilde(&path.to_string_lossy())), paste),
+                Err(e) => { ui::note(&e, paste); return 2; }
+            }
+        }
         "newsession" => ui::emit("RUN",
             &crate::sources::sessions::start_cmd(it.get("agent"),
                 Some(it.get("cwd")).filter(|s| !s.is_empty()), None), paste),

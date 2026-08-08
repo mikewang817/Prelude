@@ -276,7 +276,14 @@ pub fn text(it: &Item) -> String {
         Kind::Session => {
             kv(&mut out, "agent", it.get("agent"));
             kv(&mut out, "id", it.get("id"));
+            let status = [
+                (it.get("pinned") == "true").then_some("pinned"),
+                (it.get("archived") == "true").then_some("archived"),
+            ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            kv(&mut out, "status", &status);
+            kv(&mut out, "native title", it.get("native_title"));
             kv(&mut out, "where", &tilde(it.get("cwd")));
+            kv(&mut out, "file", &tilde(it.get("file")));
             if !it.get("active_run").is_empty() {
                 kv(&mut out, "active", it.get("active_state"));
                 kv(&mut out, "run", it.get("active_run"));

@@ -12,8 +12,174 @@
 use crate::exec::shq;
 use crate::item::{Item, Kind};
 use crate::paths;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+const PIN_RANK: f64 = 10_000.0;
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct SessionMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct MetadataFile {
+    #[serde(default = "metadata_schema")]
+    schema: u32,
+    #[serde(default)]
+    sessions: BTreeMap<String, SessionMeta>,
+}
+
+fn is_false(value: &bool) -> bool { !*value }
+fn metadata_schema() -> u32 { 1 }
+
+fn metadata_path() -> PathBuf {
+    paths::data().join("sessions.json")
+}
+
+fn create_private_dir(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("could not create {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("could not protect {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn empty_metadata() -> MetadataFile {
+    MetadataFile { schema: metadata_schema(), sessions: BTreeMap::new() }
+}
+
+fn read_metadata_result() -> Result<MetadataFile, String> {
+    match std::fs::read(metadata_path()) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| format!("session metadata is not valid JSON: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty_metadata()),
+        Err(e) => Err(format!("could not read session metadata: {e}")),
+    }
+}
+
+fn read_metadata() -> MetadataFile {
+    // Sources degrade to nothing. Interactive writes use the strict reader
+    // below so malformed metadata is never silently overwritten.
+    read_metadata_result().unwrap_or_else(|_| empty_metadata())
+}
+
+fn write_metadata(metadata: &MetadataFile) -> Result<(), String> {
+    use std::io::Write;
+    let path = metadata_path();
+    let dir = path.parent().ok_or_else(|| "no metadata directory".to_string())?;
+    create_private_dir(dir)?;
+    let bytes = serde_json::to_vec_pretty(metadata)
+        .map_err(|e| format!("could not encode session metadata: {e}"))?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp).map_err(|e| format!("could not write session metadata: {e}"))?;
+    file.write_all(&bytes).map_err(|e| format!("could not write session metadata: {e}"))?;
+    file.sync_all().map_err(|e| format!("could not sync session metadata: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("could not replace session metadata: {e}"))
+}
+
+fn clean_metadata(metadata: &mut MetadataFile) {
+    metadata.sessions.retain(|_, value| {
+        value.pinned || value.archived || value.title.as_ref().is_some_and(|s| !s.is_empty())
+    });
+}
+
+fn refresh_caches() {
+    let sessions = all();
+    crate::cache::write_cached("sessions", &sessions);
+    let runs = super::running::linked_identities(&sessions);
+    let linked = super::running::annotate_sessions(sessions, &runs);
+    crate::cache::write_cached("sessions-linked", &linked);
+}
+
+fn update_metadata(id: &str, edit: impl FnOnce(&mut SessionMeta)) -> Result<(), String> {
+    if id.is_empty() || !id.contains(':') {
+        return Err("that session has no stable identity".into());
+    }
+    let mut metadata = read_metadata_result()?;
+    if metadata.schema != metadata_schema() {
+        return Err(format!("session metadata schema {} is newer than this Prelude", metadata.schema));
+    }
+    edit(metadata.sessions.entry(id.to_string()).or_default());
+    clean_metadata(&mut metadata);
+    write_metadata(&metadata)?;
+    refresh_caches();
+    Ok(())
+}
+
+pub fn fork_cmd(agent: &str, id: &str) -> Option<String> {
+    match agent {
+        "claude" => Some(format!("claude --resume {} --fork-session", shq(id))),
+        "codex" => Some(format!("codex fork {}", shq(id))),
+        "pi" => Some(format!("pi --fork {}", shq(id))),
+        _ => None,
+    }
+}
+
+pub fn set_pinned(id: &str, pinned: bool) -> Result<(), String> {
+    update_metadata(id, |meta| meta.pinned = pinned)
+}
+
+pub fn set_archived(id: &str, archived: bool) -> Result<(), String> {
+    update_metadata(id, |meta| meta.archived = archived)
+}
+
+pub fn rename(id: &str, title: &str) -> Result<(), String> {
+    let title = crate::width::flatten(title).trim().chars().take(200).collect::<String>();
+    update_metadata(id, |meta| meta.title = (!title.is_empty()).then_some(title))
+}
+
+pub(crate) fn decorate_sessions(
+    sessions: &mut [Item],
+    metadata: &BTreeMap<String, SessionMeta>,
+) {
+    for session in sessions {
+        let Some(meta) = metadata.get(session.get("session_id")) else { continue };
+        if let Some(title) = meta.title.as_ref().filter(|title| !title.is_empty()) {
+            session.data.insert("native_title".into(), session.title.clone());
+            session.title = title.clone();
+        }
+        if meta.pinned {
+            let rank = session.get("rank").parse::<f64>().unwrap_or(0.0) + PIN_RANK;
+            session.data.insert("rank".into(), format!("{rank:.3}"));
+            session.data.insert("pinned".into(), "true".into());
+            session.score = session.kind.priority() as f64 + rank;
+        }
+        if meta.archived {
+            session.data.insert("archived".into(), "true".into());
+        }
+        if meta.pinned || meta.archived {
+            let mut tags = Vec::new();
+            if meta.pinned { tags.push("pinned"); }
+            if meta.archived { tags.push("archived"); }
+            let owner = session.get("agent").to_string();
+            if let Some(agent) = session.fields.first_mut() {
+                *agent = format!("{owner} · {}", tags.join(" · "));
+            }
+        }
+    }
+}
+
+pub fn visible(session: &Item) -> bool {
+    session.get("archived") != "true"
+}
 
 pub struct Agent {
     pub name: &'static str,
@@ -296,7 +462,7 @@ pub fn all() -> Vec<Item> {
     scan_pi(&mut raw);
     raw.sort_by_key(|r| std::cmp::Reverse(r.mtime));
 
-    raw.into_iter()
+    let mut sessions: Vec<Item> = raw.into_iter()
         .map(|r| {
             let ts = r.mtime.duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64()).unwrap_or(0.0);
@@ -317,7 +483,9 @@ pub fn all() -> Vec<Item> {
                 .put("file", r.path.to_string_lossy().into_owned())
                 .put("opening", crate::width::flatten(&r.opening))
         })
-        .collect()
+        .collect();
+    decorate_sessions(&mut sessions, &read_metadata().sessions);
+    sessions
 }
 
 /// Only the most recent handful go in the main list; `s:` searches them all.
@@ -333,7 +501,7 @@ pub const IN_MAIN_LIST: usize = 15;
 pub fn latest_for(agent: &str) -> Option<Item> {
     crate::cache::read_cached("sessions")
         .into_iter()
-        .find(|s| s.get("agent") == agent)
+        .find(|s| s.get("agent") == agent && visible(s))
 }
 
 /// `s:query` — search every session, not just the recent ones.
@@ -347,17 +515,139 @@ pub fn search(term: &str) -> Vec<Item> {
         let runs = super::running::linked_identities(&raw);
         all = super::running::annotate_sessions(raw, &runs);
     }
-    let needles: Vec<String> = term.split_whitespace().map(|w| w.to_lowercase()).collect();
+    filter_search(all, term).into_iter().take(80).collect()
+}
+
+pub(crate) fn filter_search(all: Vec<Item>, term: &str) -> Vec<Item> {
+    let mut archived = false;
+    let mut include_archived = false;
+    let mut pinned = false;
+    let mut active = false;
+    let mut needles = Vec::new();
+    for word in term.split_whitespace().map(|word| word.to_lowercase()) {
+        match word.as_str() {
+            "is:archived" => { archived = true; include_archived = true; }
+            "is:all" => include_archived = true,
+            "is:pinned" => pinned = true,
+            "is:active" => {
+                active = true;
+                include_archived = true;
+            }
+            _ => needles.push(word),
+        }
+    }
     all.into_iter()
-        .filter(|i| {
+        .filter(|session| {
+            let is_archived = session.get("archived") == "true";
+            if archived != is_archived && (archived || !include_archived) {
+                return false;
+            }
+            if pinned && session.get("pinned") != "true" {
+                return false;
+            }
+            if active && session.get("active_run").is_empty() {
+                return false;
+            }
             if needles.is_empty() {
                 return true;
             }
-            let hay = format!("{} {} {}", i.title, i.get("agent"), i.get("cwd")).to_lowercase();
-            needles.iter().all(|n| hay.contains(n.as_str()))
+            let hay = format!(
+                "{} {} {} {}",
+                session.title,
+                session.get("native_title"),
+                session.get("agent"),
+                session.get("cwd")
+            ).to_lowercase();
+            needles.iter().all(|needle| hay.contains(needle.as_str()))
         })
-        .take(80)
         .collect()
+}
+
+fn safe_export_name(session: &Item) -> String {
+    let mut name: String = session.title.chars()
+        .map(|c| if matches!(c, '/' | ':' | '\0') { '-' } else { c })
+        .take(80)
+        .collect();
+    name = name.trim().trim_matches('.').to_string();
+    if name.is_empty() {
+        name = session.get("id").chars().take(36).collect();
+    }
+    format!("{name}.jsonl")
+}
+
+pub fn export_raw(session: &Item) -> Result<PathBuf, String> {
+    let source = Path::new(session.get("file"));
+    if !safe_session_path(source, &paths::home()) {
+        return Err("that is not a recognised native session file".into());
+    }
+    let dir = paths::data().join("exports");
+    create_private_dir(&dir)?;
+    let name = safe_export_name(session);
+    let stem = Path::new(&name).file_stem().unwrap_or_default().to_string_lossy();
+    let mut destination = dir.join(&name);
+    let mut n = 2;
+    while destination.exists() {
+        destination = dir.join(format!("{stem} {n}.jsonl"));
+        n += 1;
+        if n > 999 {
+            return Err("too many exports with that name".into());
+        }
+    }
+    std::fs::copy(source, &destination).map_err(|e| format!("could not export conversation: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(destination)
+}
+
+pub(crate) fn safe_session_path(path: &Path, home: &Path) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return false;
+    }
+    let Ok(real) = path.canonicalize() else { return false };
+    let roots = [
+        home.join(".claude/projects"),
+        home.join(".codex/sessions"),
+        home.join(".codex/archived_sessions"),
+        home.join(".pi/agent/sessions"),
+    ];
+    roots.into_iter().filter_map(|root| root.canonicalize().ok()).any(|root| real.starts_with(root))
+}
+
+pub(crate) fn may_be_active(session: &Item, runs: &[Item]) -> bool {
+    runs.iter().any(|run| {
+        run.get("agent") == session.get("agent")
+            && (run.get("session_id") == session.get("session_id")
+                || (!session.get("cwd").is_empty() && run.get("cwd") == session.get("cwd")))
+    })
+}
+
+pub fn trash_session(session: &Item) -> Result<PathBuf, String> {
+    if !session.get("active_run").is_empty() {
+        return Err("an active conversation cannot be moved to the Trash".into());
+    }
+    // The row is a snapshot. Re-find processes now, and be conservative when
+    // a same-Agent, same-project Run cannot be attached unambiguously.
+    let mut sessions = crate::cache::read_cached("sessions");
+    if !sessions.iter().any(|candidate| candidate.get("session_id") == session.get("session_id")) {
+        sessions.push(session.clone());
+    }
+    let runs = super::running::fresh_identities_with_sessions(&sessions);
+    if may_be_active(session, &runs) {
+        return Err("that conversation may be active now; refresh before moving it".into());
+    }
+    let source = Path::new(session.get("file"));
+    if !safe_session_path(source, &paths::home()) {
+        return Err("that is not a recognised native session file".into());
+    }
+    let destination = paths::trash(source)?;
+    // Keep its Prelude metadata. Restoring the native file from Finder then
+    // restores its name and pin as well; an orphaned metadata row is tiny and
+    // never appears without an authoritative native Session.
+    refresh_caches();
+    Ok(destination)
 }
 
 /// The non-interactive invocation for an agent, if we know one.

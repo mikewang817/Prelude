@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 47 tests
+cargo test                 # 50 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -283,6 +283,24 @@ competing resume. `gather` writes the derived `sessions-linked` snapshot only
 when its bytes change; `s:` filters that file. Never repeat the join or call
 tmux in the per-keystroke helper.
 
+**Session metadata is an overlay, never the conversation authority.** Local
+names, pins and archive state live in the 0600 XDG data file
+`sessions.json`; they decorate stable Session ids after native Claude, Codex
+and pi files have been read. Archive hides a row and touches no Agent file.
+Pinned rank is source rank and must be recorded in `data` just like recency.
+Forking uses each native CLI (`claude --fork-session`, `codex fork`, `pi
+--fork`) and is absent when no syntax is known; do not fake it with a fresh
+Session. The explicit raw export stays under Prelude's 0700 data directory.
+
+Trashing a Session follows a stricter boundary than ordinary file trash: it
+is offered only while inactive, canonicalizes the path, requires a `.jsonl`
+below one of the known native Session roots, confirms with Cancel first, and
+uses `paths::trash`. Before moving it, re-find the fleet rather than trusting
+the launcher snapshot; an exact edge or even an ambiguous same-Agent,
+same-project Run refuses the move. Never broaden this to an arbitrary path
+carried by a Session-shaped Item. Metadata is deliberately retained after trash so a file
+restored from Finder recovers its name and pin.
+
 Four traps, each already paid for. A pane reports the pid of its *root*
 process, so an agent started by typing `claude` at that pane's shell is a
 child; matching pids alone finds none of them and lists every one twice.
@@ -348,8 +366,8 @@ generated blocks are marked so removing one preserves hand-written
 `quicklinks.toml` comments and search templates byte-for-byte, and URLs that
 look credential-bearing are refused rather than indexed. Outside Prelude's
 config and caches, only explicit actions write user files: installing a skill
-copy, or moving a selected file, application or skill copy to the Trash. None
-is a default action.
+copy, exporting a raw Session, or moving a selected file, application, skill
+copy or inactive native Session to the Trash. None is a default action.
 
 Deleting a skill copy is built so that being wrong is survivable rather than
 so that it cannot happen. It moves the directory to

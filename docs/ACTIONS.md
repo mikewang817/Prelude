@@ -129,10 +129,22 @@ A custom answer remains Enter's default.
 
 - Enter resumes an idle Session; an active Session goes to its tmux pane, or inserts its project when no pane address exists, rather than starting a competing resume
 - Resume now, only when no active Run owns it
+- Fork it through the native Claude, Codex or pi CLI; offer nothing where the Agent has no known fork verb
+- Pin or unpin it
+- Rename it, or restore the Agent's native title
+- Archive it without touching the native conversation; archived Sessions appear under `s:is:archived`
 - Show conversation details
 - Start fresh in the same project
 - Insert a `cd` command
+- Export the untouched JSONL into Prelude's private exports directory
+- Reveal the authoritative native file
 - Copy the session ID
+- Move an inactive native conversation to the Trash, after confirmation
+
+Archive is Prelude metadata and is reversible. Trash is offered only for an
+inactive Session, re-finds the fleet at action time, accepts only canonical
+JSONL files below the known Claude, Codex and pi Session roots, and never
+unlinks the file.
 
 ### Skill
 

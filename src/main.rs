@@ -1651,8 +1651,100 @@ mod tests {
     }
 
     #[test]
+    fn session_metadata_is_a_view_over_native_conversations() {
+        use crate::item::{Item, Kind};
+        use crate::sources::sessions::{decorate_sessions, filter_search, SessionMeta};
+        use std::collections::BTreeMap;
+
+        let native = Item::new("claude --resume abc", Kind::Session)
+            .rank(5.0)
+            .title("Native title")
+            .fields(["claude", "~/App", "now"])
+            .put("agent", "claude")
+            .put("session_id", "claude:abc")
+            .put("id", "abc");
+        let mut metadata = BTreeMap::new();
+        metadata.insert("claude:abc".into(), SessionMeta {
+            title: Some("My name".into()),
+            pinned: true,
+            archived: true,
+        });
+        let mut sessions = vec![native];
+        decorate_sessions(&mut sessions, &metadata);
+        let session = &sessions[0];
+        assert_eq!(session.title, "My name");
+        assert_eq!(session.get("native_title"), "Native title");
+        assert_eq!(session.get("pinned"), "true");
+        assert_eq!(session.get("archived"), "true");
+        assert!(session.get("rank").parse::<f64>().unwrap() > 10_000.0);
+        assert!(session.fields[0].contains("pinned · archived"));
+
+        sessions[0].data.insert("active_run".into(), "claude:7:1".into());
+        assert!(filter_search(sessions.clone(), "").is_empty());
+        assert_eq!(filter_search(sessions.clone(), "is:active").len(), 1);
+        assert_eq!(filter_search(sessions.clone(), "is:archived").len(), 1);
+        assert_eq!(filter_search(sessions.clone(), "is:all Native").len(), 1);
+        assert_eq!(filter_search(sessions, "is:pinned My").len(), 0); // archived stays hidden
+    }
+
+    #[test]
+    fn only_native_agent_session_files_pass_the_trash_boundary() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("prelude-session-boundary-{}", std::process::id()));
+        let valid = root.join(".claude/projects/project/abc.jsonl");
+        let wrong_ext = root.join(".claude/projects/project/abc.txt");
+        let outside = root.join("notes.jsonl");
+        fs::create_dir_all(valid.parent().unwrap()).unwrap();
+        fs::write(&valid, "{}\n").unwrap();
+        fs::write(&wrong_ext, "{}\n").unwrap();
+        fs::write(&outside, "{}\n").unwrap();
+        assert!(crate::sources::sessions::safe_session_path(&valid, &root));
+        assert!(!crate::sources::sessions::safe_session_path(&wrong_ext, &root));
+        assert!(!crate::sources::sessions::safe_session_path(&outside, &root));
+        assert!(!crate::sources::sessions::safe_session_path(&valid.join("../notes.jsonl"), &root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn active_sessions_cannot_be_archived_or_trashed() {
+        use crate::item::{Item, Kind};
+        let inactive = Item::new("claude --resume abc", Kind::Session)
+            .title("conversation")
+            .put("agent", "claude")
+            .put("session_id", "claude:abc")
+            .put("cwd", "/tmp/project")
+            .put("file", "/tmp/abc.jsonl");
+        let inactive_ids: Vec<_> = crate::actions::actions_for(&inactive)
+            .into_iter().map(|(id, ..)| id).collect();
+        assert!(inactive_ids.contains(&"session-archive"));
+        assert!(inactive_ids.contains(&"session-trash"));
+
+        let active = inactive.clone().put("active_run", "claude:7:1");
+        let active_ids: Vec<_> = crate::actions::actions_for(&active)
+            .into_iter().map(|(id, ..)| id).collect();
+        assert!(!active_ids.contains(&"session-archive"));
+        assert!(!active_ids.contains(&"session-trash"));
+
+        let maybe_same = Item::new("kill 7", Kind::Run)
+            .put("agent", "claude")
+            .put("cwd", "/tmp/project");
+        let other = Item::new("kill 8", Kind::Run)
+            .put("agent", "pi")
+            .put("cwd", "/tmp/project");
+        assert!(crate::sources::sessions::may_be_active(&inactive, &[maybe_same]));
+        assert!(!crate::sources::sessions::may_be_active(&inactive, &[other]));
+    }
+
+    #[test]
     fn native_agent_arguments_produce_stable_relationship_hints() {
         use crate::sources::running::{elapsed_seconds, requested_session};
+        assert_eq!(
+            crate::sources::sessions::fork_cmd("claude", "abc").as_deref(),
+            Some("claude --resume abc --fork-session"),
+        );
+        assert_eq!(crate::sources::sessions::fork_cmd("codex", "abc").as_deref(), Some("codex fork abc"));
+        assert_eq!(crate::sources::sessions::fork_cmd("pi", "abc").as_deref(), Some("pi --fork abc"));
+        assert!(crate::sources::sessions::fork_cmd("opencode", "abc").is_none());
         assert_eq!(elapsed_seconds("02:03"), Some(123));
         assert_eq!(elapsed_seconds("1-02:03:04"), Some(93_784));
         assert_eq!(requested_session("claude", &["--resume", "abc"]), Some("abc".into()));
@@ -1673,6 +1765,9 @@ mod tests {
             .put("agent", "claude")
             .put("id", "s1")
             .put("session_id", "claude:s1")
+            .put("native_title", "native")
+            .put("pinned", "true")
+            .put("archived", "true")
             .put("active_run", "claude:7:1");
         let graph = crate::control::Snapshot::from_items(&[run], &[session], &[], &[], &[]);
         let claude = graph.agents.iter().find(|agent| agent.id == "claude").unwrap();
@@ -1680,6 +1775,8 @@ mod tests {
         assert_eq!(claude.sessions, ["claude:s1"]);
         assert_eq!(graph.runs[0].session.as_deref(), Some("claude:s1"));
         assert_eq!(graph.sessions[0].active_run.as_deref(), Some("claude:7:1"));
+        assert_eq!(graph.sessions[0].native_title.as_deref(), Some("native"));
+        assert!(graph.sessions[0].pinned && graph.sessions[0].archived);
         assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
     }
 
