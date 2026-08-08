@@ -38,6 +38,15 @@ working inside an agent's terminal is correctly identified as that agent —
 which would otherwise make their own inbox unreachable from the very window
 they are sitting in.
 
+## Agent Control Plane work
+
+`docs/AGENT-CONTROL-PLANE.md` is the implementation source of truth. Read it
+before changing Agent, Run, Session, Task, Skill, MCP, Config, Home, messaging
+or Agent doctor behaviour. Work from its current milestone, update acceptance
+criteria and progress evidence in the same commit, and never call a milestone
+complete while it still has unchecked criteria. A conversation summary is not
+a substitute for updating that file.
+
 ## The rules that matter
 
 **Latency is the product.** fzf re-invokes the binary on *every keystroke*

@@ -653,6 +653,12 @@ owner/health/definition variants, effective borrow/install targets and config
 paths. Process prompts, full command lines and complete MCP definitions are
 deliberately absent because they may contain credentials.
 
+The remaining Control Plane work is tracked as checked acceptance criteria in
+[docs/AGENT-CONTROL-PLANE.md](docs/AGENT-CONTROL-PLANE.md). That file records
+the current milestone, deliberate gaps, validation baseline and implementation
+commits; it is the execution source of truth rather than a roadmap kept in a
+conversation.
+
 **MCP servers report real status**, asked of each agent rather than read out
 of config files: `✔ connected`, `⏸ disabled`, `⚠ not logged in`. Reading the
 config missed every claude.ai-hosted server and could not tell you whether
