@@ -317,6 +317,7 @@ As of 2026-08-08:
   - `1c18cb2` — stable Agent/Run/Session graph
   - `fb10c99` — Session lifecycle metadata and actions
   - `02f3d65` — Skill/MCP integrity matrix foundation
+  - `b5e4c39` — MCP transport, tools, refresh, public Diff and diagnostics
 
 ## Progress log
 
