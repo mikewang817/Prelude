@@ -45,6 +45,167 @@ impl Backend {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hotkey {
+    cmd: bool,
+    option: bool,
+    ctrl: bool,
+    shift: bool,
+    key: String,
+    key_code: u32,
+}
+
+impl Hotkey {
+    fn parse(value: &str) -> Result<Self, String> {
+        let mut cmd = false;
+        let mut option = false;
+        let mut ctrl = false;
+        let mut shift = false;
+        let mut key = None;
+        for raw in value.split('+') {
+            let part = raw.trim().to_ascii_lowercase();
+            let slot = match part.as_str() {
+                "cmd" | "command" => Some(&mut cmd),
+                "option" | "alt" => Some(&mut option),
+                "ctrl" | "control" => Some(&mut ctrl),
+                "shift" => Some(&mut shift),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                if *slot {
+                    return Err(format!("duplicate hotkey modifier {part:?}"));
+                }
+                *slot = true;
+                continue;
+            }
+            if key.is_some() || part.is_empty() {
+                return Err(format!(
+                    "invalid hotkey {value:?}; use modifiers joined to one space, letter or digit"
+                ));
+            }
+            key = Some(part);
+        }
+        if !(cmd || option || ctrl || shift) {
+            return Err("a global hotkey needs cmd, option, ctrl or shift".into());
+        }
+        let key =
+            key.ok_or_else(|| "a global hotkey needs a key after its modifiers".to_string())?;
+        let key_code = key_code(&key).ok_or_else(|| {
+            format!("unsupported hotkey key {key:?}; choose space, a letter or a digit")
+        })?;
+        Ok(Self {
+            cmd,
+            option,
+            ctrl,
+            shift,
+            key,
+            key_code,
+        })
+    }
+
+    fn canonical(&self) -> String {
+        let mut parts = Vec::new();
+        if self.cmd {
+            parts.push("cmd");
+        }
+        if self.option {
+            parts.push("option");
+        }
+        if self.ctrl {
+            parts.push("ctrl");
+        }
+        if self.shift {
+            parts.push("shift");
+        }
+        parts.push(&self.key);
+        parts.join("+")
+    }
+
+    fn is_cmd_space(&self) -> bool {
+        self.cmd && !self.option && !self.ctrl && !self.shift && self.key == "space"
+    }
+
+    fn matches_raycast(&self, value: &str) -> bool {
+        let mut command = false;
+        let mut option = false;
+        let mut control = false;
+        let mut shift = false;
+        let mut code = None;
+        for part in value.split('-') {
+            match part.to_ascii_lowercase().as_str() {
+                "command" => command = true,
+                "option" => option = true,
+                "control" => control = true,
+                "shift" => shift = true,
+                number => code = number.parse::<u32>().ok(),
+            }
+        }
+        command == self.cmd
+            && option == self.option
+            && control == self.ctrl
+            && shift == self.shift
+            && code == Some(self.key_code)
+    }
+}
+
+fn key_code(key: &str) -> Option<u32> {
+    Some(match key {
+        "a" => 0,
+        "s" => 1,
+        "d" => 2,
+        "f" => 3,
+        "h" => 4,
+        "g" => 5,
+        "z" => 6,
+        "x" => 7,
+        "c" => 8,
+        "v" => 9,
+        "b" => 11,
+        "q" => 12,
+        "w" => 13,
+        "e" => 14,
+        "r" => 15,
+        "y" => 16,
+        "t" => 17,
+        "1" => 18,
+        "2" => 19,
+        "3" => 20,
+        "4" => 21,
+        "6" => 22,
+        "5" => 23,
+        "9" => 25,
+        "7" => 26,
+        "8" => 28,
+        "0" => 29,
+        "o" => 31,
+        "u" => 32,
+        "i" => 34,
+        "p" => 35,
+        "l" => 37,
+        "j" => 38,
+        "k" => 40,
+        "n" => 45,
+        "m" => 46,
+        "space" => 49,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct GlobalConfig {
+    backend: Backend,
+    hotkey: Hotkey,
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            backend: Backend::Auto,
+            hotkey: Hotkey::parse("cmd+space").expect("default hotkey"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct GlobalStatus {
     pub schema: u8,
@@ -52,11 +213,14 @@ pub struct GlobalStatus {
     pub launch_agent_installed: bool,
     pub helper_running: bool,
     pub hotkey_registered: bool,
+    pub launcher_active: bool,
+    pub selected_hotkey: String,
+    pub spotlight_owns_hotkey: Option<bool>,
+    pub raycast_owns_hotkey: Option<bool>,
     pub selected_backend: String,
     pub ghostty_available: Option<bool>,
     pub effective_backend: Option<String>,
     pub zsh_widget_available: bool,
-    pub spotlight_owns_cmd_space: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event: Option<serde_json::Value>,
 }
@@ -83,6 +247,10 @@ fn status_path() -> PathBuf {
     crate::paths::cache().join("global-status.json")
 }
 
+fn active_path() -> PathBuf {
+    crate::paths::cache().join("global-active")
+}
+
 fn stdout_path() -> PathBuf {
     crate::paths::cache().join("global-hotkey.log")
 }
@@ -91,38 +259,133 @@ fn stderr_path() -> PathBuf {
     crate::paths::cache().join("global-hotkey-error.log")
 }
 
-fn backend_from(path: &Path) -> Result<Backend, String> {
+fn config_from(path: &Path) -> Result<GlobalConfig, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Backend::Auto),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(GlobalConfig::default()),
         Err(e) => return Err(format!("could not read {}: {e}", path.display())),
     };
     let parsed = crate::minitoml::parse(&text);
-    let value = parsed
-        .get("")
-        .and_then(|root| root.get("backend"))
-        .map(String::as_str)
-        .unwrap_or("auto");
-    Backend::parse(value)
+    let root = parsed.get("");
+    let backend = Backend::parse(
+        root.and_then(|table| table.get("backend"))
+            .map(String::as_str)
+            .unwrap_or("auto"),
+    )?;
+    let hotkey = Hotkey::parse(
+        root.and_then(|table| table.get("hotkey"))
+            .map(String::as_str)
+            .unwrap_or("cmd+space"),
+    )?;
+    Ok(GlobalConfig { backend, hotkey })
 }
 
-fn configured_backend() -> Result<Backend, String> {
-    backend_from(&config_path())
+fn configured() -> Result<GlobalConfig, String> {
+    config_from(&config_path())
 }
 
-fn write_backend(backend: Backend) -> Result<(), String> {
+fn write_config(config: &GlobalConfig) -> Result<(), String> {
     let path = config_path();
     crate::cache::write_atomic(
         &path,
         format!(
-            "# Terminal created by the global Cmd+Space helper.\n# auto prefers Ghostty and falls back to Terminal.app.\nbackend = \"{}\"\n",
-            backend.as_str()
+            "# Terminal and chord used by the global launcher helper.\n# auto prefers Ghostty and falls back to Terminal.app.\nbackend = \"{}\"\nhotkey = \"{}\"\n",
+            config.backend.as_str(), config.hotkey.canonical()
         )
         .as_bytes(),
     )
     .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     private_file(&path)?;
     Ok(())
+}
+
+fn write_backend(backend: Backend) -> Result<(), String> {
+    if launcher_active() {
+        return Err("a global Prelude launcher is open; close it before changing the backend".into());
+    }
+    let mut config = configured()?;
+    config.backend = backend;
+    write_config(&config)
+}
+
+fn helper_supports_configurable_hotkey() -> bool {
+    helper_probe()
+        .and_then(|probe| probe.get("selected_hotkey").cloned())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .is_some()
+}
+
+fn write_hotkey(hotkey: Hotkey) -> Result<String, String> {
+    let mut config = configured()?;
+    if let Some(owner) = known_conflict(&hotkey) {
+        if config.hotkey == hotkey {
+            stop_helper();
+        }
+        return Err(format!(
+            "{} is already configured for {owner}; change it there or choose another chord",
+            hotkey.canonical()
+        ));
+    }
+    if config.hotkey == hotkey {
+        return Ok(format!("global hotkey already uses {}", hotkey.canonical()));
+    }
+    if launcher_active() {
+        return Err(
+            "a global Prelude launcher is open; close it before changing the hotkey".into(),
+        );
+    }
+
+    let old = std::fs::read(config_path()).ok();
+    let was_running = running();
+    let installed = executable_path().is_file();
+    stop_helper();
+    config.hotkey = hotkey.clone();
+    if let Err(e) = write_config(&config) {
+        if was_running {
+            let _ = start_helper();
+        }
+        return Err(e);
+    }
+
+    if !installed {
+        return Ok(format!(
+            "global hotkey: {} (install with `prelude global install`)",
+            hotkey.canonical()
+        ));
+    }
+    if !helper_supports_configurable_hotkey() {
+        return Ok(format!(
+            "global hotkey: {}. The installed helper predates configurable keys; run `prelude global install` to upgrade and start it.",
+            hotkey.canonical()
+        ));
+    }
+
+    let restore = |bytes: Option<&[u8]>| {
+        match bytes {
+            Some(bytes) => {
+                let _ = crate::cache::write_atomic(&config_path(), bytes);
+                let _ = private_file(&config_path());
+            }
+            None => {
+                let _ = std::fs::remove_file(config_path());
+            }
+        }
+        if was_running {
+            let _ = start_helper();
+        }
+    };
+    if let Err(e) = check_hotkey_with(&executable_path()) {
+        restore(old.as_deref());
+        return Err(format!(
+            "{} is unavailable: {e}; the previous hotkey was restored",
+            hotkey.canonical()
+        ));
+    }
+    if let Err(e) = start_helper() {
+        restore(old.as_deref());
+        return Err(format!("{e}; the previous hotkey was restored"));
+    }
+    Ok(format!("global hotkey: {}", hotkey.canonical()))
 }
 
 #[cfg(unix)]
@@ -146,7 +409,7 @@ fn xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn info_plist(config: &Path, status: &Path) -> String {
+fn info_plist(config: &Path, status: &Path, active: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -164,11 +427,13 @@ fn info_plist(config: &Path, status: &Path) -> String {
   <key>NSAppleEventsUsageDescription</key><string>Prelude opens a new Terminal window when Ghostty is unavailable.</string>
   <key>PreludeConfigPath</key><string>{config}</string>
   <key>PreludeStatusPath</key><string>{status}</string>
+  <key>PreludeActivePath</key><string>{active}</string>
 </dict></plist>
 "#,
         version = env!("CARGO_PKG_VERSION"),
         config = xml(&config.to_string_lossy()),
         status = xml(&status.to_string_lossy()),
+        active = xml(&active.to_string_lossy()),
     )
 }
 
@@ -219,7 +484,7 @@ fn build_app(destination: &Path) -> Result<(), String> {
     std::fs::write(&source, SWIFT).map_err(|e| format!("could not stage helper source: {e}"))?;
     std::fs::write(
         contents.join("Info.plist"),
-        info_plist(&config_path(), &status_path()),
+        info_plist(&config_path(), &status_path(), &active_path()),
     )
     .map_err(|e| format!("could not write helper metadata: {e}"))?;
 
@@ -343,12 +608,22 @@ fn start_helper() -> Result<(), String> {
     if !path.exists() {
         return Err("global hotkey is not installed; run `prelude global install`".into());
     }
-    let submitted = if loaded() {
-        launchctl(&["kickstart", "-k", &service()])
-    } else {
-        launchctl(&["bootstrap", &domain(), &path.to_string_lossy()])
-    };
-    if !submitted {
+    let config = configured()?;
+    if let Some(owner) = known_conflict(&config.hotkey) {
+        stop_helper();
+        return Err(format!(
+            "{} is already configured for {owner}; change it there or choose another Prelude chord",
+            config.hotkey.canonical()
+        ));
+    }
+    if loaded() {
+        stop_helper();
+    }
+    if helper_supports_configurable_hotkey() {
+        check_hotkey_with(&executable_path())
+            .map_err(|e| format!("{} is unavailable: {e}", config.hotkey.canonical()))?;
+    }
+    if !launchctl(&["bootstrap", &domain(), &path.to_string_lossy()]) {
         return Err(
             "launchd could not start the Prelude hotkey helper; run `prelude global status`".into(),
         );
@@ -364,11 +639,20 @@ fn install() -> Result<String, String> {
     if !cfg!(target_os = "macos") {
         return Err("the global hotkey is available on macOS only".into());
     }
-    if !config_path().exists() {
-        write_backend(Backend::Auto)?;
-    } else {
-        configured_backend()?;
+    let config = configured()?;
+    if let Some(owner) = known_conflict(&config.hotkey) {
+        stop_helper();
+        return Err(format!(
+            "{} is already configured for {}; change it there or choose another Prelude chord with `prelude global hotkey HOTKEY`",
+            config.hotkey.canonical(), owner
+        ));
     }
+    if launcher_active() {
+        return Err(
+            "a global Prelude launcher is open; close it before upgrading the helper".into(),
+        );
+    }
+    write_config(&config)?;
     std::fs::create_dir_all(crate::paths::home().join("Applications"))
         .map_err(|e| format!("could not create ~/Applications: {e}"))?;
     std::fs::create_dir_all(crate::paths::cache())
@@ -399,7 +683,18 @@ fn install() -> Result<String, String> {
             .map_err(|e| format!("could not clear old installer backup: {e}"))?;
     }
 
+    let was_running = running();
     stop_helper();
+    if let Err(e) = check_hotkey_with(&staged.join("Contents/MacOS").join(EXECUTABLE)) {
+        let _ = std::fs::remove_dir_all(&staged);
+        if was_running {
+            let _ = start_helper();
+        }
+        return Err(format!(
+            "{} is unavailable: {e}. Change the other application or run `prelude global hotkey HOTKEY`",
+            config.hotkey.canonical()
+        ));
+    }
     if destination.exists() {
         std::fs::rename(&destination, &backup)
             .map_err(|e| format!("could not preserve the installed helper: {e}"))?;
@@ -448,11 +743,11 @@ fn install() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&backup);
     }
 
-    let spotlight = spotlight_owns_cmd_space();
     let mut result = format!(
-        "installed {}\nbackend: {}\n",
+        "installed {}\nbackend: {}\nhotkey: {}\n",
         destination.display(),
-        configured_backend()?.as_str()
+        config.backend.as_str(),
+        config.hotkey.canonical()
     );
     let registration_failed = std::fs::read(status_path())
         .ok()
@@ -465,16 +760,12 @@ fn install() -> Result<String, String> {
         })
         .as_deref()
         == Some("registration-failed");
-    if spotlight == Some(true) {
+    if registration_failed {
         result.push_str(
-            "Cmd+Space is still assigned to Spotlight. Disable it in System Settings → Keyboard → Keyboard Shortcuts → Spotlight.\n",
-        );
-    } else if registration_failed {
-        result.push_str(
-            "Cmd+Space is owned by another application. Free it, then run `prelude global start`.\n",
+            "The chord was claimed after preflight. Free it or choose another, then run `prelude global start`.\n",
         );
     } else {
-        result.push_str("Cmd+Space is registered; each press opens a fresh terminal.\n");
+        result.push_str("The global chord is registered; one launcher may be open at a time.\n");
     }
     result.push_str("Terminal.app may ask for Automation permission the first time it is used.\n");
     if !zsh_widget_available() {
@@ -487,6 +778,7 @@ fn install() -> Result<String, String> {
 
 fn uninstall(reset: bool) -> Result<String, String> {
     stop_helper();
+    let _ = std::fs::remove_file(active_path());
     let agent = launch_agent_path();
     if agent.exists() {
         std::fs::remove_file(&agent)
@@ -498,7 +790,13 @@ fn uninstall(reset: bool) -> Result<String, String> {
             .map_err(|e| format!("could not remove {}: {e}", app.display()))?;
     }
     if reset {
-        for path in [config_path(), status_path(), stdout_path(), stderr_path()] {
+        for path in [
+            config_path(),
+            status_path(),
+            active_path(),
+            stdout_path(),
+            stderr_path(),
+        ] {
             if path.exists() {
                 std::fs::remove_file(&path)
                     .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
@@ -538,7 +836,10 @@ fn zsh_widget_available() -> bool {
         .any(|line| line.trim() == "_prelude_widget: function")
 }
 
-fn spotlight_owns_cmd_space() -> Option<bool> {
+fn spotlight_owns(hotkey: &Hotkey) -> Option<bool> {
+    if !hotkey.is_cmd_space() {
+        return Some(false);
+    }
     let plist = crate::paths::home().join("Library/Preferences/com.apple.symbolichotkeys.plist");
     let plist = plist.to_string_lossy();
     let out = crate::exec::run(
@@ -558,10 +859,86 @@ fn spotlight_owns_cmd_space() -> Option<bool> {
     }
 }
 
+fn raycast_owns(hotkey: &Hotkey) -> Option<bool> {
+    let plist = crate::paths::home().join("Library/Preferences/com.raycast.macos.plist");
+    if !plist.exists() {
+        return Some(false);
+    }
+    let plist = plist.to_string_lossy();
+    let out = crate::exec::run(
+        &[
+            "/usr/bin/plutil",
+            "-extract",
+            "raycastGlobalHotkey",
+            "raw",
+            &plist,
+        ],
+        Duration::from_secs(2),
+    );
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(hotkey.matches_raycast(out.trim()))
+    }
+}
+
+fn known_conflict(hotkey: &Hotkey) -> Option<&'static str> {
+    if spotlight_owns(hotkey) == Some(true) {
+        Some("Spotlight")
+    } else if raycast_owns(hotkey) == Some(true) {
+        Some("Raycast")
+    } else {
+        None
+    }
+}
+
+fn check_hotkey_with(executable: &Path) -> Result<(), String> {
+    let status = Command::new(executable)
+        .arg("--check-hotkey")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not check the requested global hotkey: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(
+            "the hotkey is already registered by macOS or another application such as Raycast"
+                .into(),
+        )
+    }
+}
+
+fn launcher_active() -> bool {
+    let Ok(meta) = std::fs::metadata(active_path()) else {
+        return false;
+    };
+    let fresh = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age < Duration::from_secs(30 * 60));
+    if !fresh {
+        let _ = std::fs::remove_file(active_path());
+        return false;
+    }
+    std::fs::read_to_string(active_path()).is_ok_and(|token| !token.trim().is_empty())
+}
+
 pub fn status() -> GlobalStatus {
-    let selected = configured_backend()
-        .map(|b| b.as_str().to_string())
+    let parsed = configured();
+    let selected_backend = parsed
+        .as_ref()
+        .map(|config| config.backend.as_str().to_string())
         .unwrap_or_else(|e| format!("invalid: {e}"));
+    let selected_hotkey = parsed
+        .as_ref()
+        .map(|config| config.hotkey.canonical())
+        .unwrap_or_else(|e| format!("invalid: {e}"));
+    let hotkey = parsed
+        .map(|config| config.hotkey)
+        .unwrap_or_else(|_| GlobalConfig::default().hotkey);
     let probe = helper_probe();
     let ghostty_available = probe
         .as_ref()
@@ -582,18 +959,25 @@ pub fn status() -> GlobalStatus {
         .and_then(|event| event.get("event"))
         .and_then(serde_json::Value::as_str)
         == Some("registration-failed");
-    let spotlight = spotlight_owns_cmd_space();
+    let spotlight = spotlight_owns(&hotkey);
+    let raycast = raycast_owns(&hotkey);
     GlobalStatus {
-        schema: 1,
+        schema: 2,
         app_installed: executable_path().is_file(),
         launch_agent_installed: launch_agent_path().is_file(),
         helper_running,
-        hotkey_registered: helper_running && !registration_failed && spotlight != Some(true),
-        selected_backend: selected,
+        hotkey_registered: helper_running
+            && !registration_failed
+            && spotlight != Some(true)
+            && raycast != Some(true),
+        launcher_active: launcher_active(),
+        selected_hotkey,
+        spotlight_owns_hotkey: spotlight,
+        raycast_owns_hotkey: raycast,
+        selected_backend,
         ghostty_available,
         effective_backend,
         zsh_widget_available: zsh_widget_available(),
-        spotlight_owns_cmd_space: spotlight,
         last_event,
     }
 }
@@ -623,12 +1007,21 @@ fn print_status(json: bool) -> i32 {
             },
         );
         line(
-            "Cmd+Space registered",
+            &format!("{} registered", s.selected_hotkey),
             s.hotkey_registered,
             if s.hotkey_registered {
                 "listener active"
             } else {
-                "free the shortcut, then run: prelude global start"
+                "free the shortcut or choose another, then run: prelude global start"
+            },
+        );
+        line(
+            "launcher singleton",
+            true,
+            if s.launcher_active {
+                "one Prelude launcher is open"
+            } else {
+                "ready"
             },
         );
         line(
@@ -667,16 +1060,17 @@ fn print_status(json: bool) -> i32 {
             }
         );
         println!(
-            "  {} Spotlight  {}",
-            if s.spotlight_owns_cmd_space == Some(true) {
+            "  {} conflicts  {}",
+            if s.spotlight_owns_hotkey == Some(true) || s.raycast_owns_hotkey == Some(true) {
                 "✗"
             } else {
                 "✓"
             },
-            match s.spotlight_owns_cmd_space {
-                Some(true) => "still owns Cmd+Space",
-                Some(false) => "Cmd+Space is free",
-                None => "shortcut state unavailable",
+            match (s.spotlight_owns_hotkey, s.raycast_owns_hotkey) {
+                (Some(true), _) => "Spotlight owns this chord",
+                (_, Some(true)) => "Raycast owns this chord",
+                (None, _) | (_, None) => "known-owner state partly unavailable",
+                _ => "no Spotlight or Raycast conflict",
             }
         );
         if let Some(event) = &s.last_event {
@@ -691,7 +1085,8 @@ fn print_status(json: bool) -> i32 {
         && s.helper_running
         && s.hotkey_registered
         && s.zsh_widget_available
-        && s.spotlight_owns_cmd_space != Some(true)
+        && s.spotlight_owns_hotkey != Some(true)
+        && s.raycast_owns_hotkey != Some(true)
     {
         0
     } else {
@@ -704,6 +1099,13 @@ fn line(label: &str, good: bool, detail: &str) {
 }
 
 fn open_once() -> Result<(), String> {
+    let config = configured()?;
+    if let Some(owner) = known_conflict(&config.hotkey) {
+        return Err(format!(
+            "{} is already configured for {owner}; choose another with `prelude global hotkey HOTKEY`",
+            config.hotkey.canonical()
+        ));
+    }
     let exe = executable_path();
     if !exe.is_file() {
         return Err("global hotkey helper is not installed; run `prelude global install`".into());
@@ -737,14 +1139,21 @@ pub fn dispatch(args: &[&str]) -> i32 {
         ["status"] => return print_status(false),
         ["status", "--json"] => return print_status(true),
         ["open"] => open_once(),
-        ["backend"] => configured_backend().map(|b| println!("{}", b.as_str())),
+        ["clear"] => {
+            let _ = std::fs::remove_file(active_path());
+            println!("cleared the global launcher lease");
+            Ok(())
+        }
+        ["hotkey"] => configured().map(|config| println!("{}", config.hotkey.canonical())),
+        ["hotkey", value] => Hotkey::parse(value).and_then(write_hotkey).map(|message| println!("{message}")),
+        ["backend"] => configured().map(|config| println!("{}", config.backend.as_str())),
         ["backend", value] => Backend::parse(value).and_then(|backend| {
             write_backend(backend)?;
             println!("global terminal backend: {}", backend.as_str());
             Ok(())
         }),
         _ => Err(
-            "usage: prelude global install|uninstall|start|stop|status|open|backend [auto|ghostty|terminal]"
+            "usage: prelude global install|uninstall|start|stop|status|open|clear|hotkey [CHORD]|backend [auto|ghostty|terminal]"
                 .into(),
         ),
     };
@@ -770,15 +1179,38 @@ mod tests {
     }
 
     #[test]
-    fn backend_config_accepts_only_the_three_public_choices() {
+    fn config_accepts_only_public_backends_and_canonical_hotkeys() {
         let path = temp("backend");
-        std::fs::write(&path, "backend = \"ghostty\"\n").unwrap();
-        assert_eq!(backend_from(&path).unwrap(), Backend::Ghostty);
+        std::fs::write(
+            &path,
+            "backend = \"ghostty\"\nhotkey = \"Shift+Command+K\"\n",
+        )
+        .unwrap();
+        let config = config_from(&path).unwrap();
+        assert_eq!(config.backend, Backend::Ghostty);
+        assert_eq!(config.hotkey.canonical(), "cmd+shift+k");
         std::fs::write(&path, "backend = \"something-else\"\n").unwrap();
-        assert!(backend_from(&path)
+        assert!(config_from(&path)
             .unwrap_err()
             .contains("auto, ghostty or terminal"));
+        for bad in ["space", "cmd", "cmd+f1", "cmd+space+q", "cmd+cmd+q"] {
+            std::fs::write(&path, format!("hotkey = \"{bad}\"\n")).unwrap();
+            assert!(config_from(&path).is_err(), "{bad}");
+        }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raycast_hotkey_encoding_is_compared_as_a_chord_not_as_prose() {
+        let cmd_space = Hotkey::parse("cmd+space").unwrap();
+        assert!(cmd_space.matches_raycast("Command-49"));
+        assert!(!cmd_space.matches_raycast("Command-Shift-49"));
+        assert!(!Hotkey::parse("option+space")
+            .unwrap()
+            .matches_raycast("Command-49"));
+        assert!(Hotkey::parse("ctrl+shift+k")
+            .unwrap()
+            .matches_raycast("Control-Shift-40"));
     }
 
     #[test]
@@ -792,14 +1224,18 @@ mod tests {
             crate::paths::home().join("Library/LaunchAgents/app.prelude.hotkey.plist")
         );
         assert!(config_path().starts_with(crate::paths::config()));
-        for path in [status_path(), stdout_path(), stderr_path()] {
+        for path in [status_path(), active_path(), stdout_path(), stderr_path()] {
             assert!(path.starts_with(crate::paths::cache()));
         }
     }
 
     #[test]
     fn generated_metadata_escapes_paths_and_contains_no_selected_payload() {
-        let info = info_plist(Path::new("/tmp/a&b/config"), Path::new("/tmp/<status>"));
+        let info = info_plist(
+            Path::new("/tmp/a&b/config"),
+            Path::new("/tmp/<status>"),
+            Path::new("/tmp/active"),
+        );
         assert!(info.contains("/tmp/a&amp;b/config"));
         assert!(info.contains("/tmp/&lt;status&gt;"));
         assert!(info.contains("<key>LSUIElement</key><true/>"));
@@ -822,6 +1258,8 @@ mod tests {
         assert!(SWIFT.contains("/usr/bin/osascript"));
         assert!(SWIFT.contains("did not answer within 10 seconds"));
         assert!(SWIFT.contains("RegisterEventHotKey"));
+        assert!(SWIFT.contains("--check-hotkey"));
+        assert!(SWIFT.contains("PreludeActivePath"));
         assert!(!SWIFT.contains("SELECTED_COMMAND"));
         assert!(!SWIFT.contains("sh -c"));
     }

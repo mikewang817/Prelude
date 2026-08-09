@@ -314,9 +314,10 @@ HUMANS
   prelude fleet --status one short line for a tmux status bar
   prelude watch          notify the moment an agent stops and waits for you
   prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
-  prelude global install|uninstall|start|stop|status|open
+  prelude global install|uninstall|start|stop|status|open|clear
+  prelude global hotkey [CHORD]
   prelude global backend [auto|ghostty|terminal]
-                         global Cmd+Space; Ghostty first, Terminal fallback
+                         configurable global key; Ghostty first, Terminal fallback
   prelude doctor agents|sessions|skills|mcp
                          what is wrong with the agent side of the machine
                          --json for fields · --repair asks about each finding

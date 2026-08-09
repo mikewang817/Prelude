@@ -176,13 +176,27 @@ compiler supplied by Xcode Command Line Tools, then loads a per-user
 LaunchAgent. It is repeatable and restores the previous helper if an upgrade
 cannot be started.
 
-macOS assigns `Cmd+Space` to Spotlight by default. Disable **Show Spotlight
-search** under **System Settings → Keyboard → Keyboard Shortcuts → Spotlight**;
-Prelude reports the conflict but never rewrites a system shortcut.
+The default is `Cmd+Space`. Before installation or a key change Prelude checks
+Spotlight, Raycast's configured global key, and a native Carbon reservation. A
+conflict stops installation and leaves the previous working configuration
+alone; Prelude never rewrites another application's shortcut. Disable **Show
+Spotlight search** under **System Settings → Keyboard → Keyboard Shortcuts →
+Spotlight**, change Raycast's Hotkey setting, or choose another chord:
 
-Every press creates a new login-zsh terminal in `$HOME` and invokes the same
+```sh
+prelude global hotkey cmd+shift+space
+```
+
+A chord is one or more of `cmd`, `option`, `ctrl`, `shift` plus `space`, a
+letter or a digit. Modifiers are normalized, malformed or modifier-free keys
+are refused, and `prelude global status` names known conflicts.
+
+A launch creates a new login-zsh terminal in `$HOME` and invokes the same
 `_prelude_widget` as `Ctrl+R` — there is no delayed synthetic keypress and no
-existing terminal is reused. If Ghostty is installed, Prelude asks Launch
+existing terminal is reused. While that Prelude launcher remains open, further
+hotkeys focus its terminal application instead of opening duplicates. As soon
+as Prelude returns to the prompt, its private token-checked lease is released
+and the next hotkey creates a fresh launcher. If Ghostty is installed, Prelude asks Launch
 Services for a new Ghostty app/window. Otherwise it creates a new Terminal.app
 window. Terminal may request Automation permission on first use.
 
@@ -194,7 +208,10 @@ prelude global open               # exercise the selected backend without the ke
 ```
 
 Commands still land on that new shell's prompt for review. Files, URLs and
-applications still open directly. `prelude global uninstall` removes the app
+applications still open directly. A killed terminal cannot reserve the
+launcher forever: the lease expires after 30 minutes, and `prelude global
+clear` removes only that Prelude-owned lease when immediate recovery is needed.
+`prelude global uninstall` removes the app
 and LaunchAgent while retaining the backend preference; add `--reset` to remove
 Prelude's global-helper preference and status files too. The helper has no Dock
 icon, starts through a per-user LaunchAgent and carries no selected result in
@@ -954,9 +971,11 @@ run for themselves.
 | `prelude watch` | notify the moment an agent stops and waits |
 | `prelude global install` | install and start the native Cmd+Space helper |
 | `prelude global status [--json]` | helper, backend, zsh and Spotlight diagnostics |
-| `prelude global open` | create one fresh terminal without pressing the hotkey |
+| `prelude global open` | open or focus the singleton launcher without pressing the hotkey |
+| `prelude global hotkey CHORD` | inspect or change the validated global chord |
 | `prelude global backend auto\|ghostty\|terminal` | choose terminal fallback behaviour |
 | `prelude global start\|stop\|uninstall` | manage or remove the per-user helper |
+| `prelude global clear` | clear only a stale singleton lease |
 
 **Your agents**
 
@@ -1002,7 +1021,7 @@ Files, all under the usual XDG locations:
 |---|---|
 | `$XDG_CONFIG_HOME/prelude/snippets.toml` | Your snippets |
 | `$XDG_CONFIG_HOME/prelude/quicklinks.toml` | Your quicklinks |
-| `$XDG_CONFIG_HOME/prelude/global.toml` | `auto`, `ghostty` or `terminal` for Cmd+Space |
+| `$XDG_CONFIG_HOME/prelude/global.toml` | Global hotkey and `auto`, `ghostty` or `terminal` backend |
 | `$XDG_CONFIG_HOME/prelude/roots.txt` | Which folders `f:` indexes |
 | `$XDG_DATA_HOME/prelude/frecency.tsv` | What you pick, so it learns |
 | `$XDG_DATA_HOME/prelude/sessions.json` | Local Session names, pins and archive state |

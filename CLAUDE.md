@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 130 tests
+cargo test                 # 131 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -44,7 +44,15 @@ they are sitting in.
 AppKit executable built from `macos/PreludeHotkey/main.swift`; no GUI dependency
 belongs in the latency-sensitive Rust binary. It discovers Ghostty through
 Launch Services, falls back to one fixed Terminal Apple Event, and creates a
-fresh terminal rather than typing into an existing one.
+fresh terminal rather than typing into an existing one. The configured chord
+must pass Spotlight, Raycast and native reservation checks before a helper is
+installed or restarted. Never rewrite another application's shortcut.
+
+Only one launcher may be active. The helper's private lease contains a random
+token and no selected payload; the one-shot zsh widget removes it when Prelude
+returns. Repeated hotkeys focus the effective terminal application. Keep a
+bounded stale lease and an explicit diagnostic/clear path so a killed terminal
+cannot lock Prelude out permanently.
 
 `PRELUDE_AUTOSTART` is consumed only by the generated zsh integration. Its
 one-shot ZLE hook must dispatch the existing `_prelude_widget`, remove itself

@@ -60,14 +60,14 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
       then restores an ordinary shell.
 - [x] The hook invokes the same `_prelude_widget`; it does not synthesize a
       delayed `Ctrl+R` or duplicate `INSERT`, `RUN` and `MSG` handling.
-- [x] A native helper registers `Cmd+Space`, ignores key repeat, and creates one
-      fresh terminal per press.
+- [x] A native helper registers the configured chord, ignores key repeat, and
+      creates a fresh terminal when no launcher is already active.
 - [x] Ghostty is detected by bundle identifier and launched as a new app/window
       with a login zsh and `$HOME` working directory.
 - [x] Terminal.app is the fallback and receives only a fixed bootstrap command.
 - [x] `auto`, `ghostty` and `terminal` are supported, with validated atomic
       configuration under Prelude's XDG config directory.
-- [x] `prelude global install|uninstall|start|stop|status|open|backend` manages
+- [x] `prelude global install|uninstall|start|stop|status|open|hotkey|backend` manages
       the app, LaunchAgent and preference without touching terminal or shell
       configuration.
 - [x] Installation is repeatable, upgrades atomically, uses no personal path,
@@ -90,7 +90,7 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
 
 ## Validation record
 
-- 130 Rust tests pass. A PTY exercise with a fixture `prelude` command confirmed
+- 131 Rust tests pass. A PTY exercise with a fixture `prelude` command confirmed
   that `PRELUDE_AUTOSTART` invokes the widget once, removes its hook, and leaves
   the next prompt ordinary.
 - The Swift helper compiles optimized with warnings as errors and reports
@@ -108,34 +108,50 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
   removal were exercised in an isolated HOME; `--reset` removed the Prelude
   preference and status while ordinary uninstall retained configuration.
 - Release Clippy passed with `--all-targets -D warnings`; `git diff --check` and
-  the release build passed. Three final gather runs had medians 21.7–26.3 ms
-  and an observed maximum 38.8 ms against the 40 ms budget.
+  the release build passed. Five final settled gather runs had medians
+  15.7–21.7 ms and an observed maximum 25.3 ms against the 40 ms budget.
 
-## Milestone — configurable, conflict-safe singleton `[>]`
+## Milestone — configurable, conflict-safe singleton `[x]`
 
-- [ ] The global chord is configurable with `prelude global hotkey`, stored
+- [x] The global chord is configurable with `prelude global hotkey`, stored
       atomically beside the backend and parsed identically by installer and
       helper.
-- [ ] Supported chords have one or more of `cmd`, `option`, `ctrl`, `shift` and
+- [x] Supported chords have one or more of `cmd`, `option`, `ctrl`, `shift` and
       one `space`, letter or digit key; invalid or modifier-free values are
       refused before configuration changes.
-- [ ] Installation and hotkey changes perform a Carbon reservation check before
+- [x] Installation and hotkey changes perform a Carbon reservation check before
       replacing or restarting the helper. A conflict leaves the previous app,
       config and registration running and names Spotlight/Raycast as likely
-      owners without pretending macOS reveals which app owns the chord.
-- [ ] Spotlight is checked directly when the requested chord is `Cmd+Space`;
+      owners without pretending macOS reveals every app that observes a chord.
+- [x] Spotlight is checked directly when the requested chord is `Cmd+Space`;
       Prelude never changes the system preference.
-- [ ] The helper maintains one private, token-checked launcher lease. Repeated
+- [x] The helper maintains one private, token-checked launcher lease. Repeated
       hotkeys while Prelude is open focus the effective terminal application
       and create no second terminal.
-- [ ] The existing zsh widget releases that lease on cancel, direct object
+- [x] The existing zsh widget releases that lease on cancel, direct object
       action, `INSERT`, `RUN`, `MSG` or failure, without retaining the selected
       payload or changing normal `Ctrl+R` behaviour.
-- [ ] A bounded stale lease cannot lock the launcher out permanently, and
+- [x] A bounded stale lease cannot lock the launcher out permanently, and
       status/Doctor expose whether a launcher is active.
-- [ ] Tests, both real terminal backends, repeated installation, release Clippy,
+- [x] Tests, both real terminal backends, repeated installation, release Clippy,
       Swift warnings-as-errors and gather benchmark pass under the existing
       budget.
+
+Validation added for this milestone:
+
+- Fixture Spotlight and Raycast plists both stopped installation before an app
+  was built. On the validation machine Raycast owns `cmd+space`; an attempted
+  change was refused while the working `cmd+shift+space` helper remained
+  running and registered.
+- Live changes between two free chords restarted the helper cleanly. Invalid,
+  duplicate and modifier-free chords left configuration unchanged.
+- Two immediate `global open` calls created one additional Ghostty process, not
+  two; the second event was `already-open` and focused the effective backend.
+  The same lease behaviour passed with Terminal.app.
+- A PTY fixture confirmed the one-shot widget removes only its matching token
+  and leaves the next prompt ordinary. The lease is private, carries only a
+  random UUID and backend, expires after 30 minutes, and has an explicit
+  `prelude global clear` recovery command.
 
 ## Implementation commits
 
@@ -145,9 +161,12 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
 
 ## Recorded limitations
 
-- macOS owns `Cmd+Space` for Spotlight by default. Prelude cannot and will not
-  modify that system preference; installation tells the user exactly where to
-  reassign it.
+- macOS owns `Cmd+Space` for Spotlight by default, and Raycast commonly uses the
+  same chord. Prelude cannot and will not modify either preference; installation
+  names a known owner and asks the user to reassign it or choose another chord.
+  macOS exposes no complete public registry naming every event-tap owner, so a
+  Carbon reservation is the final generic check rather than a claim to identify
+  every possible application.
 - Terminal.app asks for Automation consent the first time the helper controls
   it. Prelude cannot grant that permission itself.
 - Ghostty's macOS `+new-window` action is unavailable in the currently tested

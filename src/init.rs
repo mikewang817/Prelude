@@ -3,10 +3,21 @@
 pub const ZSH: &str = r#"# Prelude — zsh integration
 # Added by: prelude init zsh
 
+_prelude_global_done() {
+  [[ -n ${PRELUDE_GLOBAL_TOKEN:-} ]] || return 0
+  local active="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"
+  local owner=''
+  [[ -r "$active" ]] && IFS= read -r owner < "$active"
+  if [[ "$owner" == "$PRELUDE_GLOBAL_TOKEN" ]]; then
+    command rm -f -- "$active"
+  fi
+  unset PRELUDE_GLOBAL_TOKEN
+}
+
 _prelude_widget() {
   local out verb payload
-  out="$(command prelude 2>/dev/null)" || { zle reset-prompt; return 0; }
-  [[ -z "$out" ]] && { zle reset-prompt; return 0; }
+  out="$(command prelude 2>/dev/null)" || { _prelude_global_done; zle reset-prompt; return 0; }
+  [[ -z "$out" ]] && { _prelude_global_done; zle reset-prompt; return 0; }
   verb="${out%%$'\t'*}"
   payload="${out#*$'\t'}"
   case "$verb" in
@@ -27,6 +38,7 @@ _prelude_widget() {
       zle -M "prelude: $payload"
       ;;
   esac
+  _prelude_global_done
   zle reset-prompt
 }
 zle -N _prelude_widget
@@ -178,6 +190,9 @@ mod tests {
         assert!(ZSH.contains("zle -U $'\\e[27;99~'"));
         assert!(ZSH.contains("zle _prelude_widget"));
         assert!(ZSH.contains("bindkey -r $'\\e[27;99~'"));
+        assert!(ZSH.contains("${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"));
+        assert!(ZSH.contains("\"$owner\" == \"$PRELUDE_GLOBAL_TOKEN\""));
+        assert!(ZSH.contains("_prelude_global_done; zle reset-prompt; return 0"));
         assert!(!ZSH.contains("sleep "));
         assert!(!ZSH.contains("osascript"));
         let remove_hook = ZSH.find("add-zle-hook-widget -d line-init").unwrap();

@@ -1516,10 +1516,22 @@ pub fn run() -> i32 {
             global.zsh_widget_available,
             "eval \"$(prelude init zsh)\" must be in ~/.zshrc",
         );
+        let owner = if global.spotlight_owns_hotkey == Some(true) {
+            "Spotlight"
+        } else if global.raycast_owns_hotkey == Some(true) {
+            "Raycast"
+        } else {
+            "another application"
+        };
         check(
-            "Cmd+Space registered".into(),
+            format!("global hotkey {} registered", global.selected_hotkey),
             global.hotkey_registered,
-            "free it under System Settings → Keyboard → Keyboard Shortcuts, then run: prelude global start",
+            &format!("{owner} may own it; free it or choose another, then run: prelude global start"),
+        );
+        check(
+            "global launcher singleton".into(),
+            true,
+            if global.launcher_active { "one launcher is open" } else { "ready" },
         );
     } else {
         check(
