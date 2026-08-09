@@ -301,8 +301,13 @@ The replacement is a Ghostty quick terminal: a hidden instance hosting one
 - [x] One instance or none, enforced; `RunAtLoad` is the start, not a race
       partner for an explicit launch.
 - [x] The launcher is no longer the destination. Commands go to the tmux pane
-      of the terminal that was in front, or to one window created on purpose.
-      Objects go to Launch Services and cost no terminal.
+      of the terminal that was in front — but only when exactly one tmux client
+      is attached, which is the only unambiguous case — and otherwise to one
+      window created on purpose. Objects go to Launch Services and cost no
+      terminal.
+- [x] The panel decides delivery itself rather than letting the child do it,
+      so it can tell a delivery from a dismissal and stand down when nothing
+      else took focus.
 - [x] A handed-over command travels in a 0600 file, never on a command line.
 - [x] The Carbon helper, the lease, the grace window, the pid check, the
       autostart ZLE hook, the Launch Services verification, `global clear` and
@@ -329,6 +334,15 @@ Validation, measured rather than assumed:
   `--` is read as an option. The marker starts at the key.
 - The preload handoff was exercised end to end: a fresh window read the 0600
   file and removed it.
+- Reported from use: Enter on an agent row did nothing visible.
+  `tmux display-message -p '#{pane_id}'`, asked from outside a client, had
+  named `%39` in a `prelude-test` session left over from days earlier, and the
+  command was typed there. Delivery now requires exactly one attached client.
+  The panel also never stood down, because the child delivered and printed
+  nothing, so the loop could not tell a delivery from a dismissal.
+- The corrected path was driven on a pty, which is the same contract without
+  the window server: Enter opened one window, the preload file was consumed by
+  its shell, and the loop stayed warm.
 - 139 Rust tests, release Clippy with `-D warnings`, `git diff --check`, and
   gather at a 17.9 ms median pass.
 

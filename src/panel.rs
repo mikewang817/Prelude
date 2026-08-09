@@ -82,9 +82,51 @@ fn destination() -> Destination {
     // A terminal was in front, but only tmux can say which pane and only tmux
     // can type into it. Without it there is nothing to address, and guessing
     // would put a command in a window nobody was looking at.
-    match crate::ui::resolve_pane(None) {
+    match attached_pane() {
         Some(pane) => Destination::Pane(pane),
         None => Destination::NewWindow,
+    }
+}
+
+/// The pane of the one attached tmux client, when there is exactly one.
+///
+/// `tmux display-message -p '#{pane_id}'` looks like the answer and is not:
+/// asked from outside a client it names whatever session tmux considers
+/// current, which on a machine with old sessions lying around is a pane nobody
+/// has looked at for days. Typing a command there is not a near miss — it is
+/// invisible, and indistinguishable from the launcher doing nothing.
+///
+/// One attached client is the only unambiguous case. Zero means tmux is
+/// running but nobody is in it; more than one means the front window cannot be
+/// told from the others without asking the window server which pane belongs to
+/// which tty. Both open a window instead, which is the safe direction: a
+/// window that appears is at worst unnecessary, while a command delivered out
+/// of sight is a launcher that lies.
+fn attached_pane() -> Option<String> {
+    let clients = crate::exec::run(
+        &["tmux", "list-clients", "-F", "#{client_session}"],
+        Duration::from_secs(1),
+    );
+    let sessions: Vec<&str> = clients.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+    let [session] = sessions[..] else {
+        return None;
+    };
+    let pane = crate::exec::run(
+        &[
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{pane_id}",
+        ],
+        Duration::from_secs(1),
+    );
+    let pane = pane.trim();
+    if pane.is_empty() {
+        None
+    } else {
+        Some(pane.to_string())
     }
 }
 
@@ -168,14 +210,11 @@ fn once(to: &Destination) -> (i32, After) {
     let Ok(exe) = std::env::current_exe() else {
         return (2, After::Continue);
     };
-    let mut command = Command::new(exe);
-    // In a pane the child delivers the answer itself, through the same road
-    // the tmux popup uses. Everywhere else it reports back and this loop
-    // decides.
-    if let Destination::Pane(pane) = to {
-        command.arg("paste").arg(pane);
-    }
-    let Ok(out) = command
+    // The child always reports back rather than delivering. Letting it deliver
+    // into a pane itself — which `prelude paste` does — means it prints
+    // nothing, so this loop cannot tell a delivery from a dismissal and never
+    // stands the panel down. One delivery path, decided here.
+    let Ok(out) = Command::new(exe)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -242,6 +281,24 @@ mod tests {
         assert!(TERMINALS.contains(&"com.apple.Terminal"));
         assert!(!TERMINALS.contains(&"com.google.Chrome"));
         assert!(!TERMINALS.contains(&"com.apple.finder"));
+    }
+
+    #[test]
+    fn a_pane_is_addressed_only_when_exactly_one_client_is_attached() {
+        // Zero attached clients still leaves tmux able to name a "current"
+        // pane — a stale session from days ago — and delivering there is
+        // indistinguishable from the launcher doing nothing at all.
+        assert_eq!(pane_for_sessions(&[]), None);
+        assert_eq!(pane_for_sessions(&["work"]), Some("work"));
+        assert_eq!(pane_for_sessions(&["work", "other"]), None);
+    }
+
+    /// The decision `attached_pane` makes, without asking tmux.
+    fn pane_for_sessions<'a>(sessions: &[&'a str]) -> Option<&'a str> {
+        match sessions {
+            [one] => Some(one),
+            _ => None,
+        }
     }
 
     #[test]
