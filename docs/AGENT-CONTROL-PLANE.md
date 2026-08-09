@@ -9,9 +9,11 @@ Agent, Run, Session, Skill, MCP, Config, Home, messaging or Agent doctor
 behaviour, read this file.
 
 **Seven milestones are complete and two were removed after they shipped.**
-There is no current milestone. What is left is written down as recorded
-limitations under the milestone that owns each one — decisions with reasons,
-not a backlog, and reopening one means arguing with the reason.
+Milestone 10 is the current milestone: turn the surviving Agent inventory into
+a Raycast-style Agent experience without rebuilding a collaboration system.
+What remains outside it is written down as recorded limitations under the
+milestone that owns each one — decisions with reasons, not a backlog, and
+reopening one means arguing with the reason.
 
 Milestones 6 and 8 — the Task entity and the messaging/handoff layer built on
 it — were implemented, reviewed, committed, and then deleted at the owner's
@@ -463,7 +465,47 @@ construction, which is the exact case it exists for. It is fed `sessions::all()`
 and a test proves the distinction by running both.
 
 Evidence: `src/doctor.rs`, `src/sources/agents.rs`, `src/capability.rs`,
-`src/sources/sessions.rs`, `src/task.rs`.
+`src/sources/sessions.rs`.
+
+### 10. Raycast-style Agent experience — `[>]` **Current milestone**
+
+Product boundary: Prelude remains a launcher. Agent support is a deeply
+integrated provider over Agent, Run, Session, Skill, MCP and Config objects;
+it does not reintroduce Task, workflow state, scheduling, handoff or a second
+conversation protocol.
+
+Acceptance criteria:
+
+- [ ] One typed Agent registry owns built-in identity, invocation syntax,
+      configuration path and supported operations for Claude, Codex, pi and
+      OpenCode.
+- [ ] Session, Run discovery, Control, actions and borrowing consult that
+      registry instead of maintaining separate support lists.
+- [ ] Agent Quick Look shows executable, settings, active projects, recent
+      conversation and supported operations without starting an Agent CLI.
+- [ ] The Agent action panel reaches recent Sessions, current Runs, one-off
+      Ask, settings and diagnostics; unsupported actions remain absent.
+- [ ] Skills have a discoverable named scope command in addition to `/`, and
+      Agent management categories remain searchable root commands rather than
+      prefix-only knowledge.
+- [ ] Agent, Skill and MCP objects can be favourited from the action panel;
+      favourites are an atomic Prelude preference, rise only inside their kind
+      and never alter native Agent data.
+- [ ] The empty-query Home remains an inventory, with questions first through
+      kind bands and favourites promoted inside each kind; typed root search
+      still reaches the complete inventory.
+- [ ] `prelude control --json`, Quick Look and the action panel derive support
+      claims from the same registry and retain no prompt, process command line
+      or private MCP definition.
+- [ ] README, Search and Actions documentation explain Agent Center through
+      visible commands first and prefixes as accelerators second.
+- [ ] Tests, release Clippy, `git diff --check` and gather benchmark pass under
+      the 40 ms budget.
+
+Definition of done: a new user can discover Agent Center, Running Agents, Past
+Conversations, Skills, MCP Servers and Agent Config by ordinary search; an
+Agent row answers what is installed, active and supported; and no capability
+is advertised by one surface while refused by another.
 
 ## Recorded limitations
 
