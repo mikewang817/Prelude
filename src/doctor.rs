@@ -478,8 +478,8 @@ struct Probe {
     login: Login,
 }
 
-/// The four Agents the Control Plane models — the same list `sessions::AGENTS`
-/// carries and `running::is_agent` matches against. Other agent-shaped CLIs on
+/// The four Agents the Control Plane models — kept in the same order as the
+/// typed `agent::SPECS` registry and pinned to it by a test. Other agent-shaped CLIs on
 /// PATH are named in a note rather than given a row: Prelude does not track
 /// their Runs or Sessions, so it has nothing to say about their health.
 const PROBES: &[Probe] = &[
@@ -1596,6 +1596,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    #[test]
+    fn diagnostics_cover_exactly_the_registered_agents() {
+        let registered: Vec<&str> = crate::agent::SPECS.iter().map(|spec| spec.name).collect();
+        let diagnosed: Vec<&str> = PROBES.iter().map(|probe| probe.agent).collect();
+        assert_eq!(diagnosed, registered);
     }
 
     #[test]

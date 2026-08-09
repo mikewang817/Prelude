@@ -621,9 +621,11 @@ fn enrich_mcp_matrix(items: &mut [Item]) {
     for (index, item) in items.iter().enumerate() {
         groups.entry(item.get("name").to_lowercase()).or_default().push(index);
     }
-    let installed: Vec<&str> = super::sessions::installed()
+    let installed: Vec<&str> = crate::agent::installed()
         .into_iter()
-        .filter(|agent| matches!(*agent, "claude" | "codex"))
+        .filter(|agent| {
+            crate::agent::get(agent).is_some_and(|spec| spec.capabilities.install_mcp)
+        })
         .collect();
     for (name, indexes) in groups {
         let variants: Vec<crate::capability::McpVariant> = indexes.iter().map(|index| {
@@ -745,28 +747,25 @@ pub fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resul
 /// it and is a row of its own in the main list, while this is the thing you
 /// go looking for when the agent is behaving oddly.
 pub fn config_for(agent: &str) -> Option<String> {
-    let h = crate::paths::home();
-    let p = match agent {
-        "claude" => h.join(".claude/settings.json"),
-        "codex" => h.join(".codex/config.toml"),
-        "pi" => h.join(".pi/agent/settings.json"),
-        "opencode" => h.join(".config/opencode/opencode.jsonc"),
-        _ => return None,
-    };
-    p.exists().then(|| p.to_string_lossy().into_owned())
+    crate::agent::get(agent)?
+        .existing_settings()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 pub fn configs() -> Vec<Item> {
     let h = crate::paths::home();
-    let mut v: Vec<(std::path::PathBuf, &str)> = vec![
+    let mut v: Vec<(std::path::PathBuf, &str)> = crate::agent::SPECS
+        .iter()
+        .map(|spec| (spec.settings_path(), spec.name))
+        .collect();
+    // Instructions and legacy/global files are useful Config objects but are
+    // not an Agent's primary settings path, so they stay beside the registry
+    // rather than pretending to be part of its invocation contract.
+    v.extend([
         (h.join(".claude/CLAUDE.md"), "claude"),
-        (h.join(".claude/settings.json"), "claude"),
         (h.join(".claude.json"), "claude"),
-        (h.join(".codex/config.toml"), "codex"),
         (h.join(".codex/AGENTS.md"), "codex"),
-        (h.join(".pi/agent/settings.json"), "pi"),
-        (h.join(".config/opencode/opencode.jsonc"), "opencode"),
-    ];
+    ]);
     // whatever the project you're standing in defines
     if let Some(root) = super::project::root() {
         for name in ["CLAUDE.md", "AGENTS.md", ".mcp.json"] {
@@ -893,10 +892,10 @@ pub struct ConfigEvidence {
 }
 
 pub fn effective_kind(agent: &str) -> Effective {
-    match agent {
-        "codex" => Effective::CodexDoctorJson,
-        "opencode" => Effective::OpencodeDebugConfig,
-        "claude" => Effective::ClaudeAutoMode,
+    match crate::agent::get(agent).map(|spec| spec.capabilities.effective_config) {
+        Some("directory") if agent == "codex" => Effective::CodexDoctorJson,
+        Some("directory") if agent == "opencode" => Effective::OpencodeDebugConfig,
+        Some("subsystem") => Effective::ClaudeAutoMode,
         _ => Effective::None,
     }
 }
@@ -1208,7 +1207,7 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
     for it in skills.iter().chain(mcp).chain(sessions) {
         tally(it);
     }
-    super::sessions::installed()
+    crate::agent::installed()
         .into_iter()
         .map(|name| {
             let (sk, mc, se) = per.get(name).copied().unwrap_or_default();
@@ -1220,7 +1219,21 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
                 .filter(|project| !project.is_empty())
                 .collect();
             let run_ids: Vec<&str> = own_runs.iter().map(|run| run.get("run_id")).collect();
-            Item::new(name, Kind::Agent)
+            let latest = sessions
+                .iter()
+                .filter(|session| session.get("agent") == name)
+                .max_by(|a, b| {
+                    a.get("ts").parse::<f64>().unwrap_or(0.0)
+                        .partial_cmp(&b.get("ts").parse::<f64>().unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            let spec = crate::agent::get(name);
+            let executable = spec.and_then(crate::agent::Spec::executable)
+                .map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+            let settings = spec.map(crate::agent::Spec::settings_path)
+                .map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+            let operations = spec.map(crate::agent::Spec::operation_labels).unwrap_or_default();
+            let item = Item::new(name, Kind::Agent)
                 .title(name)
                 .fields([
                     format!("{sk} skills"),
@@ -1229,10 +1242,21 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
                 ])
                 .put("agent", name)
                 .put("agent_id", name)
+                .put("installed", "true")
+                .put("executable", executable)
+                .put("settings", settings)
+                .put("operations", operations.join(", "))
                 .put("run_count", own_runs.len().to_string())
                 .put("waiting_count", waiting.to_string())
                 .put("projects", serde_json::to_string(&projects).unwrap_or_default())
-                .put("run_ids", serde_json::to_string(&run_ids).unwrap_or_default())
+                .put("run_ids", serde_json::to_string(&run_ids).unwrap_or_default());
+            match latest {
+                Some(session) => item
+                    .put("latest_session", session.title.clone())
+                    .put("latest_session_id", session.get("session_id"))
+                    .put("latest_session_at", session.get("ts")),
+                None => item,
+            }
         })
         .collect()
 }

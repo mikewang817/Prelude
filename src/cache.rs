@@ -267,6 +267,7 @@ pub fn gather() -> Vec<Item> {
             None => items.extend(read_cached(name)),
         }
     }
+    crate::favorites::decorate(&mut items);
     finish(items)
 }
 
@@ -287,6 +288,7 @@ pub fn gather_agents() -> Vec<Item> {
     items.extend(skills);
     items.extend(mcp);
     items.extend(crate::sources::agents::configs());
+    crate::favorites::decorate(&mut items);
     finish(items)
 }
 

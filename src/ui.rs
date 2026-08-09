@@ -522,10 +522,10 @@ pub fn agent_in_pane(pane: &str) -> Option<&'static str> {
         std::time::Duration::from_secs(1),
     );
     let cmd = out.trim().to_string();
-    crate::sources::sessions::AGENTS
+    crate::agent::SPECS
         .iter()
-        .map(|a| a.name)
-        .find(|n| *n == cmd)
+        .map(|spec| spec.name)
+        .find(|name| *name == cmd)
 }
 
 pub fn resolve_pane(arg: Option<&str>) -> Option<String> {

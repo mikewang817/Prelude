@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 118 tests
+cargo test                 # 125 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -39,6 +39,17 @@ which would otherwise make their own inbox unreachable from the very window
 they are sitting in.
 
 ## Agent Control Plane work
+
+`agent.rs` is the one registry for built-in Agent identity, invocation,
+settings paths and support flags. Session, Run, Control, action and borrowing
+code consumes it; do not add another supported-Agent list or advertise an
+action by spelling an Agent name in a second module. CLI-specific parsers still
+belong beside the output they parse.
+
+Favorites are Prelude preferences for Agent, Skill and MCP object keys. They
+never carry paths, commands or definitions, never write native Agent data, and
+only promote inside the existing Kind band. Tests address a temporary
+preference path and must not read the person's real `favorites.txt`.
 
 `docs/AGENT-CONTROL-PLANE.md` is the implementation source of truth. Read it
 before changing Agent, Run, Session, Task, Skill, MCP, Config, Home, messaging

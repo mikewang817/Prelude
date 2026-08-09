@@ -37,6 +37,7 @@ pub struct AgentRecord {
     pub skills: Vec<String>,
     pub mcp: Vec<String>,
     pub configs: Vec<String>,
+    pub capabilities: crate::agent::Capabilities,
 }
 
 #[derive(Serialize)]
@@ -269,7 +270,11 @@ impl Snapshot {
                     Vec::new()
                 } else {
                     skill.get("missing").split(',').map(str::trim)
-                        .filter(|agent| !agent.is_empty()).map(str::to_string).collect()
+                        .filter(|agent| {
+                            crate::agent::get(agent)
+                                .is_some_and(|spec| spec.capabilities.install_skill)
+                        })
+                        .map(str::to_string).collect()
                 },
                 }
             })
@@ -309,8 +314,10 @@ impl Snapshot {
                 }
             };
             let owners: Vec<String> = variants.iter().map(|variant| variant.agent.clone()).collect();
-            let targets: Vec<String> = crate::sources::sessions::installed().into_iter()
-                .filter(|agent| matches!(*agent, "claude" | "codex"))
+            let targets: Vec<String> = crate::agent::installed().into_iter()
+                .filter(|agent| {
+                    crate::agent::get(agent).is_some_and(|spec| spec.capabilities.install_mcp)
+                })
                 .filter(|agent| !owners.iter().any(|owner| owner == agent))
                 .map(str::to_string)
                 .collect();
@@ -334,13 +341,11 @@ impl Snapshot {
             });
         }
 
-        let agents = crate::sources::sessions::AGENTS
-            .iter()
-            .map(|spec| {
-                let executable = crate::exec::which(spec.name)
-                    .map(|path| path.to_string_lossy().into_owned());
+        let agents = crate::agent::SPECS.iter().map(|spec| {
+                let executable = spec.executable().map(|path| path.to_string_lossy().into_owned());
                 AgentRecord {
                     id: spec.name.to_string(),
+                    capabilities: spec.capabilities,
                     installed: executable.is_some(),
                     executable,
                     runs: run_records

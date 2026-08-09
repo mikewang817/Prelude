@@ -125,17 +125,12 @@ fn update_metadata(id: &str, edit: impl FnOnce(&mut SessionMeta)) -> Result<(), 
 }
 
 pub fn fork_cmd(agent: &str, id: &str) -> Option<String> {
-    match agent {
-        "claude" => Some(format!("claude --resume {} --fork-session", shq(id))),
-        "codex" => Some(format!("codex fork {}", shq(id))),
-        "pi" => Some(format!("pi --fork {}", shq(id))),
-        _ => None,
-    }
+    crate::agent::get(agent)?.fork(id)
 }
 
 /// The native resume invocation, or nothing when this agent has none we know.
 fn native_resume(agent: &str, id: &str) -> Option<String> {
-    AGENTS.iter().find(|a| a.name == agent).map(|a| (a.resume)(id))
+    Some(crate::agent::get(agent)?.resume(id))
 }
 
 /// Session ids are `agent:native-id`; a resume flag wants only the native
@@ -281,66 +276,9 @@ pub fn visible(session: &Item) -> bool {
     session.get("archived") != "true" || !session.get("active_run").is_empty()
 }
 
-pub struct Agent {
-    pub name: &'static str,
-    /// How to resume, given a session id.
-    pub resume: fn(&str) -> String,
-    /// How to start with an opening prompt. These genuinely differ: claude,
-    /// codex and pi take it positionally, opencode needs a subcommand.
-    pub prompt: fn(&str) -> String,
-    /// Non-interactive form: print the answer to stdout and exit, so it can
-    /// be rendered inside the launcher instead of taking over the screen.
-    pub ask: fn(&str) -> Vec<String>,
-}
-
-pub const AGENTS: &[Agent] = &[
-    Agent {
-        name: "claude",
-        resume: |id| format!("claude --resume {id}"),
-        prompt: |p| format!("claude {}", shq(p)),
-        ask: |p| vec!["claude".into(), "-p".into(), p.into()],
-    },
-    Agent {
-        name: "codex",
-        resume: |id| format!("codex resume {id}"),
-        prompt: |p| format!("codex {}", shq(p)),
-        // --skip-git-repo-check: codex exec refuses to run outside a git
-        // repo, and the launcher is used from any directory.
-        ask: |p| vec![
-            "codex".into(),
-            "exec".into(),
-            "--skip-git-repo-check".into(),
-            p.into(),
-        ],
-    },
-    Agent {
-        name: "pi",
-        resume: |id| format!("pi --session {id}"),
-        prompt: |p| format!("pi {}", shq(p)),
-        ask: |p| vec!["pi".into(), "--print".into(), p.into()],
-    },
-    Agent {
-        name: "opencode",
-        resume: |id| format!("opencode --session {id}"),
-        prompt: |p| format!("opencode run {}", shq(p)),
-        ask: |p| vec!["opencode".into(), "run".into(), p.into()],
-    },
-];
-
-/// Agents that are actually installed, for the `@` completion.
-pub fn installed() -> Vec<&'static str> {
-    AGENTS
-        .iter()
-        .map(|a| a.name)
-        .filter(|n| crate::exec::which(n).is_some())
-        .collect()
-}
-
 fn resume_cmd(agent: &str, id: &str) -> String {
-    AGENTS
-        .iter()
-        .find(|a| a.name == agent)
-        .map(|a| (a.resume)(id))
+    crate::agent::get(agent)
+        .map(|spec| spec.resume(id))
         .unwrap_or_else(|| id.to_string())
 }
 
@@ -1498,7 +1436,7 @@ fn session_problems_in(
 
 /// The non-interactive invocation for an agent, if we know one.
 pub fn ask_cmd(agent: &str, prompt: &str) -> Option<Vec<String>> {
-    AGENTS.iter().find(|a| a.name == agent).map(|a| (a.ask)(prompt))
+    Some(crate::agent::get(agent)?.ask(prompt))
 }
 
 /// Start a fresh agent session in a directory, optionally invoking a skill.
@@ -1509,9 +1447,9 @@ pub fn start_cmd(agent: &str, cwd: Option<&str>, prompt: Option<&str>) -> String
     }
     match prompt {
         Some(p) => {
-            let spec = AGENTS.iter().find(|a| a.name == agent);
+            let spec = crate::agent::get(agent);
             s.push_str(&match spec {
-                Some(a) => (a.prompt)(p),
+                Some(spec) => spec.prompt(p),
                 None => format!("{agent} {}", shq(p)),
             });
         }

@@ -4,6 +4,7 @@
 //! *types the command for you* rather than running it.
 
 mod actions;
+mod agent;
 mod ansi;
 mod bus;
 mod cache;
@@ -15,6 +16,7 @@ mod control;
 mod defaults;
 mod doctor;
 mod exec;
+mod favorites;
 mod fleet;
 mod frecency;
 mod init;
@@ -931,6 +933,22 @@ mod tests {
         assert!(!clip_ids.iter().any(|id| id == "run" || id == "runhere"));
     }
 
+    #[test]
+    fn stable_agent_objects_can_be_favourited_without_changing_native_data() {
+        use crate::item::{Item, Kind};
+        let ids = |item: &Item| -> Vec<String> {
+            crate::actions::actions_for(item).iter().map(|(id, ..)| id.to_string()).collect()
+        };
+        for item in [
+            Item::new("claude", Kind::Agent).put("agent", "claude"),
+            Item::new("/review", Kind::Skill).put("name", "review"),
+            Item::new("codex mcp get node", Kind::Mcp).put("name", "node"),
+        ] {
+            assert!(ids(&item).contains(&"favorite".to_string()));
+            assert!(ids(&item.clone().put("favorite", "true")).contains(&"unfavorite".to_string()));
+        }
+    }
+
     /// A popup over an agent is a conversation, not a shell prompt. Never
     /// offer a command there that would be pasted as prose and submitted.
     #[test]
@@ -971,7 +989,7 @@ mod tests {
         // pi and opencode have no way to take one, so they are not offered
         // however many of them are installed.
         assert!(!ids.contains(&"lend:pi") && !ids.contains(&"lend:opencode"), "{ids:?}");
-        if crate::sources::sessions::installed().contains(&"claude") {
+        if crate::agent::installed().contains(&"claude") {
             assert!(ids.contains(&"lend:claude"), "{ids:?}");
         }
     }

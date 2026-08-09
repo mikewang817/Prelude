@@ -33,13 +33,19 @@ all and `s:` owns the rest.
 `cache::by_rank`, exactly as everywhere else: the kind band decides and
 frecency orders within it. A question blocking somebody leads, then the
 agents, what they are running, Skills, MCP, and the recent conversations
-underneath. `home_items` is a filter and nothing more — it leaves the order it
-was handed alone — because one ordering rule for the launcher was enough.
+underneath. Agent, Skill and MCP favourites receive a bonus only after source
+rank and frecency and still cannot cross their kind band. `home_items` is a
+filter and nothing more — it leaves the order it was handed alone — because
+one ordering rule for the launcher was enough.
 
 ## Ordinary query: root commands
 
 The first non-whitespace character searches a small command layer: agent-home
-items, search providers, scope commands and fixed Quicklinks. It does not
+items, search providers, scope commands and fixed Quicklinks. Agent management
+is discoverable by ordinary names — Agent Control Center, Running Agents, Past
+Conversations, Skills, MCP Servers and Agent Config — and selecting one fills
+its prefix into the same box. Prefixes are accelerators, not prerequisite
+knowledge. It does not
 expose the complete gathered catalogue to fzf. An exact `f` therefore shows
 one `Search Files` command, whose Enter completion is `f:`; it does not fuzzy
 match every file, command and history row containing the letter.
@@ -59,6 +65,7 @@ row whose displayed text does not contain `c:`.
 | `a:` | agents, running agents, skills, MCP and agent config |
 | `r:` | running agents, classified live |
 | `s:` | all conversation sessions |
+| `skill:` | all installed Skills; `/` remains the invocation accelerator |
 | `f:` | current-project files and the indexed roots |
 | `c:` | text, Finder files and images, strictly newest first |
 | `h:` | shell history |
@@ -86,7 +93,7 @@ arguments after it — the query has stopped describing a search and started
 being an invocation, so the single row is the run that invokes it and the
 Skill row is gone. That is deliberate; nothing else in the launcher shows two
 rows for one intent. A Skill's own row — with its copies, its integrity and
-its `^K` panel — is reached by the prefix, by `a:`, or by ordinary search.
+its `^K` panel — is reached by `skill:`, `/`, `a:`, or ordinary search.
 `/` never lists MCP servers at all: they are not invoked by name, and `mcp:`
 is their scope.
 

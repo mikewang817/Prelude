@@ -47,7 +47,7 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
             Kind::Skill => missing
                 .iter()
                 .filter(|n| **n != "shared" && crate::lend::can_borrow_skill(n))
-                .filter(|n| crate::sources::sessions::installed().contains(*n))
+                .filter(|n| crate::agent::installed().contains(*n))
                 .map(|n| (format!("lend:{n}"), (*n).to_string(), String::new()))
                 .collect(),
             // An MCP server can go to any other agent that has a flag for it.
@@ -55,7 +55,7 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
             _ => {
                 let mut owners: Vec<String> = serde_json::from_str(it.get("owners")).unwrap_or_default();
                 if owners.is_empty() { owners.push(it.get("agent").to_string()); }
-                crate::sources::sessions::installed()
+                crate::agent::installed()
                     .into_iter()
                     .filter(|n| !owners.iter().any(|owner| owner == n) && crate::lend::can_borrow_mcp(n))
                     .map(|n| (format!("lend:{n}"), n.to_string(), String::new()))
@@ -66,6 +66,9 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
         "cp" => {
             let mut v: Vec<(String, String, String)> = missing
                 .iter()
+                .filter(|name| {
+                    crate::agent::get(name).is_some_and(|spec| spec.capabilities.install_skill)
+                })
                 .map(|n| (format!("cp:{n}"), (*n).to_string(), String::new()))
                 .collect();
             if v.len() > 1 {
@@ -79,9 +82,12 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
         "install" => {
             let mut owners: Vec<String> = serde_json::from_str(it.get("owners")).unwrap_or_default();
             if owners.is_empty() { owners.push(it.get("agent").to_string()); }
-            crate::sources::sessions::installed()
+            crate::agent::installed()
                 .into_iter()
-                .filter(|n| !owners.iter().any(|owner| owner == n) && matches!(*n, "claude" | "codex"))
+                .filter(|name| {
+                    !owners.iter().any(|owner| owner == name)
+                        && crate::agent::get(name).is_some_and(|spec| spec.capabilities.install_mcp)
+                })
                 .map(|n| (format!("install:{n}"), n.to_string(), String::new()))
                 .collect()
         }
@@ -235,6 +241,9 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         Kind::Agent => {
             let n = it.get("agent").to_string();
             let mut v = Vec::new();
+            if it.get("run_count").parse::<usize>().unwrap_or(0) > 0 {
+                v.push(a("agent-runs", "Running instances…", it.get("run_count")));
+            }
             // The single most common thing anyone does with an agent they
             // have used before, and the row already says how many sessions
             // there are. Finding the newest by hand means `s:`, reading
@@ -245,8 +254,11 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
                     "Resume latest session".to_string(),
                     format!("{} · {}", crate::width::dtrunc(&s.title, 40), s.fields.get(2).cloned().unwrap_or_default()),
                 ));
+                v.push(a("agent-sessions", "Browse conversations…", it.fields.get(2).cloned().unwrap_or_default()));
             }
-            v.push((leak(format!("askagent:{n}")), format!("Ask {n} a one-off question"), "answer here".into()));
+            if crate::agent::get(&n).is_some_and(|spec| spec.capabilities.ask) {
+                v.push((leak(format!("askagent:{n}")), format!("Ask {n} a one-off question"), "answer here".into()));
+            }
             if let Some(p) = crate::sources::agents::config_for(&n) {
                 v.push((
                     leak(format!("agentcfg:{n}")),
@@ -254,6 +266,7 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
                     crate::paths::tilde(&p),
                 ));
             }
+            v.push(a("agent-doctor", "Diagnose Agents", "versions, login, config and relationships"));
             v
         }
         // A running agent. At eighty of them the panel is the difference
@@ -534,6 +547,19 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
         }
         let at = acts.iter().position(|(id, ..)| is_destructive(it.kind, id)).unwrap_or(acts.len());
         acts.splice(at..at, qacts);
+    }
+
+    // Favourites are Prelude's launcher preference, not native Agent
+    // metadata. They are available on stable inventory objects only and sit
+    // before destructive management actions.
+    if crate::favorites::key(it).is_some() {
+        let action = if it.get("favorite") == "true" {
+            a("unfavorite", "Remove from Favorites", "keeps the Agent object unchanged")
+        } else {
+            a("favorite", "Add to Favorites", "promotes it inside this category")
+        };
+        let at = acts.iter().position(|(id, ..)| is_destructive(it.kind, id)).unwrap_or(acts.len());
+        acts.insert(at, action);
     }
 
     // Enter is already stated in the main footer and again in this panel's
@@ -1166,6 +1192,57 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             // Whatever is selected becomes the subject of a question.
             let subject = if it.get("path").is_empty() { it.cmd.clone() } else { it.get("path").into() };
             ui::emit("INSERT", &format!("claude {}", shq(&format!("about this: {subject}"))), paste);
+        }
+        "agent-runs" => {
+            let runs: Vec<Item> = crate::sources::running::live()
+                .into_iter()
+                .filter(|run| run.get("agent") == it.get("agent"))
+                .collect();
+            let choices: Vec<(String, String, String)> = runs.iter().map(|run| (
+                run.get("run_id").to_string(),
+                run.get("project").to_string(),
+                format!("{} · {}", run.get("state"), run.get("addr")),
+            )).collect();
+            let Some(id) = pick_one(" running instances ", &choices) else { return 130 };
+            let Some(run) = runs.iter().find(|run| run.get("run_id") == id) else { return 2 };
+            if !run.get("pane").is_empty() {
+                ui::emit("RUN", &run.cmd, paste);
+            } else if !run.get("cwd").is_empty() {
+                ui::emit("INSERT", &format!("cd {}", shq(run.get("cwd"))), paste);
+            } else {
+                ui::note("that run has neither a pane nor a readable project", paste);
+                return 2;
+            }
+        }
+        "agent-sessions" => {
+            let mut sessions = crate::cache::read_cached("sessions-linked");
+            if sessions.is_empty() {
+                sessions = crate::cache::read_cached("sessions");
+            }
+            sessions.retain(|session| session.get("agent") == it.get("agent"));
+            sessions.sort_by(|a, b| {
+                b.get("ts").parse::<f64>().unwrap_or(0.0)
+                    .partial_cmp(&a.get("ts").parse::<f64>().unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let choices: Vec<(String, String, String)> = sessions.into_iter().take(100).map(|session| (
+                session.cmd,
+                session.title,
+                session.fields.get(2).cloned().unwrap_or_default(),
+            )).collect();
+            let Some(command) = pick_one(" conversations ", &choices) else { return 130 };
+            ui::emit("INSERT", &command, paste);
+        }
+        "agent-doctor" => {
+            let exe = std::env::current_exe().unwrap_or_else(|_| "prelude".into());
+            return crate::runhere::run_cmd(&format!("{} doctor agents", shq(&exe.to_string_lossy())));
+        }
+        "favorite" | "unfavorite" => {
+            let wanted = id == "favorite";
+            match crate::favorites::set(it, wanted) {
+                Ok(()) => ui::note(if wanted { "added to Favorites" } else { "removed from Favorites" }, paste),
+                Err(error) => { ui::note(&error, paste); return 2; }
+            }
         }
         _ if id.starts_with("askagent:") => {
             let agent = &id[9..];

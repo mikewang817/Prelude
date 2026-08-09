@@ -99,10 +99,22 @@ authentication states are omitted.
 
 ### Agent
 
+Quick Look shows the executable, conventional settings path, Skill/MCP/Session
+counts, active projects, most recent conversation and the operations the typed
+Agent registry says this CLI supports. It starts no Agent CLI.
+
 - Start now
-- Resume latest session
-- Ask a one-off question and show the answer here
-- Open settings
+- Choose a current running instance
+- Resume the latest Session
+- Browse recent Sessions in a picker
+- Ask a one-off question and show the answer here, where supported
+- Open settings when the file exists
+- Run Agent diagnostics explicitly
+- Add or remove the Agent from Favorites
+
+The same registry owns invocation syntax, settings and support flags for
+Claude, Codex, pi and OpenCode. An action absent there cannot appear here by
+being hard-coded in a second list.
 
 ### Running agent
 
@@ -186,6 +198,7 @@ of opening an empty picker.
 
 ### Skill
 
+- Add or remove it from Favorites; this is a Prelude preference and changes no Skill copy
 - Run with an owner agent
 - Prepare a one-off borrowed run
 - Install into another agent
@@ -211,7 +224,8 @@ line for any symlink that is broken or resolves outside the Skill.
 
 ### MCP server
 
-At a shell, Enter shows what the server exposes. Opening the owning config is
+At a shell, Enter shows what the server exposes. It can be added to or removed
+from Favorites without changing any owner definition. Opening the owning config is
 not the server's primary purpose.
 
 Alternatives are:

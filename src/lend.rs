@@ -403,12 +403,12 @@ fn private_file(name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
 
 /// Agents that can borrow a skill they do not own.
 pub fn can_borrow_skill(agent: &str) -> bool {
-    matches!(agent, "pi" | "claude")
+    crate::agent::get(agent).is_some_and(|spec| spec.capabilities.borrow_skill)
 }
 
 /// Agents that can borrow an MCP server.
 pub fn can_borrow_mcp(agent: &str) -> bool {
-    matches!(agent, "claude" | "codex")
+    crate::agent::get(agent).is_some_and(|spec| spec.capabilities.borrow_mcp)
 }
 
 /// A one-skill plugin whose skill is a symlink to the original.

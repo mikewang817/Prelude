@@ -245,7 +245,7 @@ pub fn short_dur(secs: u64) -> String {
 
 fn is_agent(cmd: &str) -> Option<&'static str> {
     let base = cmd.rsplit('/').next().unwrap_or(cmd);
-    super::sessions::AGENTS.iter().map(|a| a.name).find(|n| *n == base)
+    crate::agent::SPECS.iter().map(|spec| spec.name).find(|name| *name == base)
 }
 
 /// Subcommands that are tooling rather than a conversation.
@@ -776,9 +776,9 @@ pub fn fleet() -> Vec<Item> {
 /// once, rather than once per pid.
 fn cwd_of_agents() -> std::collections::HashMap<String, String> {
     let mut argv: Vec<&str> = vec!["lsof", "-a", "-d", "cwd", "-Fpn"];
-    for a in super::sessions::AGENTS {
+    for spec in crate::agent::SPECS {
         argv.push("-c");
-        argv.push(a.name);
+        argv.push(spec.name);
     }
     let out = crate::exec::run(&argv, Duration::from_secs(5));
     let mut map = std::collections::HashMap::new();

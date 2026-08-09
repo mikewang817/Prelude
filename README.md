@@ -475,8 +475,8 @@ therefore require their explicit scope. This trades a little syntax for a
 stable, agent-first root instead of making every single letter match hundreds
 of unrelated machine objects.
 
-Type `:` to see every scope, including project items, folders, SSH hosts,
-snippets, ports, processes, containers, MCP and config. An exact prefix works
+Type `:` to see every scope, including Skills, project items, folders, SSH
+hosts, snippets, ports, processes, containers, MCP and config. An exact prefix works
 without a term: `c:` opens clipboard history and `f:` opens file search.
 Clearing the query returns to the agent home.
 
@@ -489,6 +489,7 @@ rules that keep computed rows from being filtered out by fzf.
 |---|---|---|
 | **Agent control centre** | `a:` | Agents, running agents, skills, MCP and config |
 | **Sessions** | `s:` | Conversations from Claude Code, Codex and pi |
+| **Skills** | `skill:` | Installed capabilities across every supported Agent; `/` invokes them |
 | **Project** | `proj:` | Scripts from `package.json`, Makefile, justfile, Cargo, Python and Compose; current files and Git |
 | **Files** | `f:` | The current project, plus the roots built by `prelude index` |
 | **Clipboard** | `c:` | Text, Finder files and images, strictly newest first |
@@ -625,10 +626,13 @@ Open the launcher and this is what you see first, before typing anything:
   Gmail     mcp   · claude · ✔ connected
 ```
 
-`a:` opens the complete agent control centre: the same home rows plus agent
-configuration. Sessions stay behind `s:` instead of adding hundreds of old
-conversations to the agent overview. Other machine sources open through their
-scope commands rather than joining ordinary root search.
+Ordinary search also exposes visible management commands — **Agent Control
+Center**, **Running Agents**, **Past Conversations**, **Skills**, **MCP
+Servers** and **Agent Config** — so the prefixes are accelerators rather than
+knowledge required before the feature can be found. `a:` opens the complete
+agent control centre; `s:` owns the hundreds of older conversations while the
+newest few remain on Home. Other machine sources open through the same kind of
+scope command rather than joining ordinary root search.
 
 Under those rows Prelude now keeps one relationship graph rather than five
 unrelated lists. Runs have stable ids, Sessions have agent-qualified ids, and
@@ -647,13 +651,13 @@ prelude control
 prelude control --json
 ```
 
-Its versioned `schema: 2` snapshot contains installed Agent executables, Run
-ids and state, active Session edges, Skill fingerprints and copy state, MCP
-owner/health/definition variants, effective borrow/install targets and config
-paths. Process prompts, full command lines and complete MCP definitions are
+Its versioned `schema: 3` snapshot contains installed Agent executables and
+supported operations, Run ids and state, active Session edges, Skill
+fingerprints and copy state, MCP owner/health/definition variants, effective
+borrow/install targets and config paths. Process prompts, full command lines and complete MCP definitions are
 deliberately absent because they may contain credentials.
 
-The remaining Control Plane work is tracked as checked acceptance criteria in
+The Agent experience is tracked as checked acceptance criteria in
 [docs/AGENT-CONTROL-PLANE.md](docs/AGENT-CONTROL-PLANE.md). That file records
 the current milestone, deliberate gaps, validation baseline and implementation
 commits; it is the execution source of truth rather than a roadmap kept in a
@@ -682,8 +686,9 @@ AI-generated titles where available:
   InkQuest                              session · pi     · ~/App/InkQuest · 1d ago
 ```
 
-Sessions do not fill the empty-query home. `s:` shows the newest conversations
-and searches all of them. `Ctrl+K` turns that browser into a lifecycle surface:
+Only the newest conversations reach the empty-query home. The visible **Past
+Conversations** command opens `s:`, which searches all of them. `Ctrl+K` turns
+that browser into a lifecycle surface:
 fork through the Agent's own CLI, pin important conversations above recency,
 give them local names, archive them, export the untouched JSONL, reveal the
 native file, or move an inactive one to the Trash. A local name never rewrites the Agent's record, and its native title
@@ -782,7 +787,18 @@ terminal rather than a popup that closes.
 
 Each agent is invoked with its own syntax (`opencode` needs `opencode run`,
 the others take the prompt positionally), and `@` completes only against
-agents actually installed.
+agents actually installed. One typed Agent registry owns those commands,
+settings paths and support flags, so Quick Look, Control JSON and the action
+panel cannot each advertise a different Agent.
+
+An Agent's `Ctrl+P` view shows its executable, settings path, active projects,
+most recent conversation and supported operations without running the Agent
+CLI. `Ctrl+K` reaches current instances, the latest or any recent conversation,
+a one-off Ask, settings and diagnostics.
+
+Agents, Skills and MCP servers can be added to **Favorites** from `Ctrl+K`.
+The preference is stored in Prelude's config directory, promotes the object
+only inside its existing kind, and never writes to an Agent's native files.
 
 **Jump to any agent config** — `CLAUDE.md`, `AGENTS.md`, `settings.json`,
 `config.toml`, `.mcp.json` — as a first-class row.

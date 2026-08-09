@@ -8,12 +8,12 @@ The source of truth is this file, not a conversation summary. Before changing
 Agent, Run, Session, Skill, MCP, Config, Home, messaging or Agent doctor
 behaviour, read this file.
 
-**Seven milestones are complete and two were removed after they shipped.**
-Milestone 10 is the current milestone: turn the surviving Agent inventory into
-a Raycast-style Agent experience without rebuilding a collaboration system.
-What remains outside it is written down as recorded limitations under the
-milestone that owns each one — decisions with reasons, not a backlog, and
-reopening one means arguing with the reason.
+**Eight milestones are complete and two were removed after they shipped.**
+There is no current milestone. The surviving Agent inventory is now a
+Raycast-style Agent experience without rebuilding a collaboration system.
+What remains is written down as recorded limitations under the milestone that
+owns each one — decisions with reasons, not a backlog, and reopening one means
+arguing with the reason.
 
 Milestones 6 and 8 — the Task entity and the messaging/handoff layer built on
 it — were implemented, reviewed, committed, and then deleted at the owner's
@@ -347,11 +347,11 @@ What survived the removal, because it was never about tasks: the credential
 filter widening in `secrets.rs` (`sk-proj-`, `sk_live_`, JWTs, `github_pat_`,
 `AIza`, URL passwords), which guards shell history and the clipboard.
 
-### 7. Agent Home and scoped control queries — `[>]`
+### 7. Agent Home and scoped control queries — `[x]`
 
 Scope acceptance criteria:
 
-- [x] `a:waiting`, `a:failed`, `a:claude Prelude`.
+- [x] `a:waiting`, `a:working`, `a:dead`, `a:claude Prelude`.
 - [x] `a:using <capability>` and `a:without <capability>`.
 - [x] Filters operate on one cached snapshot and start no Agent CLI.
 
@@ -467,7 +467,7 @@ and a test proves the distinction by running both.
 Evidence: `src/doctor.rs`, `src/sources/agents.rs`, `src/capability.rs`,
 `src/sources/sessions.rs`.
 
-### 10. Raycast-style Agent experience — `[>]` **Current milestone**
+### 10. Raycast-style Agent experience — `[x]`
 
 Product boundary: Prelude remains a launcher. Agent support is a deeply
 integrated provider over Agent, Run, Session, Skill, MCP and Config objects;
@@ -476,36 +476,39 @@ conversation protocol.
 
 Acceptance criteria:
 
-- [ ] One typed Agent registry owns built-in identity, invocation syntax,
+- [x] One typed Agent registry owns built-in identity, invocation syntax,
       configuration path and supported operations for Claude, Codex, pi and
       OpenCode.
-- [ ] Session, Run discovery, Control, actions and borrowing consult that
+- [x] Session, Run discovery, Control, actions and borrowing consult that
       registry instead of maintaining separate support lists.
-- [ ] Agent Quick Look shows executable, settings, active projects, recent
+- [x] Agent Quick Look shows executable, settings, active projects, recent
       conversation and supported operations without starting an Agent CLI.
-- [ ] The Agent action panel reaches recent Sessions, current Runs, one-off
+- [x] The Agent action panel reaches recent Sessions, current Runs, one-off
       Ask, settings and diagnostics; unsupported actions remain absent.
-- [ ] Skills have a discoverable named scope command in addition to `/`, and
+- [x] Skills have a discoverable named scope command in addition to `/`, and
       Agent management categories remain searchable root commands rather than
       prefix-only knowledge.
-- [ ] Agent, Skill and MCP objects can be favourited from the action panel;
+- [x] Agent, Skill and MCP objects can be favourited from the action panel;
       favourites are an atomic Prelude preference, rise only inside their kind
       and never alter native Agent data.
-- [ ] The empty-query Home remains an inventory, with questions first through
+- [x] The empty-query Home remains an inventory, with questions first through
       kind bands and favourites promoted inside each kind; typed root search
       still reaches the complete inventory.
-- [ ] `prelude control --json`, Quick Look and the action panel derive support
+- [x] `prelude control --json`, Quick Look and the action panel derive support
       claims from the same registry and retain no prompt, process command line
       or private MCP definition.
-- [ ] README, Search and Actions documentation explain Agent Center through
+- [x] README, Search and Actions documentation explain Agent Center through
       visible commands first and prefixes as accelerators second.
-- [ ] Tests, release Clippy, `git diff --check` and gather benchmark pass under
+- [x] Tests, release Clippy, `git diff --check` and gather benchmark pass under
       the 40 ms budget.
 
-Definition of done: a new user can discover Agent Center, Running Agents, Past
-Conversations, Skills, MCP Servers and Agent Config by ordinary search; an
-Agent row answers what is installed, active and supported; and no capability
-is advertised by one surface while refused by another.
+Definition-of-done evidence: ordinary root search contains Agent Control
+Center, Running Agents, Past Conversations, Skills, MCP Servers and Agent
+Config. On the validation machine an Agent Quick Look names the executable,
+settings, two active projects, recent Session and registry operations; its
+panel reaches Runs, Sessions, Ask, settings, diagnostics and Favorites. Control
+schema 3 serializes the same registry capabilities and passed a private-value
+scan.
 
 ## Recorded limitations
 
@@ -531,12 +534,12 @@ rediscovered. None is a pending task.
 As of 2026-08-09:
 
 - Branch: `feature/agent-control-plane`
-- Tests: 118 passing, and hermetic — no test reads or writes the user's real
-  data directory, and none mutates the environment of a running process
-  (180 before Milestones 6 and 8 were withdrawn, taking 65 of their tests with
-  them)
+- Tests: 125 passing, and hermetic — no test reads or writes the user's real
+  data directory or favorites preference, and none mutates the environment of
+  a running process (180 before Milestones 6 and 8 were withdrawn)
 - Release Clippy: warning-free, including `--all-targets`
-- Gather benchmark: median 13.9–19.3 ms on a settled machine, budget 40 ms
+- Gather benchmark: median 15.0–22.1 ms across the final repeated runs,
+  observed max 35.0 ms, budget 40 ms
 - Empty-query home: 43 rows — 4 Agents, 5 Runs, 13 Skills, 6 MCP servers and
   the 15 newest Sessions
 - Control schema: 3
@@ -548,6 +551,19 @@ As of 2026-08-09:
   - `b5e4c39` — MCP transport, tools, refresh, public Diff and diagnostics
 
 ## Progress log
+
+### 2026-08-09 — Raycast-style Agent experience completed
+
+- Added `agent.rs` as the one registry for built-in invocation, settings and
+  support flags, then routed Session, Run, Control, actions and borrowing to it.
+- Expanded Agent Quick Look and the action panel without adding hot-path Agent
+  CLI calls.
+- Added visible Skills management through `skill:` while retaining `/` as the
+  invocation accelerator and the existing named management commands.
+- Added atomic Favorites for Agent, Skill and MCP object identities; favourites
+  promote within Kind and carry no path, command or definition.
+- Added registry consistency, privacy, scope, action and ordering tests; closed
+  Milestones 7 and 10.
 
 ### 2026-08-09 — the collaboration layer withdrawn, and the home corrected
 

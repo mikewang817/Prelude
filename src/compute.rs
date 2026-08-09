@@ -775,6 +775,7 @@ pub enum Scope {
     Ports,
     Processes,
     Containers,
+    Skills,
     Mcp,
     Config,
 }
@@ -790,6 +791,7 @@ const SCOPES: &[ScopeDef] = &[
     ScopeDef { scope: Scope::Agent, prefix: "a:", title: "Agent Control Center", desc: "agents, runs, skills, MCP and config" },
     ScopeDef { scope: Scope::Running, prefix: "r:", title: "Running Agents", desc: "working and waiting now" },
     ScopeDef { scope: Scope::Sessions, prefix: "s:", title: "Past Conversations", desc: "all agent sessions" },
+    ScopeDef { scope: Scope::Skills, prefix: "skill:", title: "Skills", desc: "all installed agent capabilities" },
     ScopeDef { scope: Scope::Files, prefix: "f:", title: "Search Files", desc: "project and indexed roots" },
     ScopeDef { scope: Scope::Clipboard, prefix: "c:", title: "Clipboard History", desc: "recent copied text" },
     ScopeDef { scope: Scope::History, prefix: "h:", title: "Shell History", desc: "recent commands" },
@@ -1212,6 +1214,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         Scope::Ports => kind == Port,
         Scope::Processes => kind == Proc,
         Scope::Containers => kind == Container,
+        Scope::Skills => kind == Skill,
         Scope::Mcp => kind == Mcp,
         Scope::Config => kind == Config,
         Scope::Agent | Scope::Running | Scope::Sessions | Scope::Files => false,
@@ -1350,7 +1353,7 @@ pub fn agent_query(q: &str) -> Option<(String, String)> {
         return None;
     }
     let want = agent.to_lowercase();
-    let installed = crate::sources::sessions::installed();
+    let installed = crate::agent::installed();
     // Exact name wins over a prefix, so `@pi` never resolves to something else.
     let agent = installed.iter().find(|k| **k == want)
         .or_else(|| installed.iter().find(|k| k.starts_with(&want)))?;
@@ -1554,6 +1557,21 @@ mod tests {
         let root: Vec<String> = root_items(&rows).into_iter().map(|it| it.title).collect();
         assert!(root.contains(&"node_repl".to_string()) && root.contains(&"deploy".to_string()));
         assert!(!root.contains(&"old".to_string()), "sessions have their own s: scope");
+    }
+
+    #[test]
+    fn skills_are_a_visible_named_scope_and_slash_remains_an_accelerator() {
+        let commands = scope_commands();
+        let skills = commands.iter().find(|item| item.title == "Skills").expect("Skills command");
+        assert_eq!(skills.get("completion"), "skill:");
+        let (scope, term) = scope_query("skill: review").expect("skill scope");
+        assert_eq!(scope, Scope::Skills);
+        assert_eq!(term, "review");
+        let rows = vec![
+            Item::new("one", Kind::Skill).title("review"),
+            Item::new("two", Kind::Mcp).title("review server"),
+        ];
+        assert_eq!(scoped_rows(scope, term, &rows).len(), 1);
     }
 
     #[test]

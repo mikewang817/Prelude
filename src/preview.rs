@@ -379,6 +379,8 @@ pub fn text(it: &Item) -> String {
             kv(&mut out, "about", it.get("desc"));
         },
         Kind::Agent => {
+            kv(&mut out, "executable", &tilde(it.get("executable")));
+            kv(&mut out, "settings", &tilde(it.get("settings")));
             for (k, v) in [("skills", 0), ("mcp", 1), ("sessions", 2)] {
                 kv(&mut out, k, it.fields.get(v).map(String::as_str).unwrap_or(""));
             }
@@ -393,6 +395,21 @@ pub fn text(it: &Item) -> String {
                 let projects: Vec<String> = serde_json::from_str(it.get("projects")).unwrap_or_default();
                 kv(&mut out, "projects", &projects.join(", "));
             }
+            if !it.get("latest_session").is_empty() {
+                let at = it.get("latest_session_at").parse::<f64>().unwrap_or(0.0);
+                let when = crate::sources::user::ago(at);
+                kv(
+                    &mut out,
+                    "recent",
+                    &format!(
+                        "{}{}",
+                        it.get("latest_session"),
+                        if when.is_empty() { String::new() } else { format!(" · {when}") },
+                    ),
+                );
+            }
+            kv(&mut out, "supports", it.get("operations"));
+            kv(&mut out, "favorite", if it.get("favorite") == "true" { "yes" } else { "" });
             out.push(String::new());
             out.push(format!("{DIM}start it{RESET}"));
             out.push(it.get("agent").to_string());

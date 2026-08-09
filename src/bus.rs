@@ -227,7 +227,7 @@ fn enclosing_agent() -> Option<String> {
             parent.insert(p, (pp, base));
         }
     }
-    let names: Vec<&str> = crate::sources::sessions::AGENTS.iter().map(|a| a.name).collect();
+    let names: Vec<&str> = crate::agent::SPECS.iter().map(|spec| spec.name).collect();
     let mut pid = std::process::id();
     // Bounded: a broken tree with a cycle must not spin forever, and no real
     // agent is more than a handful of processes above its own tool call.
