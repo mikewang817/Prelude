@@ -31,6 +31,29 @@ _prelude_widget() {
 }
 zle -N _prelude_widget
 
+# A terminal created by `prelude global` asks for exactly one invocation when
+# its first prompt becomes editable. Use ZLE's lifecycle rather than sending a
+# delayed Ctrl-R into a shell that may still be reading .zshrc. A widget cannot
+# safely take over the terminal *inside* line-init, so the hook queues one
+# private ZLE sequence and returns; ZLE then invokes the same _prelude_widget in
+# its normal dispatch cycle. Both the hook and private binding remove themselves
+# before opening Prelude, leaving a completely ordinary shell afterwards.
+if [[ -n ${PRELUDE_AUTOSTART:-} ]]; then
+  unset PRELUDE_AUTOSTART
+  autoload -Uz add-zle-hook-widget
+  _prelude_autostart_dispatch() {
+    bindkey -r $'\e[27;99~'
+    zle _prelude_widget
+  }
+  zle -N _prelude_autostart_dispatch
+  bindkey $'\e[27;99~' _prelude_autostart_dispatch
+  _prelude_autostart_once() {
+    add-zle-hook-widget -d line-init _prelude_autostart_once
+    zle -U $'\e[27;99~'
+  }
+  add-zle-hook-widget line-init _prelude_autostart_once
+fi
+
 # Ctrl-R by default: prelude is a superset of incremental history search, and
 # that is already where your fingers go for "that command I ran before".
 # Override by setting PRELUDE_KEY before the `eval` line, e.g. PRELUDE_KEY='^T'.
@@ -142,3 +165,26 @@ prelude inbox --json && prelude drain
 Do not use these for ordinary progress chatter. A notification that arrives
 for nothing teaches the person to ignore the next one.
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::ZSH;
+
+    #[test]
+    fn global_terminal_autostart_is_one_zle_invocation_not_a_timed_keypress() {
+        assert!(ZSH.contains("${PRELUDE_AUTOSTART:-}"));
+        assert!(ZSH.contains("add-zle-hook-widget line-init _prelude_autostart_once"));
+        assert!(ZSH.contains("add-zle-hook-widget -d line-init _prelude_autostart_once"));
+        assert!(ZSH.contains("zle -U $'\\e[27;99~'"));
+        assert!(ZSH.contains("zle _prelude_widget"));
+        assert!(ZSH.contains("bindkey -r $'\\e[27;99~'"));
+        assert!(!ZSH.contains("sleep "));
+        assert!(!ZSH.contains("osascript"));
+        let remove_hook = ZSH.find("add-zle-hook-widget -d line-init").unwrap();
+        let queue = ZSH.find("zle -U $'\\e[27;99~'").unwrap();
+        let remove_binding = ZSH.find("bindkey -r $'\\e[27;99~'").unwrap();
+        let invoke = ZSH.find("zle _prelude_widget").unwrap();
+        assert!(remove_hook < queue, "the line hook must remove itself before dispatch");
+        assert!(remove_binding < invoke, "the private binding must be gone before Prelude opens");
+    }
+}

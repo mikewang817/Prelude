@@ -160,6 +160,47 @@ The second is what makes the first half of this README happen at all — an
 agent that has not been told it can ask you a question will not ask you a
 question. See [teaching an agent](#teaching-an-agent-it-can-do-this).
 
+### Open Prelude globally with Cmd+Space
+
+The terminal `Ctrl+R` binding is local to a prompt. To create a fresh terminal
+from Finder, a browser or any other application, install Prelude's native
+hotkey helper:
+
+```sh
+prelude global install
+prelude global status
+```
+
+Installation compiles and ad-hoc signs the small AppKit helper with the Swift
+compiler supplied by Xcode Command Line Tools, then loads a per-user
+LaunchAgent. It is repeatable and restores the previous helper if an upgrade
+cannot be started.
+
+macOS assigns `Cmd+Space` to Spotlight by default. Disable **Show Spotlight
+search** under **System Settings → Keyboard → Keyboard Shortcuts → Spotlight**;
+Prelude reports the conflict but never rewrites a system shortcut.
+
+Every press creates a new login-zsh terminal in `$HOME` and invokes the same
+`_prelude_widget` as `Ctrl+R` — there is no delayed synthetic keypress and no
+existing terminal is reused. If Ghostty is installed, Prelude asks Launch
+Services for a new Ghostty app/window. Otherwise it creates a new Terminal.app
+window. Terminal may request Automation permission on first use.
+
+```sh
+prelude global backend auto       # default: Ghostty, then Terminal.app
+prelude global backend ghostty    # require Ghostty; do not silently fall back
+prelude global backend terminal   # always use Terminal.app
+prelude global open               # exercise the selected backend without the key
+```
+
+Commands still land on that new shell's prompt for review. Files, URLs and
+applications still open directly. `prelude global uninstall` removes the app
+and LaunchAgent while retaining the backend preference; add `--reset` to remove
+Prelude's global-helper preference and status files too. The helper has no Dock
+icon, starts through a per-user LaunchAgent and carries no selected result in
+AppleScript, arguments, preferences or logs. See
+[the implementation and acceptance record](docs/GLOBAL-HOTKEY.md).
+
 ## Running dozens of agents at once
 
 `s:` searches conversations on disk. **`r:` searches what is alive right
@@ -911,6 +952,11 @@ run for themselves.
 | `prelude fleet` | every agent running, and its state |
 | `prelude fleet --status` | one line for a tmux status bar |
 | `prelude watch` | notify the moment an agent stops and waits |
+| `prelude global install` | install and start the native Cmd+Space helper |
+| `prelude global status [--json]` | helper, backend, zsh and Spotlight diagnostics |
+| `prelude global open` | create one fresh terminal without pressing the hotkey |
+| `prelude global backend auto\|ghostty\|terminal` | choose terminal fallback behaviour |
+| `prelude global start\|stop\|uninstall` | manage or remove the per-user helper |
 
 **Your agents**
 
@@ -956,6 +1002,7 @@ Files, all under the usual XDG locations:
 |---|---|
 | `$XDG_CONFIG_HOME/prelude/snippets.toml` | Your snippets |
 | `$XDG_CONFIG_HOME/prelude/quicklinks.toml` | Your quicklinks |
+| `$XDG_CONFIG_HOME/prelude/global.toml` | `auto`, `ghostty` or `terminal` for Cmd+Space |
 | `$XDG_CONFIG_HOME/prelude/roots.txt` | Which folders `f:` indexes |
 | `$XDG_DATA_HOME/prelude/frecency.tsv` | What you pick, so it learns |
 | `$XDG_DATA_HOME/prelude/sessions.json` | Local Session names, pins and archive state |

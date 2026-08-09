@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 125 tests
+cargo test                 # 130 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -37,6 +37,21 @@ prelude answer-of "$ID"                  # what the agent collects
 working inside an agent's terminal is correctly identified as that agent —
 which would otherwise make their own inbox unreachable from the very window
 they are sitting in.
+
+## Global hotkey helper
+
+`docs/GLOBAL-HOTKEY.md` is the acceptance record. The helper is a separate
+AppKit executable built from `macos/PreludeHotkey/main.swift`; no GUI dependency
+belongs in the latency-sensitive Rust binary. It discovers Ghostty through
+Launch Services, falls back to one fixed Terminal Apple Event, and creates a
+fresh terminal rather than typing into an existing one.
+
+`PRELUDE_AUTOSTART` is consumed only by the generated zsh integration. Its
+one-shot ZLE hook must dispatch the existing `_prelude_widget`, remove itself
+beforehand, and never sleep or send a timed operating-system key event. No
+selected payload may enter helper arguments, AppleScript, config, status or
+logs. `global install` may replace only Prelude's own app and LaunchAgent and
+must restore the prior installation if an upgrade cannot start.
 
 ## Agent Control Plane work
 

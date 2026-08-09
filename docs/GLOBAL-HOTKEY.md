@@ -46,39 +46,62 @@ builds and ad-hoc signs an app in `~/Applications`, writes a LaunchAgent, and
 starts it. Installation is explicit and may invoke Xcode's installed Swift
 compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
 
-## Milestone — production global launcher `[>]`
+## Milestone — production global launcher `[x]`
 
-- [ ] `prelude init zsh` supports a one-shot `PRELUDE_AUTOSTART=1` ZLE hook and
+- [x] `prelude init zsh` supports a one-shot `PRELUDE_AUTOSTART=1` ZLE hook and
       then restores an ordinary shell.
-- [ ] The hook invokes the same `_prelude_widget`; it does not synthesize a
+- [x] The hook invokes the same `_prelude_widget`; it does not synthesize a
       delayed `Ctrl+R` or duplicate `INSERT`, `RUN` and `MSG` handling.
-- [ ] A native helper registers `Cmd+Space`, ignores key repeat, and creates one
+- [x] A native helper registers `Cmd+Space`, ignores key repeat, and creates one
       fresh terminal per press.
-- [ ] Ghostty is detected by bundle identifier and launched as a new app/window
+- [x] Ghostty is detected by bundle identifier and launched as a new app/window
       with a login zsh and `$HOME` working directory.
-- [ ] Terminal.app is the fallback and receives only a fixed bootstrap command.
-- [ ] `auto`, `ghostty` and `terminal` are supported, with validated atomic
+- [x] Terminal.app is the fallback and receives only a fixed bootstrap command.
+- [x] `auto`, `ghostty` and `terminal` are supported, with validated atomic
       configuration under Prelude's XDG config directory.
-- [ ] `prelude global install|uninstall|start|stop|status|open|backend` manages
+- [x] `prelude global install|uninstall|start|stop|status|open|backend` manages
       the app, LaunchAgent and preference without touching terminal or shell
       configuration.
-- [ ] Installation is repeatable, upgrades atomically, uses no personal path,
+- [x] Installation is repeatable, upgrades atomically, uses no personal path,
       ad-hoc signs the app, and rolls back an incomplete replacement.
-- [ ] Uninstallation stops the helper and removes only Prelude-owned global
+- [x] Uninstallation stops the helper and removes only Prelude-owned global
       integration files; user configuration is retained unless explicitly
       reset.
-- [ ] Status and Doctor report helper installation, process state, selected and
+- [x] Status and Doctor report helper installation, process state, selected and
       detected backend, Ghostty availability, zsh integration and the Spotlight
       shortcut conflict where macOS exposes it.
-- [ ] Launch failures are bounded, written without payloads to a private status
+- [x] Launch failures are bounded, written without payloads to a private status
       file, and never leave the hotkey handler blocked.
-- [ ] Documentation covers Spotlight reassignment, Automation permission for
+- [x] Documentation covers Spotlight reassignment, Automation permission for
       Terminal.app, backend selection, login behaviour and complete removal.
-- [ ] Unit tests cover config parsing, generated app metadata, LaunchAgent
+- [x] Unit tests cover config parsing, generated app metadata, LaunchAgent
       safety, fixed launch arguments, autostart one-shot behaviour and path
       boundaries without launching GUI applications.
-- [ ] Full tests, release Clippy, `git diff --check`, release build and repeated
+- [x] Full tests, release Clippy, `git diff --check`, release build and repeated
       gather benchmarks pass; gather remains under 40ms.
+
+## Validation record
+
+- 130 Rust tests pass. A PTY exercise with a fixture `prelude` command confirmed
+  that `PRELUDE_AUTOSTART` invokes the widget once, removes its hook, and leaves
+  the next prompt ordinary.
+- The Swift helper compiles optimized with warnings as errors and reports
+  Ghostty through Launch Services on the validation machine.
+- A hermetic HOME/XDG installation built, signed, loaded, reported, stopped and
+  uninstalled without touching the person's integration. A repeated real
+  installation preserved `auto`, replaced the app, restarted its LaunchAgent
+  and left no installer backup.
+- `prelude global open` created both a Ghostty window in `auto` mode and a
+  Terminal.app window when explicitly selected; each attempt produced only a
+  bounded, payload-free status event. The final installed state reports app,
+  LaunchAgent, process, hotkey and zsh widget healthy, Ghostty effective, and
+  Spotlight released.
+- Config, LaunchAgent, helper logs and status are mode 0600. App and LaunchAgent
+  removal were exercised in an isolated HOME; `--reset` removed the Prelude
+  preference and status while ordinary uninstall retained configuration.
+- Release Clippy passed with `--all-targets -D warnings`; `git diff --check` and
+  the release build passed. Three final gather runs had medians 21.7–26.3 ms
+  and an observed maximum 38.8 ms against the 40 ms budget.
 
 ## Recorded limitations
 

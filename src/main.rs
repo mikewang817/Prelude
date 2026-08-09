@@ -19,6 +19,7 @@ mod exec;
 mod favorites;
 mod fleet;
 mod frecency;
+mod global;
 mod init;
 mod item;
 mod lend;
@@ -68,6 +69,7 @@ fn main() -> ExitCode {
         ["watch"] => fleet::watch(),
         ["control"] => control::list(false),
         ["control", "--json"] => control::list(true),
+        ["global", rest @ ..] => global::dispatch(rest),
 
         // The agent-facing verbs. These are what an agent runs from its own
         // shell, so each one is a plain word with the text last: an agent
@@ -312,6 +314,9 @@ HUMANS
   prelude fleet --status one short line for a tmux status bar
   prelude watch          notify the moment an agent stops and waits for you
   prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
+  prelude global install|uninstall|start|stop|status|open
+  prelude global backend [auto|ghostty|terminal]
+                         global Cmd+Space; Ghostty first, Terminal fallback
   prelude doctor agents|sessions|skills|mcp
                          what is wrong with the agent side of the machine
                          --json for fields · --repair asks about each finding

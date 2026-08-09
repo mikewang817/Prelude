@@ -1499,6 +1499,36 @@ pub fn run() -> i32 {
     check("zoxide (folder ranking)".into(), which("zoxide").is_some(), "optional");
     check("tmux (popup rendering)".into(), which("tmux").is_some(), "optional");
 
+    let global = crate::global::status();
+    if global.app_installed || global.launch_agent_installed {
+        check(
+            "global Cmd+Space helper installed".into(),
+            global.app_installed && global.launch_agent_installed,
+            &format!("backend {}", global.selected_backend),
+        );
+        check(
+            "global Cmd+Space helper running".into(),
+            global.helper_running,
+            "prelude global start",
+        );
+        check(
+            "global terminal zsh widget".into(),
+            global.zsh_widget_available,
+            "eval \"$(prelude init zsh)\" must be in ~/.zshrc",
+        );
+        check(
+            "Cmd+Space registered".into(),
+            global.hotkey_registered,
+            "free it under System Settings → Keyboard → Keyboard Shortcuts, then run: prelude global start",
+        );
+    } else {
+        check(
+            "global Cmd+Space helper".into(),
+            true,
+            "optional · install with: prelude global install",
+        );
+    }
+
     let hist = std::env::var("HISTFILE").map(std::path::PathBuf::from)
         .unwrap_or_else(|_| paths::home().join(".zsh_history"));
     check("shell history readable".into(), hist.exists(), &hist.to_string_lossy());
