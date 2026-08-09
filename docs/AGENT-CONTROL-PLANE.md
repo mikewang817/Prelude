@@ -549,6 +549,9 @@ As of 2026-08-09:
   - `fb10c99` — Session lifecycle metadata and actions
   - `02f3d65` — Skill/MCP integrity matrix foundation
   - `b5e4c39` — MCP transport, tools, refresh, public Diff and diagnostics
+  - `1fc876c` — collaboration rollback and inventory Home restoration
+  - `edaf72a` — Raycast-style Agent experience plan
+  - `898e9d6` — typed Agent registry, rich surfaces, Skills discovery and Favorites
 
 ## Progress log
 
