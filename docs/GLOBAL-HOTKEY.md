@@ -165,6 +165,8 @@ Validation added for this milestone:
 - `62d52d3` — configurable-key and singleton refinement plan.
 - `add0b23` — Spotlight/Raycast preflight, live hotkey changes, native
   defense-in-depth checks and token-checked singleton lifecycle.
+- `54ea942` — Ghostty's supported `-e` launch path and exact active-application
+  focusing; replaces a Launch Services success that opened no Prelude.
 
 ## Recorded limitations
 
