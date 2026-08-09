@@ -204,14 +204,11 @@ pub fn index_stale() -> bool {
 /// `~/Library`, which macOS protects as other applications' data, and the only
 /// symptom is a system dialog naming the terminal rather than Prelude.
 pub fn add_root(raw: &str) -> Result<String, String> {
-    let expanded = match raw.trim().strip_prefix("~/") {
-        Some(rest) => crate::paths::home().join(rest),
-        None if raw.trim() == "~" => crate::paths::home(),
-        None => PathBuf::from(raw.trim()),
+    let readings = readings_of(raw);
+    let Some(real) = readings.iter().find_map(|p| p.canonicalize().ok()) else {
+        let shown = readings.first().map(|p| p.display().to_string()).unwrap_or_default();
+        return Err(format!("{shown} is not there"));
     };
-    let real = expanded
-        .canonicalize()
-        .map_err(|_| format!("{} is not there", expanded.display()))?;
     if !real.is_dir() {
         return Err(format!("{} is not a folder", real.display()));
     }
@@ -229,6 +226,55 @@ pub fn add_root(raw: &str) -> Result<String, String> {
     lines.push(tilde.clone());
     write_roots(&lines)?;
     Ok(tilde)
+}
+
+/// The ways a typed or pasted path can be meant, most literal first.
+///
+/// A path with a space in it reaches the clipboard already escaped more often
+/// than not — shell completion writes `Mobile\ Documents`, dragging a folder
+/// into a terminal writes the same, and `com~apple~CloudDocs` picks up
+/// backslashes too. Pasting that into a prompt is the ordinary thing to do,
+/// and it produced `is not there` about a folder plainly sitting on screen.
+///
+/// The literal reading is tried first and always, so a directory whose name
+/// genuinely contains a backslash or a quote is never taken away by this. The
+/// unescaped readings are what it falls back to.
+fn readings_of(raw: &str) -> Vec<PathBuf> {
+    let trimmed = raw.trim();
+    let unquoted = match (trimmed.chars().next(), trimmed.chars().last()) {
+        (Some(a), Some(b)) if a == b && (a == '\'' || a == '"') && trimmed.len() > 1 => {
+            &trimmed[1..trimmed.len() - 1]
+        }
+        _ => trimmed,
+    };
+    let mut out = Vec::new();
+    for text in [trimmed, unquoted, &unescape(trimmed), &unescape(unquoted)] {
+        let p = match text.strip_prefix("~/") {
+            Some(rest) => crate::paths::home().join(rest),
+            None if text == "~" => crate::paths::home(),
+            None => PathBuf::from(text),
+        };
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Drop one level of shell escaping: `\x` becomes `x`, for any `x`.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub fn remove_root(entry: &str) -> Result<(), String> {
@@ -706,6 +752,36 @@ mod tests {
             );
         }
         assert!(add_root("/definitely/not/here").unwrap_err().contains("not there"));
+    }
+
+    /// A path with a space in it reaches the clipboard already escaped, and
+    /// pasting that into the prompt is the ordinary thing to do. It used to
+    /// answer `is not there` about a folder plainly on screen — the worst
+    /// available wording, because it names the one thing that is not wrong.
+    ///
+    /// The literal reading is still first and still always tried, so a folder
+    /// whose name genuinely contains a backslash is not taken away by this.
+    #[test]
+    fn a_shell_escaped_paste_is_read_as_the_path_it_names() {
+        let want = std::path::PathBuf::from("/Users/x/Mobile Documents/com~apple~CloudDocs");
+        for pasted in [
+            r"/Users/x/Mobile\ Documents/com\~apple\~CloudDocs",
+            r"'/Users/x/Mobile Documents/com~apple~CloudDocs'",
+            r#""/Users/x/Mobile Documents/com~apple~CloudDocs""#,
+            "  /Users/x/Mobile Documents/com~apple~CloudDocs  ",
+        ] {
+            assert!(readings_of(pasted).contains(&want), "{pasted}");
+        }
+        // The literal is offered first, so a real backslash still wins where
+        // such a directory exists.
+        let odd = r"/tmp/a";
+        assert_eq!(readings_of(odd).first().unwrap(), std::path::Path::new(odd));
+        // `~` is still expanded, and still refused by the guard above.
+        assert_eq!(readings_of("~").first().unwrap(), &crate::paths::home());
+        assert_eq!(
+            readings_of("~/work").first().unwrap(),
+            &crate::paths::home().join("work")
+        );
     }
 
     /// A stale index is the failure this surface exists to make visible: you

@@ -937,6 +937,10 @@ you have added a folder the index does not know about yet. That silence was
 the actual bug: you add a folder, `f:` keeps answering from the old set, and
 nothing anywhere tells you the index is why.
 
+Paths are accepted the way they arrive: `~/work`, an absolute path, or the
+shell-escaped form the clipboard gives you when the folder has a space in it
+(`.../Mobile\ Documents/com\~apple\~CloudDocs/...`), quotes and all.
+
 Adding a root goes through the same guard the Trash uses, so `~`, `/`,
 `/Users` and `/Applications` are refused. Indexing a home directory means
 seven levels of `fd` through `~/Library`, which macOS protects as other

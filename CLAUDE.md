@@ -164,6 +164,15 @@ way. `^K` holds the mutations and never repeats Enter — a test walks every
 setting and asserts it, because each of these rows has an obvious primary and
 listing it twice is the natural mistake.
 
+A pasted path is tried literally first and then unescaped, because a path with
+a space in it reaches the clipboard already escaped — shell completion and
+dragging a folder into a terminal both write `Mobile\ Documents`, and
+`com~apple~CloudDocs` picks up backslashes too. Reading only the literal
+answered `is not there` about a folder plainly on screen, which is the worst
+available wording: it names the one thing that was not wrong. Keep the literal
+reading first so a directory whose name really contains a backslash is not
+taken away by the convenience.
+
 `prelude settings add-root` and its neighbours exist so the guards can be
 exercised without standing up fzf, which is the same reason `_dump` and the
 agent verbs exist. **Adding a root goes through `paths::is_protected`.** That
