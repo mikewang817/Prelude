@@ -1254,7 +1254,10 @@ mod tests {
         assert!(SWIFT.contains("PRELUDE_AUTOSTART=1"));
         assert!(SWIFT.contains("com.mitchellh.ghostty"));
         assert!(SWIFT.contains("createsNewApplicationInstance = true"));
-        assert!(SWIFT.contains("--initial-command=direct:/usr/bin/env PRELUDE_AUTOSTART=1"));
+        assert!(SWIFT.contains("\"-e\""));
+        assert!(SWIFT.contains("\"/usr/bin/env\""));
+        assert!(SWIFT.contains("\"PRELUDE_AUTOSTART=1\""));
+        assert!(SWIFT.contains("PRELUDE_GLOBAL_TOKEN="));
         assert!(SWIFT.contains("/usr/bin/osascript"));
         assert!(SWIFT.contains("did not answer within 10 seconds"));
         assert!(SWIFT.contains("RegisterEventHotKey"));

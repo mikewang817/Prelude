@@ -48,6 +48,12 @@ fresh terminal rather than typing into an existing one. The configured chord
 must pass Spotlight, Raycast and native reservation checks before a helper is
 installed or restarted. Never rewrite another application's shortcut.
 
+On macOS Ghostty must receive the bootstrap through `-e` as separate argv.
+Passing `--initial-command=...` through `NSWorkspace.OpenConfiguration` can
+return success while the existing single-instance app opens no Prelude at all;
+a status event is not proof of a terminal. Validation checks that both a new
+Ghostty process/window and an fzf child appear.
+
 Only one launcher may be active. The helper's private lease contains a random
 token and no selected payload; the one-shot zsh widget removes it when Prelude
 returns. Repeated hotkeys focus the effective terminal application. Keep a

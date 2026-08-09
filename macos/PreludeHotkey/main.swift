@@ -200,6 +200,7 @@ private final class TerminalLauncher {
     private let paths: AppPaths
     private let status: StatusWriter
     private let lease: LauncherLease
+    private weak var activeApplication: NSRunningApplication?
     private var lastLaunch = 0.0
 
     init(paths: AppPaths) {
@@ -368,6 +369,10 @@ private final class TerminalLauncher {
     }
 
     private func focusEffectiveTerminal() {
+        if let activeApplication, !activeApplication.isTerminated {
+            activeApplication.activate(options: [.activateAllWindows])
+            return
+        }
         let active = lease.backend() ?? effectiveBackend()
         let bundle = active == .ghostty ? ghosttyBundleID : terminalBundleID
         NSRunningApplication.runningApplications(withBundleIdentifier: bundle)
@@ -381,7 +386,12 @@ private final class TerminalLauncher {
         configuration.createsNewApplicationInstance = true
         configuration.arguments = [
             "--working-directory=\(FileManager.default.homeDirectoryForCurrentUser.path)",
-            "--initial-command=direct:/usr/bin/env PRELUDE_AUTOSTART=1 PRELUDE_GLOBAL_TOKEN=\(token) /bin/zsh -il",
+            "-e",
+            "/usr/bin/env",
+            "PRELUDE_AUTOSTART=1",
+            "PRELUDE_GLOBAL_TOKEN=\(token)",
+            "/bin/zsh",
+            "-il",
         ]
         let lock = NSLock()
         var finished = false
@@ -392,10 +402,11 @@ private final class TerminalLauncher {
             lock.unlock()
             DispatchQueue.main.async { completion(ok, String(detail.prefix(500))) }
         }
-        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] application, error in
             if let error {
                 finish(false, error.localizedDescription)
             } else {
+                self?.activeApplication = application
                 finish(true, "")
             }
         }
@@ -432,9 +443,14 @@ private final class TerminalLauncher {
             lock.unlock()
             DispatchQueue.main.async { completion(ok, String(detail.prefix(500))) }
         }
-        process.terminationHandler = { task in
+        process.terminationHandler = { [weak self] task in
             let data = errors.fileHandleForReading.readDataToEndOfFile()
             let detail = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if task.terminationStatus == 0 {
+                self?.activeApplication = NSRunningApplication
+                    .runningApplications(withBundleIdentifier: terminalBundleID)
+                    .last(where: { !$0.isTerminated })
+            }
             finish(task.terminationStatus == 0, detail)
         }
         do {

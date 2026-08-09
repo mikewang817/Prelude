@@ -145,9 +145,13 @@ Validation added for this milestone:
   running and registered.
 - Live changes between two free chords restarted the helper cleanly. Invalid,
   duplicate and modifier-free chords left configuration unchanged.
-- Two immediate `global open` calls created one additional Ghostty process, not
-  two; the second event was `already-open` and focused the effective backend.
-  The same lease behaviour passed with Terminal.app.
+- Ghostty is launched with its macOS-supported `-e` argv path. An earlier
+  `--initial-command` form returned Launch Services success while opening no
+  Prelude in the single-instance app; validation now requires both one new
+  Ghostty process/window and one new fzf child. Two immediate `global open`
+  calls created those once, not twice; the second event was `already-open` and
+  focused the effective backend. The same lease behaviour passed with
+  Terminal.app.
 - A PTY fixture confirmed the one-shot widget removes only its matching token
   and leaves the next prompt ordinary. The lease is private, carries only a
   random UUID and backend, expires after 30 minutes, and has an explicit
