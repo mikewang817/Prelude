@@ -72,6 +72,29 @@ it left orphaned `fzf` processes to prove it. The remaining timeouts are bounds,
 not mechanisms: a short grace window for a lease not yet claimed, and the thirty
 minutes as a backstop against a recycled pid.
 
+**macOS records a shortcut only once it stops matching the default.** Asking
+whether Spotlight's entry is enabled answers nothing on an untouched Mac, where
+the entry is simply absent — which is how a chord Spotlight owns was reported
+free. Read the whole `AppleSymbolicHotKeys` table by key code and Cocoa
+modifier mask, then apply the known defaults for the ids nothing is recorded
+for. Name only the shortcuts worth naming and report the rest by id; an
+application that merely watches a key is in no registry at all, so "no known
+owner" is the strongest honest claim and the Carbon reservation is the backstop.
+
+A window the hotkey opened closes itself when nothing was handed over — a
+dismissal, or an object acted on directly. `INSERT`, `RUN`, `MSG` and a Prelude
+failure all leave something to read and keep it. Only that one-shot window does
+this; Ctrl+R never closes a terminal. It exits through the line editor rather
+than calling `exit` inside a widget, and out of the history file, because
+Prelude indexes shell history and would otherwise feed itself a row per press.
+`zsh` reserves `status` as a read-only alias for `$?`: declaring it local fails
+the widget before Prelude runs, and only a pty exercise shows it.
+
+Where the window starts is `prelude global directory`, default `$HOME`. It
+reaches a process argument on one backend and an Apple Event on the other, so
+one rule strict enough for both is applied on the way in rather than two
+escapes that can disagree, and it is re-checked in the helper.
+
 The helper never exits on a busy chord. Spotlight or Raycast may hold the key at
 login and release it later; registration retries and says so once. launchd
 restarts it on any unclean exit — `KeepAlive`'s `Crashed` covers only the

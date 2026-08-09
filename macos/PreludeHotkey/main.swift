@@ -47,6 +47,35 @@ private struct HotKeySpec {
         return HotKeySpec(canonical: names.joined(separator: "+"), keyCode: code, modifiers: flags)
     }
 
+    static let cocoaShift: UInt32 = 1 << 17
+    static let cocoaControl: UInt32 = 1 << 18
+    static let cocoaOption: UInt32 = 1 << 19
+    static let cocoaCommand: UInt32 = 1 << 20
+    static let cocoaModifiers: UInt32 = cocoaShift | cocoaControl | cocoaOption | cocoaCommand
+
+    /// The chord as macOS's own shortcut table records it: Cocoa event flags,
+    /// not the Carbon bits `RegisterEventHotKey` takes.
+    var cocoaMask: UInt32 {
+        var mask: UInt32 = 0
+        if modifiers & UInt32(shiftKey) != 0 { mask |= HotKeySpec.cocoaShift }
+        if modifiers & UInt32(controlKey) != 0 { mask |= HotKeySpec.cocoaControl }
+        if modifiers & UInt32(optionKey) != 0 { mask |= HotKeySpec.cocoaOption }
+        if modifiers & UInt32(cmdKey) != 0 { mask |= HotKeySpec.cocoaCommand }
+        return mask
+    }
+
+    /// Only the handful worth naming are named; the rest are reported by id
+    /// rather than guessed at.
+    static func symbolicName(_ id: String) -> String {
+        switch id {
+        case "60": return "the macOS previous-input-source shortcut"
+        case "61": return "the macOS next-input-source shortcut"
+        case "64": return "Spotlight"
+        case "65": return "the Spotlight file search window"
+        default: return "a macOS keyboard shortcut (id \(id))"
+        }
+    }
+
     func matchesRaycast(_ value: String) -> Bool {
         var flags: UInt32 = 0
         var code: UInt32?
@@ -258,6 +287,20 @@ private final class TerminalLauncher {
         Backend(rawValue: configValue("backend") ?? "auto") ?? .auto
     }
 
+    /// Where a launcher window starts. The CLI validates this on the way in;
+    /// check it again here so a hand-edited config cannot send an unexpected
+    /// path into an Apple Event, and so a directory removed after it was
+    /// configured degrades to `$HOME` rather than failing the launch.
+    func launchDirectory() -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let value = configValue("directory"), !value.isEmpty, value.hasPrefix("/"),
+              !value.contains(where: { "\"'`$\\\n\r".contains($0) }) else { return home }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: value, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return home }
+        return value
+    }
+
     func selectedHotKey() -> HotKeySpec {
         HotKeySpec.parse(configValue("hotkey") ?? "cmd+space")
             ?? HotKeySpec.parse("cmd+space")!
@@ -271,20 +314,45 @@ private final class TerminalLauncher {
         let spec = selectedHotKey()
         let preferences = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Preferences")
+        if let owner = systemOwner(of: spec, in: preferences) { return owner }
         let raycast = preferences.appendingPathComponent("com.raycast.macos.plist")
         if let values = NSDictionary(contentsOf: raycast),
            let value = values["raycastGlobalHotkey"] as? String,
            spec.matchesRaycast(value) {
             return "Raycast"
         }
-        if spec.canonical == "cmd+space" {
-            let system = preferences.appendingPathComponent("com.apple.symbolichotkeys.plist")
-            if let values = NSDictionary(contentsOf: system),
-               let all = values["AppleSymbolicHotKeys"] as? [String: Any],
-               let spotlight = all["64"] as? [String: Any],
-               spotlight["enabled"] as? Bool == true {
-                return "Spotlight"
+        return nil
+    }
+
+    /// macOS records a symbolic hotkey only once it differs from the default,
+    /// so asking whether Spotlight's entry is enabled answers nothing when the
+    /// entry is absent — which is the ordinary case for an untouched Mac. Read
+    /// the whole table, and fall back to the defaults for the ids a launcher
+    /// chord collides with.
+    private func systemOwner(of spec: HotKeySpec, in preferences: URL) -> String? {
+        let defaults: [(String, UInt32, UInt32)] = [
+            ("60", 49, HotKeySpec.cocoaControl),
+            ("61", 49, HotKeySpec.cocoaControl | HotKeySpec.cocoaOption),
+            ("64", 49, HotKeySpec.cocoaCommand),
+            ("65", 49, HotKeySpec.cocoaCommand | HotKeySpec.cocoaOption),
+        ]
+        let table = NSDictionary(contentsOf: preferences.appendingPathComponent("com.apple.symbolichotkeys.plist"))
+        let recorded = (table?["AppleSymbolicHotKeys"] as? [String: Any]) ?? [:]
+        for (id, entry) in recorded {
+            guard let entry = entry as? [String: Any],
+                  (entry["enabled"] as? Bool) ?? true,
+                  let value = entry["value"] as? [String: Any],
+                  let parameters = value["parameters"] as? [NSNumber],
+                  parameters.count > 2 else { continue }
+            let code = parameters[1].uint32Value
+            let mask = parameters[2].uint32Value & HotKeySpec.cocoaModifiers
+            if code == spec.keyCode && mask == spec.cocoaMask {
+                return HotKeySpec.symbolicName(id)
             }
+        }
+        for (id, code, mask) in defaults
+        where recorded[id] == nil && code == spec.keyCode && mask == spec.cocoaMask {
+            return HotKeySpec.symbolicName(id)
         }
         return nil
     }
@@ -422,7 +490,7 @@ private final class TerminalLauncher {
         configuration.activates = true
         configuration.createsNewApplicationInstance = true
         configuration.arguments = [
-            "--working-directory=\(FileManager.default.homeDirectoryForCurrentUser.path)",
+            "--working-directory=\(launchDirectory())",
             // Ghostty's macOS build has no way to add a window to the instance
             // the person is already using, so a launch is always a second
             // instance — and a second instance restores the previous session's
@@ -470,10 +538,11 @@ private final class TerminalLauncher {
     }
 
     private func openTerminalApp(token: String, completion: @escaping (Bool, String) -> Void) {
-        // Only a generated UUID joins this fixed bootstrap. Selected launcher
+        // Only a generated UUID and a directory the CLI already refused to
+        // accept quotes in join this fixed bootstrap. Selected launcher
         // payloads never cross the Apple Event boundary or enter a process
         // command line.
-        let bootstrap = "exec /usr/bin/env PRELUDE_AUTOSTART=1 PRELUDE_GLOBAL_TOKEN=\(token) /bin/zsh -il"
+        let bootstrap = "cd '\(launchDirectory())' && exec /usr/bin/env PRELUDE_AUTOSTART=1 PRELUDE_GLOBAL_TOKEN=\(token) /bin/zsh -il"
         let source = """
         tell application id "\(terminalBundleID)"
             do script "\(bootstrap)"

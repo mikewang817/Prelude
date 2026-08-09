@@ -34,9 +34,27 @@ _prelude_global_done() {
   unset PRELUDE_GLOBAL_TOKEN
 }
 
+# What the last invocation left behind. Empty means nothing landed on the
+# prompt or the screen — the launcher was dismissed, or it acted on an object
+# directly and the result is in another application. Only a window created by
+# the global hotkey reads this; Ctrl+R does not care.
+_prelude_result=''
+
 _prelude_widget() {
-  local out verb payload
-  out="$(command prelude 2>/dev/null)" || { _prelude_global_done; zle reset-prompt; return 0; }
+  # Not `status`: zsh reserves it as a read-only alias for $?, and declaring it
+  # local makes the whole widget fail before Prelude is ever run.
+  local out verb payload code
+  out="$(command prelude 2>/dev/null)"
+  code=$?
+  _prelude_result=''
+  if (( code != 0 )); then
+    # 130 is a dismissal and means exactly nothing happened. Any other failure
+    # is Prelude itself going wrong, which is worth leaving a window up for.
+    (( code == 130 )) || _prelude_result=FAILED
+    _prelude_global_done
+    zle reset-prompt
+    return 0
+  fi
   [[ -z "$out" ]] && { _prelude_global_done; zle reset-prompt; return 0; }
   verb="${out%%$'\t'*}"
   payload="${out#*$'\t'}"
@@ -57,7 +75,11 @@ _prelude_widget() {
       # a silent no-op never happens.
       zle -M "prelude: $payload"
       ;;
+    *)
+      verb=''
+      ;;
   esac
+  _prelude_result="$verb"
   _prelude_global_done
   zle reset-prompt
 }
@@ -77,6 +99,19 @@ if [[ -n ${PRELUDE_AUTOSTART:-} ]]; then
   _prelude_autostart_dispatch() {
     bindkey -r $'\e[27;99~'
     zle _prelude_widget
+    # A window the global hotkey created exists to hand something over. When
+    # nothing was handed over there is nothing in it to read, and an empty
+    # $HOME shell left behind on every dismissed press is how a launcher turns
+    # into a window factory. INSERT, RUN, MSG and a failure all put something
+    # on screen, so those windows stay. Exiting through the line editor rather
+    # than calling `exit` inside a widget leaves the terminal as zsh found it.
+    [[ -n "$_prelude_result" ]] && return 0
+    # And it does not go through the history file. Prelude indexes shell
+    # history, so an `exit` recorded on every dismissed press would come back
+    # as a search result it had written itself.
+    setopt hist_ignore_space
+    BUFFER=' exit'
+    zle accept-line
   }
   zle -N _prelude_autostart_dispatch
   bindkey $'\e[27;99~' _prelude_autostart_dispatch

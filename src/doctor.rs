@@ -1516,13 +1516,10 @@ pub fn run() -> i32 {
             global.zsh_widget_available,
             "eval \"$(prelude init zsh)\" must be in ~/.zshrc",
         );
-        let owner = if global.spotlight_owns_hotkey == Some(true) {
-            "Spotlight"
-        } else if global.raycast_owns_hotkey == Some(true) {
-            "Raycast"
-        } else {
-            "another application"
-        };
+        let owner = global
+            .hotkey_owner
+            .clone()
+            .unwrap_or_else(|| "another application".into());
         check(
             format!("global hotkey {} registered", global.selected_hotkey),
             global.hotkey_registered,

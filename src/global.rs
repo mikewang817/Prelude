@@ -121,8 +121,23 @@ impl Hotkey {
         parts.join("+")
     }
 
-    fn is_cmd_space(&self) -> bool {
-        self.cmd && !self.option && !self.ctrl && !self.shift && self.key == "space"
+    /// The chord as macOS records it in its own shortcut table: Cocoa event
+    /// flags, not the Carbon bits `RegisterEventHotKey` takes.
+    fn cocoa_mask(&self) -> u32 {
+        let mut mask = 0;
+        if self.shift {
+            mask |= COCOA_SHIFT;
+        }
+        if self.ctrl {
+            mask |= COCOA_CONTROL;
+        }
+        if self.option {
+            mask |= COCOA_OPTION;
+        }
+        if self.cmd {
+            mask |= COCOA_COMMAND;
+        }
+        mask
     }
 
     fn matches_raycast(&self, value: &str) -> bool {
@@ -195,6 +210,9 @@ fn key_code(key: &str) -> Option<u32> {
 struct GlobalConfig {
     backend: Backend,
     hotkey: Hotkey,
+    /// Where a launcher window starts. `None` is `$HOME`, and stays unwritten
+    /// so the config carries no personal path until somebody asks for one.
+    directory: Option<PathBuf>,
 }
 
 impl Default for GlobalConfig {
@@ -202,8 +220,40 @@ impl Default for GlobalConfig {
         Self {
             backend: Backend::Auto,
             hotkey: Hotkey::parse("cmd+space").expect("default hotkey"),
+            directory: None,
         }
     }
+}
+
+/// A configured directory reaches a process argument on one path and an Apple
+/// Event on the other, so it is held to one rule strict enough for both rather
+/// than escaped twice. Existence is deliberately not checked here: a directory
+/// that is removed later must not make every `prelude global` command fail.
+fn parse_directory(value: &str) -> Result<PathBuf, String> {
+    let value = value.trim();
+    let expanded = match value.strip_prefix("~/") {
+        Some(rest) => crate::paths::home().join(rest),
+        None => PathBuf::from(value),
+    };
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "the launcher directory must be an absolute path; got {value:?}"
+        ));
+    }
+    let text = expanded.to_string_lossy();
+    if let Some(bad) = text.chars().find(|c| "\"'`$\\\n\r".contains(*c)) {
+        return Err(format!(
+            "the launcher directory may not contain {bad:?}; it has to be safe as both a process argument and an Apple Event"
+        ));
+    }
+    Ok(expanded)
+}
+
+fn effective_directory(config: &GlobalConfig) -> PathBuf {
+    config
+        .directory
+        .clone()
+        .unwrap_or_else(crate::paths::home)
 }
 
 #[derive(Debug, Serialize)]
@@ -218,9 +268,16 @@ pub struct GlobalStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launcher_pid: Option<u32>,
     pub selected_hotkey: String,
-    pub spotlight_owns_hotkey: Option<bool>,
-    pub raycast_owns_hotkey: Option<bool>,
+    /// The macOS shortcut or application known to hold the chord.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotkey_owner: Option<String>,
+    /// False when a source could not be read, so an absent owner means none
+    /// was found rather than none exists.
+    pub owner_checks_complete: bool,
     pub selected_backend: String,
+    /// Where a launcher window starts, and whether it is still there.
+    pub launch_directory: String,
+    pub launch_directory_exists: bool,
     pub ghostty_available: Option<bool>,
     pub effective_backend: Option<String>,
     pub zsh_widget_available: bool,
@@ -280,24 +337,39 @@ fn config_from(path: &Path) -> Result<GlobalConfig, String> {
             .map(String::as_str)
             .unwrap_or("cmd+space"),
     )?;
-    Ok(GlobalConfig { backend, hotkey })
+    let directory = root
+        .and_then(|table| table.get("directory"))
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(parse_directory)
+        .transpose()?;
+    Ok(GlobalConfig {
+        backend,
+        hotkey,
+        directory,
+    })
 }
 
 fn configured() -> Result<GlobalConfig, String> {
     config_from(&config_path())
 }
 
+fn config_body(config: &GlobalConfig) -> String {
+    let directory = match &config.directory {
+        Some(directory) => format!("directory = \"{}\"\n", directory.display()),
+        None => String::new(),
+    };
+    format!(
+        "# Terminal, chord and starting directory used by the global launcher\n# helper. auto prefers Ghostty and falls back to Terminal.app; an unset\n# directory means $HOME.\nbackend = \"{}\"\nhotkey = \"{}\"\n{directory}",
+        config.backend.as_str(),
+        config.hotkey.canonical()
+    )
+}
+
 fn write_config(config: &GlobalConfig) -> Result<(), String> {
     let path = config_path();
-    crate::cache::write_atomic(
-        &path,
-        format!(
-            "# Terminal and chord used by the global launcher helper.\n# auto prefers Ghostty and falls back to Terminal.app.\nbackend = \"{}\"\nhotkey = \"{}\"\n",
-            config.backend.as_str(), config.hotkey.canonical()
-        )
-        .as_bytes(),
-    )
-    .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    crate::cache::write_atomic(&path, config_body(config).as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     private_file(&path)?;
     Ok(())
 }
@@ -309,6 +381,29 @@ fn write_backend(backend: Backend) -> Result<(), String> {
     let mut config = configured()?;
     config.backend = backend;
     write_config(&config)
+}
+
+/// Changing where a window opens needs no helper restart: the helper reads the
+/// directory when it launches one, so the next press uses it.
+fn write_directory(value: &str) -> Result<String, String> {
+    let directory = parse_directory(value)?;
+    if !directory.is_dir() {
+        return Err(format!("{} is not a directory", directory.display()));
+    }
+    let mut config = configured()?;
+    config.directory = Some(directory.clone());
+    write_config(&config)?;
+    Ok(format!("global launcher directory: {}", directory.display()))
+}
+
+fn clear_directory() -> Result<String, String> {
+    let mut config = configured()?;
+    config.directory = None;
+    write_config(&config)?;
+    Ok(format!(
+        "global launcher directory: {} (default)",
+        crate::paths::home().display()
+    ))
 }
 
 fn helper_supports_configurable_hotkey() -> bool {
@@ -839,27 +934,86 @@ fn zsh_widget_available() -> bool {
         .any(|line| line.trim() == "_prelude_widget: function")
 }
 
-fn spotlight_owns(hotkey: &Hotkey) -> Option<bool> {
-    if !hotkey.is_cmd_space() {
-        return Some(false);
+const COCOA_SHIFT: u32 = 1 << 17;
+const COCOA_CONTROL: u32 = 1 << 18;
+const COCOA_OPTION: u32 = 1 << 19;
+const COCOA_COMMAND: u32 = 1 << 20;
+const COCOA_MODIFIERS: u32 = COCOA_SHIFT | COCOA_CONTROL | COCOA_OPTION | COCOA_COMMAND;
+
+/// macOS writes a symbolic hotkey into its table only once it stops matching
+/// the default, so an id that is absent is at its default and still live —
+/// reading the table alone under-reports, and reading only Spotlight's id
+/// under-reported further. These are the defaults a launcher chord actually
+/// collides with. A recorded entry always wins over the default for its own id,
+/// including when what it records is that the person turned it off.
+const SYSTEM_DEFAULTS: &[(&str, u32, u32)] = &[
+    ("60", 49, COCOA_CONTROL),
+    ("61", 49, COCOA_CONTROL | COCOA_OPTION),
+    ("64", 49, COCOA_COMMAND),
+    ("65", 49, COCOA_COMMAND | COCOA_OPTION),
+];
+
+/// What macOS's Keyboard settings call the shortcut. Only the handful worth
+/// naming are named; the rest are reported by id rather than guessed at.
+fn symbolic_name(id: &str) -> String {
+    match id {
+        "60" => "the macOS previous-input-source shortcut".into(),
+        "61" => "the macOS next-input-source shortcut".into(),
+        "64" => "Spotlight".into(),
+        "65" => "the Spotlight file search window".into(),
+        other => format!("a macOS keyboard shortcut (id {other})"),
     }
+}
+
+fn system_owns(hotkey: &Hotkey, recorded: Option<&serde_json::Value>) -> Option<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let entries = recorded
+        .and_then(|v| v.get("AppleSymbolicHotKeys"))
+        .and_then(serde_json::Value::as_object);
+    for (id, entry) in entries.into_iter().flatten() {
+        seen.push(id);
+        if !entry
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(parameters) = entry
+            .get("value")
+            .and_then(|value| value.get("parameters"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        let field = |i: usize| {
+            parameters
+                .get(i)
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|v| u32::try_from(v).ok())
+        };
+        if field(1) == Some(hotkey.key_code)
+            && field(2).is_some_and(|mask| mask & COCOA_MODIFIERS == hotkey.cocoa_mask())
+        {
+            return Some(symbolic_name(id));
+        }
+    }
+    SYSTEM_DEFAULTS
+        .iter()
+        .find(|(id, code, mask)| {
+            !seen.contains(id) && *code == hotkey.key_code && *mask == hotkey.cocoa_mask()
+        })
+        .map(|(id, ..)| symbolic_name(id))
+}
+
+fn symbolic_hotkeys() -> Option<serde_json::Value> {
     let plist = crate::paths::home().join("Library/Preferences/com.apple.symbolichotkeys.plist");
     let plist = plist.to_string_lossy();
     let out = crate::exec::run(
-        &[
-            "/usr/bin/plutil",
-            "-extract",
-            "AppleSymbolicHotKeys.64.enabled",
-            "raw",
-            &plist,
-        ],
+        &["/usr/bin/plutil", "-convert", "json", "-o", "-", &plist],
         Duration::from_secs(2),
     );
-    match out.trim() {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        _ => None,
-    }
+    serde_json::from_str(&out).ok()
 }
 
 fn raycast_owns(hotkey: &Hotkey) -> Option<bool> {
@@ -885,14 +1039,27 @@ fn raycast_owns(hotkey: &Hotkey) -> Option<bool> {
     }
 }
 
-fn known_conflict(hotkey: &Hotkey) -> Option<&'static str> {
-    if spotlight_owns(hotkey) == Some(true) {
-        Some("Spotlight")
-    } else if raycast_owns(hotkey) == Some(true) {
-        Some("Raycast")
-    } else {
-        None
+/// Who holds the chord, and whether every source could be consulted. macOS
+/// exposes no registry of the applications that merely watch a key, so a
+/// complete check still only means no *known* owner — the Carbon reservation
+/// in the helper is the generic backstop.
+struct OwnerCheck {
+    owner: Option<String>,
+    complete: bool,
+}
+
+fn hotkey_owner(hotkey: &Hotkey) -> OwnerCheck {
+    let recorded = symbolic_hotkeys();
+    let raycast = raycast_owns(hotkey);
+    OwnerCheck {
+        owner: system_owns(hotkey, recorded.as_ref())
+            .or_else(|| (raycast == Some(true)).then(|| "Raycast".to_string())),
+        complete: recorded.is_some() && raycast.is_some(),
     }
+}
+
+fn known_conflict(hotkey: &Hotkey) -> Option<String> {
+    hotkey_owner(hotkey).owner
 }
 
 fn check_hotkey_with(executable: &Path) -> Result<(), String> {
@@ -985,6 +1152,10 @@ pub fn status() -> GlobalStatus {
         .as_ref()
         .map(|config| config.hotkey.canonical())
         .unwrap_or_else(|e| format!("invalid: {e}"));
+    let directory = parsed
+        .as_ref()
+        .map(effective_directory)
+        .unwrap_or_else(|_| crate::paths::home());
     let hotkey = parsed
         .map(|config| config.hotkey)
         .unwrap_or_else(|_| GlobalConfig::default().hotkey);
@@ -1008,27 +1179,25 @@ pub fn status() -> GlobalStatus {
         .and_then(|event| event.get("event"))
         .and_then(serde_json::Value::as_str)
         == Some("registration-failed");
-    let spotlight = spotlight_owns(&hotkey);
-    let raycast = raycast_owns(&hotkey);
+    let owner = hotkey_owner(&hotkey);
     let lease = launcher_lease();
     GlobalStatus {
-        schema: 3,
+        schema: 4,
         app_installed: executable_path().is_file(),
         launch_agent_installed: launch_agent_path().is_file(),
         helper_running,
-        hotkey_registered: helper_running
-            && !registration_failed
-            && spotlight != Some(true)
-            && raycast != Some(true),
+        hotkey_registered: helper_running && !registration_failed && owner.owner.is_none(),
         launcher_active: lease != Lease::Free,
         launcher_pid: match lease {
             Lease::Held(pid) => Some(pid),
             _ => None,
         },
         selected_hotkey,
-        spotlight_owns_hotkey: spotlight,
-        raycast_owns_hotkey: raycast,
+        hotkey_owner: owner.owner,
+        owner_checks_complete: owner.complete,
         selected_backend,
+        launch_directory: directory.to_string_lossy().into_owned(),
+        launch_directory_exists: directory.is_dir(),
         ghostty_available,
         effective_backend,
         zsh_widget_available: zsh_widget_available(),
@@ -1101,6 +1270,19 @@ fn print_status(json: bool) -> i32 {
                 .unwrap_or_default()
         );
         println!(
+            "  {} directory  {}{}",
+            if s.launch_directory_exists { "✓" } else { "✗" },
+            s.launch_directory,
+            if s.launch_directory_exists {
+                String::new()
+            } else {
+                format!(
+                    " (missing; launches fall back to {})",
+                    crate::paths::home().display()
+                )
+            }
+        );
+        println!(
             "  {} Ghostty  {}",
             if s.ghostty_available == Some(true) {
                 "✓"
@@ -1115,16 +1297,13 @@ fn print_status(json: bool) -> i32 {
         );
         println!(
             "  {} conflicts  {}",
-            if s.spotlight_owns_hotkey == Some(true) || s.raycast_owns_hotkey == Some(true) {
-                "✗"
-            } else {
-                "✓"
-            },
-            match (s.spotlight_owns_hotkey, s.raycast_owns_hotkey) {
-                (Some(true), _) => "Spotlight owns this chord",
-                (_, Some(true)) => "Raycast owns this chord",
-                (None, _) | (_, None) => "known-owner state partly unavailable",
-                _ => "no Spotlight or Raycast conflict",
+            if s.hotkey_owner.is_some() { "✗" } else { "✓" },
+            match (&s.hotkey_owner, s.owner_checks_complete) {
+                (Some(owner), _) => format!("{owner} owns this chord"),
+                // macOS names no registry of the applications that merely watch
+                // a key, so the honest claim is about what was looked at.
+                (None, true) => "no known owner".into(),
+                (None, false) => "no known owner, but some owner records could not be read".to_string(),
             }
         );
         if let Some(event) = &s.last_event {
@@ -1139,8 +1318,7 @@ fn print_status(json: bool) -> i32 {
         && s.helper_running
         && s.hotkey_registered
         && s.zsh_widget_available
-        && s.spotlight_owns_hotkey != Some(true)
-        && s.raycast_owns_hotkey != Some(true)
+        && s.hotkey_owner.is_none()
     {
         0
     } else {
@@ -1200,6 +1378,11 @@ pub fn dispatch(args: &[&str]) -> i32 {
         }
         ["hotkey"] => configured().map(|config| println!("{}", config.hotkey.canonical())),
         ["hotkey", value] => Hotkey::parse(value).and_then(write_hotkey).map(|message| println!("{message}")),
+        ["directory"] => {
+            configured().map(|config| println!("{}", effective_directory(&config).display()))
+        }
+        ["directory", "--default"] => clear_directory().map(|message| println!("{message}")),
+        ["directory", value] => write_directory(value).map(|message| println!("{message}")),
         ["backend"] => configured().map(|config| println!("{}", config.backend.as_str())),
         ["backend", value] => Backend::parse(value).and_then(|backend| {
             write_backend(backend)?;
@@ -1207,7 +1390,7 @@ pub fn dispatch(args: &[&str]) -> i32 {
             Ok(())
         }),
         _ => Err(
-            "usage: prelude global install|uninstall|start|stop|status|open|clear|hotkey [CHORD]|backend [auto|ghostty|terminal]"
+            "usage: prelude global install|uninstall|start|stop|status|open|clear|hotkey [CHORD]|backend [auto|ghostty|terminal]|directory [PATH|--default]"
                 .into(),
         ),
     };
@@ -1252,6 +1435,92 @@ mod tests {
             assert!(config_from(&path).is_err(), "{bad}");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_launcher_directory_is_optional_absolute_and_safe_in_both_backends() {
+        let home = crate::paths::home();
+        assert_eq!(parse_directory("~/").unwrap(), home);
+        assert_eq!(parse_directory("/tmp").unwrap(), PathBuf::from("/tmp"));
+        for bad in ["relative/path", "", "~notauser/x"] {
+            assert!(parse_directory(bad).is_err(), "{bad}");
+        }
+        // One rule covers a process argument and an Apple Event, rather than
+        // two escapes that can disagree.
+        for bad in ["/tmp/a\"b", "/tmp/a'b", "/tmp/a`b", "/tmp/a$b", "/tmp/a\nb"] {
+            assert!(parse_directory(bad).is_err(), "{bad}");
+        }
+
+        // Unset means $HOME, and stays out of the file so no personal path is
+        // written until somebody asks for one.
+        let path = temp("directory");
+        std::fs::write(&path, "backend = \"auto\"\nhotkey = \"cmd+space\"\n").unwrap();
+        let config = config_from(&path).unwrap();
+        assert_eq!(config.directory, None);
+        assert_eq!(effective_directory(&config), home);
+
+        std::fs::write(&path, "hotkey = \"cmd+space\"\ndirectory = \"/tmp\"\n").unwrap();
+        let config = config_from(&path).unwrap();
+        assert_eq!(effective_directory(&config), PathBuf::from("/tmp"));
+        assert!(!config_body(&config).contains("directory = \"\""));
+        assert!(config_body(&config).contains("directory = \"/tmp\""));
+
+        std::fs::write(&path, "directory = \"nope\"\n").unwrap();
+        assert!(config_from(&path).unwrap_err().contains("absolute"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn macos_owns_a_chord_it_never_recorded() {
+        let recorded: serde_json::Value = serde_json::from_str(
+            r#"{"AppleSymbolicHotKeys":{
+                 "60":{"enabled":true,"value":{"parameters":[32,49,262144]}},
+                 "65":{"enabled":false,"value":{"parameters":[32,49,1572864]}},
+                 "222":{"enabled":true,"value":{"parameters":[32,40,1179648]}}}}"#,
+        )
+        .unwrap();
+        let owner = |chord: &str| system_owns(&Hotkey::parse(chord).unwrap(), Some(&recorded));
+
+        // Recorded and enabled.
+        assert_eq!(
+            owner("ctrl+space").as_deref(),
+            Some("the macOS previous-input-source shortcut")
+        );
+        // Recorded as switched off, so it owns nothing — the record wins over
+        // the default for its own id.
+        assert_eq!(owner("cmd+option+space"), None);
+        // Absent from the table is the ordinary case for an untouched Mac, and
+        // means the default is still live. Asking only whether Spotlight's
+        // entry was enabled answered "no" here, which is how a chord Spotlight
+        // owns was reported as free.
+        assert_eq!(owner("cmd+space").as_deref(), Some("Spotlight"));
+        // Something the person bound themselves: reported, not named.
+        assert_eq!(
+            owner("cmd+shift+k").as_deref(),
+            Some("a macOS keyboard shortcut (id 222)")
+        );
+        // The chord this launcher actually wants.
+        assert_eq!(owner("cmd+shift+space"), None);
+        // No table at all still applies the known defaults.
+        assert_eq!(
+            system_owns(&Hotkey::parse("cmd+space").unwrap(), None).as_deref(),
+            Some("Spotlight")
+        );
+    }
+
+    #[test]
+    fn a_dismissed_launcher_window_closes_and_leaves_no_history() {
+        let zsh = crate::init::ZSH;
+        // `status` is a read-only alias for $? in zsh; declaring it local
+        // fails the whole widget before Prelude is ever run.
+        assert!(!zsh.contains("local out verb payload status"));
+        assert!(zsh.contains("_prelude_result"));
+        assert!(zsh.contains("(( code == 130 )) || _prelude_result=FAILED"));
+        assert!(zsh.contains("setopt hist_ignore_space"));
+        assert!(zsh.contains("BUFFER=' exit'"));
+        // Only the one-shot window closes itself; Ctrl+R must not.
+        let dispatch = zsh.find("_prelude_autostart_dispatch() {").unwrap();
+        assert!(zsh.find("BUFFER=' exit'").unwrap() > dispatch);
     }
 
     #[test]

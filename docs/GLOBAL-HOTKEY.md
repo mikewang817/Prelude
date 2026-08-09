@@ -220,6 +220,48 @@ Validation added for this milestone:
   `git diff --check`, Swift warnings-as-errors and three gather benchmarks
   (medians 20.3–23.1 ms, maximum 32.1 ms against 40 ms) pass.
 
+## Milestone — honest conflicts, and a window worth opening `[x]`
+
+- [x] Conflict detection reads macOS's whole shortcut table rather than
+      Spotlight's single entry, comparing key code and Cocoa modifier mask
+      against every enabled record. An id absent from the table is at its
+      default and still live, so the defaults for the four chords a launcher
+      collides with are applied when nothing is recorded for them.
+- [x] Known shortcuts are named; the rest are reported by id rather than
+      guessed at. Status distinguishes "no known owner" from "no known owner,
+      but some owner records could not be read".
+- [x] Installer and helper apply the same table, so the helper never refuses a
+      chord the CLI accepted.
+- [x] A launcher window dismissed without handing anything over closes itself.
+      `INSERT`, `RUN`, `MSG` and a Prelude failure all leave something to read
+      and keep the window. Ctrl+R is unchanged.
+- [x] The self-close runs through the line editor rather than calling `exit`
+      inside a widget, and does not reach the history file.
+- [x] `prelude global directory [PATH|--default]` sets where a launcher window
+      starts, default `$HOME`. It is validated once against a rule strict
+      enough for both a process argument and an Apple Event, is left out of the
+      config until it is asked for, and degrades to `$HOME` if the directory is
+      removed later.
+
+Validation added for this milestone:
+
+- A pty exercise drives the generated integration through all five outcomes
+  with a fixture `prelude`: dismissal (130) and a direct object action (0 with
+  no output) exit the shell; `INSERT`, `MSG` and a failure keep it. Every case
+  claims the lease with the shell's pid and releases it on the way out.
+- That exercise caught `local status` failing the whole widget before Prelude
+  ran — `status` is a read-only alias for `$?` in zsh, and no amount of reading
+  the script would have shown it. It would have broken Ctrl+R as well.
+- The chord `cmd+space` is reported as Spotlight's on this machine even though
+  the plist records no entry 64, which is the ordinary state of an untouched
+  Mac and the case the previous check answered "free" to.
+- A launch with a configured directory opened there and closed itself when
+  dismissed. The Terminal.app bootstrap was checked as shell syntax and put
+  through a real Apple Event; the backend itself was not switched live because
+  a launcher was in use at the time.
+- 139 Rust tests, release Clippy, Swift warnings-as-errors, `git diff --check`
+  and gather at a 19.0 ms median pass.
+
 ## Recorded limitations
 
 - macOS owns `Cmd+Space` for Spotlight by default, and Raycast commonly uses the
@@ -237,5 +279,10 @@ Validation added for this milestone:
   window is consequently a second Ghostty application rather than a window of
   the one already open, and it runs with saved state disabled — windows created
   inside it are not restored the next time that instance starts.
-- A global window starts in `$HOME`; there is no honest project directory to
-  infer from an arbitrary foreground application.
+- A global window starts in `$HOME` unless `prelude global directory` says
+  otherwise. There is no honest project directory to infer from an arbitrary
+  foreground application, so Prelude asks rather than guesses.
+- Naming the owner of a chord is best-effort even now. macOS's shortcut table
+  and Raycast's preference are the two registries that can be read; an
+  application that merely watches the key appears in neither, which is why the
+  Carbon reservation remains the final generic check.
