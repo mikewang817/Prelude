@@ -158,6 +158,9 @@ Validation added for this milestone:
 - `ddcba60` — production contract, architecture and acceptance plan.
 - `75c635c` — AppKit helper, terminal backends, installer, lifecycle,
   diagnostics, one-shot zsh integration, tests and documentation.
+- `62d52d3` — configurable-key and singleton refinement plan.
+- `add0b23` — Spotlight/Raycast preflight, live hotkey changes, native
+  defense-in-depth checks and token-checked singleton lifecycle.
 
 ## Recorded limitations
 
