@@ -103,6 +103,12 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
   the release build passed. Three final gather runs had medians 21.7–26.3 ms
   and an observed maximum 38.8 ms against the 40 ms budget.
 
+## Implementation commits
+
+- `ddcba60` — production contract, architecture and acceptance plan.
+- `75c635c` — AppKit helper, terminal backends, installer, lifecycle,
+  diagnostics, one-shot zsh integration, tests and documentation.
+
 ## Recorded limitations
 
 - macOS owns `Cmd+Space` for Spotlight by default. Prelude cannot and will not
