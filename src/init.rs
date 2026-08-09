@@ -3,6 +3,26 @@
 pub const ZSH: &str = r#"# Prelude — zsh integration
 # Added by: prelude init zsh
 
+# The helper can only write a token; it cannot know whether a terminal really
+# appeared. This shell adds its own pid, which is the one fact about a launcher
+# that stays checkable — a window that is force-quit frees the next hotkey
+# immediately instead of leaving a lease nobody can disprove.
+_prelude_global_claim() {
+  [[ -n ${PRELUDE_GLOBAL_TOKEN:-} ]] || return 0
+  local active="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"
+  [[ -r "$active" ]] || return 0
+  local owner='' backend=''
+  { IFS= read -r owner; IFS= read -r backend } < "$active"
+  [[ "$owner" == "$PRELUDE_GLOBAL_TOKEN" ]] || return 0
+  local tmp="$active.$$"
+  if print -rl -- "$owner" "$backend" "$$" > "$tmp" 2>/dev/null; then
+    command chmod 600 "$tmp" 2>/dev/null
+    command mv -f -- "$tmp" "$active" 2>/dev/null || command rm -f -- "$tmp"
+  else
+    command rm -f -- "$tmp"
+  fi
+}
+
 _prelude_global_done() {
   [[ -n ${PRELUDE_GLOBAL_TOKEN:-} ]] || return 0
   local active="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"
@@ -52,6 +72,7 @@ zle -N _prelude_widget
 # before opening Prelude, leaving a completely ordinary shell afterwards.
 if [[ -n ${PRELUDE_AUTOSTART:-} ]]; then
   unset PRELUDE_AUTOSTART
+  _prelude_global_claim
   autoload -Uz add-zle-hook-widget
   _prelude_autostart_dispatch() {
     bindkey -r $'\e[27;99~'

@@ -51,6 +51,15 @@ pub fn run(args: &[&str], timeout: Duration) -> String {
     }
 }
 
+/// Whether a process still exists. Signal 0 tests existence without changing
+/// the process, and is the only thing a recorded pid can be checked against.
+pub fn alive(pid: i32) -> bool {
+    unsafe extern "C" {
+        unsafe fn kill(pid: i32, sig: i32) -> i32;
+    }
+    pid > 0 && unsafe { kill(pid, 0) == 0 }
+}
+
 pub fn which(name: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)

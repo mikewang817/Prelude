@@ -214,6 +214,9 @@ pub struct GlobalStatus {
     pub helper_running: bool,
     pub hotkey_registered: bool,
     pub launcher_active: bool,
+    /// The shell that owns the open launcher, when one has reported itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launcher_pid: Option<u32>,
     pub selected_hotkey: String,
     pub spotlight_owns_hotkey: Option<bool>,
     pub raycast_owns_hotkey: Option<bool>,
@@ -445,7 +448,7 @@ fn launch_agent(executable: &Path, stdout: &Path, stderr: &Path) -> String {
   <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key><array><string>{executable}</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Interactive</string>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -762,7 +765,7 @@ fn install() -> Result<String, String> {
         == Some("registration-failed");
     if registration_failed {
         result.push_str(
-            "The chord was claimed after preflight. Free it or choose another, then run `prelude global start`.\n",
+            "The chord was claimed after preflight. Free it or choose another; the helper stays up and keeps retrying every few seconds.\n",
         );
     } else {
         result.push_str("The global chord is registered; one launcher may be open at a time.\n");
@@ -910,20 +913,66 @@ fn check_hotkey_with(executable: &Path) -> Result<(), String> {
     }
 }
 
-fn launcher_active() -> bool {
-    let Ok(meta) = std::fs::metadata(active_path()) else {
-        return false;
-    };
-    let fresh = meta
-        .modified()
+/// A launch that never produced a shell is not a launcher, and a shell that has
+/// gone is not one either. The grace window covers only the seconds between the
+/// helper claiming the lease and the terminal's zsh writing its pid into it.
+const LEASE_GRACE: Duration = Duration::from_secs(20);
+/// A backstop against a recycled pid, not against a launcher left open.
+const LEASE_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lease {
+    /// Nothing holds the launcher; the next hotkey creates one.
+    Free,
+    /// Claimed, with no shell reporting itself yet.
+    Starting,
+    /// A live shell owns the launcher.
+    Held(u32),
+}
+
+fn pid_alive(pid: u32) -> bool {
+    // A pid larger than the platform's own is not a process we can ask about.
+    i32::try_from(pid).is_ok_and(crate::exec::alive)
+}
+
+fn lease_at(path: &Path) -> Lease {
+    let Some(age) = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.elapsed().ok())
-        .is_some_and(|age| age < Duration::from_secs(30 * 60));
-    if !fresh {
-        let _ = std::fs::remove_file(active_path());
-        return false;
+    else {
+        return Lease::Free;
+    };
+    if age >= LEASE_LIFETIME {
+        return Lease::Free;
     }
-    std::fs::read_to_string(active_path()).is_ok_and(|token| !token.trim().is_empty())
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Lease::Free;
+    };
+    let mut lines = text.lines();
+    if lines.next().is_none_or(|token| token.trim().is_empty()) {
+        return Lease::Free;
+    }
+    let _backend = lines.next();
+    match lines.next().and_then(|pid| pid.trim().parse::<u32>().ok()) {
+        Some(pid) if pid_alive(pid) => Lease::Held(pid),
+        Some(_) => Lease::Free,
+        None if age < LEASE_GRACE => Lease::Starting,
+        None => Lease::Free,
+    }
+}
+
+fn launcher_lease() -> Lease {
+    let path = active_path();
+    let lease = lease_at(&path);
+    if lease == Lease::Free && path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    lease
+}
+
+fn launcher_active() -> bool {
+    launcher_lease() != Lease::Free
 }
 
 pub fn status() -> GlobalStatus {
@@ -961,8 +1010,9 @@ pub fn status() -> GlobalStatus {
         == Some("registration-failed");
     let spotlight = spotlight_owns(&hotkey);
     let raycast = raycast_owns(&hotkey);
+    let lease = launcher_lease();
     GlobalStatus {
-        schema: 2,
+        schema: 3,
         app_installed: executable_path().is_file(),
         launch_agent_installed: launch_agent_path().is_file(),
         helper_running,
@@ -970,7 +1020,11 @@ pub fn status() -> GlobalStatus {
             && !registration_failed
             && spotlight != Some(true)
             && raycast != Some(true),
-        launcher_active: launcher_active(),
+        launcher_active: lease != Lease::Free,
+        launcher_pid: match lease {
+            Lease::Held(pid) => Some(pid),
+            _ => None,
+        },
         selected_hotkey,
         spotlight_owns_hotkey: spotlight,
         raycast_owns_hotkey: raycast,
@@ -1018,10 +1072,10 @@ fn print_status(json: bool) -> i32 {
         line(
             "launcher singleton",
             true,
-            if s.launcher_active {
-                "one Prelude launcher is open"
-            } else {
-                "ready"
+            &match (s.launcher_active, s.launcher_pid) {
+                (true, Some(pid)) => format!("one Prelude launcher is open (shell {pid})"),
+                (true, None) => "a launcher is starting".into(),
+                (false, _) => "ready".to_string(),
             },
         );
         line(
@@ -1247,6 +1301,62 @@ mod tests {
         );
         assert!(agent.contains("/tmp/a&amp;b/helper"));
         assert!(agent.contains("<key>RunAtLoad</key><true/>"));
+        // A helper that dies must come back. `Crashed` is not enough: launchd
+        // counts only the classic fault signals as a crash, so a helper killed
+        // for memory pressure would stay dead until somebody noticed the
+        // hotkey had stopped working. `prelude global stop` boots the job out
+        // rather than exiting the process, so it is unaffected.
+        assert!(agent.contains("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>"));
+        assert!(!agent.contains("<key>KeepAlive</key><true/>"));
+        assert!(!agent.contains("<key>KeepAlive</key><false/>"));
+    }
+
+    #[test]
+    fn a_lease_is_only_held_while_the_shell_that_claimed_it_is_alive() {
+        let path = temp("lease");
+        let mine = std::process::id();
+
+        std::fs::write(&path, format!("token\nghostty\n{mine}\n")).unwrap();
+        assert_eq!(lease_at(&path), Lease::Held(mine));
+
+        // A launcher whose terminal was killed outright frees the hotkey at
+        // once; it does not wait out a timeout nobody can see.
+        std::fs::write(&path, "token\nghostty\n999999999\n").unwrap();
+        assert_eq!(lease_at(&path), Lease::Free);
+
+        // Claimed but not yet reported: real for a few seconds, then not.
+        std::fs::write(&path, "token\n").unwrap();
+        assert_eq!(lease_at(&path), Lease::Starting);
+
+        std::fs::write(&path, "\nghostty\n").unwrap();
+        assert_eq!(lease_at(&path), Lease::Free);
+        std::fs::write(&path, format!("token\n\n{mine}\n")).unwrap();
+        assert_eq!(lease_at(&path), Lease::Held(mine));
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(lease_at(&path), Lease::Free);
+        assert!(LEASE_GRACE < LEASE_LIFETIME);
+    }
+
+    #[test]
+    fn a_stale_grace_window_expires_without_a_reported_shell() {
+        // The grace window is measured from the lease's own mtime, so an old
+        // unclaimed lease is free however it was written.
+        let path = temp("lease-grace");
+        std::fs::write(&path, "token\n").unwrap();
+        let old = std::time::SystemTime::now() - (LEASE_GRACE + Duration::from_secs(5));
+        std::fs::File::open(&path)
+            .and_then(|file| file.set_modified(old))
+            .unwrap();
+        assert_eq!(lease_at(&path), Lease::Free);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pid_liveness_answers_for_this_process_and_refuses_impossible_ones() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(u32::MAX));
     }
 
     #[test]
@@ -1254,6 +1364,12 @@ mod tests {
         assert!(SWIFT.contains("PRELUDE_AUTOSTART=1"));
         assert!(SWIFT.contains("com.mitchellh.ghostty"));
         assert!(SWIFT.contains("createsNewApplicationInstance = true"));
+        // A launcher window is not a session to restore, and must not become
+        // the saved state of the Ghostty the person actually works in.
+        assert!(SWIFT.contains("\"--window-save-state=never\""));
+        // Launch Services answering success is not proof that the arguments
+        // above were delivered rather than dropped into the running instance.
+        assert!(SWIFT.contains("existing.contains(application.processIdentifier)"));
         assert!(SWIFT.contains("\"-e\""));
         assert!(SWIFT.contains("\"/usr/bin/env\""));
         assert!(SWIFT.contains("\"PRELUDE_AUTOSTART=1\""));
@@ -1265,5 +1381,29 @@ mod tests {
         assert!(SWIFT.contains("PreludeActivePath"));
         assert!(!SWIFT.contains("SELECTED_COMMAND"));
         assert!(!SWIFT.contains("sh -c"));
+    }
+
+    #[test]
+    fn a_busy_chord_leaves_the_helper_running_and_retrying() {
+        // Exiting on a chord conflict strands the helper: the other owner can
+        // release the key and nothing will ever ask for it again.
+        assert!(!SWIFT.contains("NSApp.terminate"));
+        assert!(SWIFT.contains("Timer.scheduledTimer"));
+        assert!(SWIFT.contains("private func register()"));
+        assert!(SWIFT.contains("registration-failed"));
+        // And it says so once, not every five seconds.
+        assert!(SWIFT.contains("if !warned {"));
+    }
+
+    #[test]
+    fn the_shell_reports_its_pid_into_the_lease_and_removes_only_its_own() {
+        let zsh = crate::init::ZSH;
+        assert!(zsh.contains("_prelude_global_claim"));
+        assert!(zsh.contains("print -rl -- \"$owner\" \"$backend\" \"$$\""));
+        assert!(zsh.contains("[[ \"$owner\" == \"$PRELUDE_GLOBAL_TOKEN\" ]] || return 0"));
+        // The claim happens once the autostart shell exists, before Prelude opens.
+        let claim = zsh.find("  _prelude_global_claim").unwrap();
+        let widget = zsh.find("zle _prelude_widget").unwrap();
+        assert!(claim < widget);
     }
 }

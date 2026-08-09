@@ -28,13 +28,7 @@ fn recorded_pid() -> Option<(i32, Option<&'static str>)> {
     Some((pid, version))
 }
 
-fn alive(pid: i32) -> bool {
-    unsafe extern "C" {
-        unsafe fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // Signal 0 tests existence without changing the process.
-    unsafe { kill(pid, 0) == 0 }
-}
+use crate::exec::alive;
 
 pub fn is_running() -> bool {
     recorded_pid().is_some_and(|(pid, version)| version == Some(DAEMON_VERSION) && alive(pid))

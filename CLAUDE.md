@@ -48,17 +48,34 @@ fresh terminal rather than typing into an existing one. The configured chord
 must pass Spotlight, Raycast and native reservation checks before a helper is
 installed or restarted. Never rewrite another application's shortcut.
 
-On macOS Ghostty must receive the bootstrap through `-e` as separate argv.
-Passing `--initial-command=...` through `NSWorkspace.OpenConfiguration` can
-return success while the existing single-instance app opens no Prelude at all;
-a status event is not proof of a terminal. Validation checks that both a new
-Ghostty process/window and an fzf child appear.
+On macOS Ghostty must receive the bootstrap through `-e` as separate argv, and
+there is no way to add a window to the instance already open — `+new-window` is
+unsupported and the CLI refuses to launch the emulator — so a launch is always a
+second application instance. A status event is not proof of a terminal: Launch
+Services can answer success having handed the request to the running instance,
+which discards the arguments. Compare the returned pid against the instances
+that existed before the call. And a second instance restores the previous
+session's windows and saves its own on the way out, so one press costs a
+duplicate of every window you had; `--window-save-state=never` is what makes a
+launcher window a launcher window rather than a session.
 
 Only one launcher may be active. The helper's private lease contains a random
 token and no selected payload; the one-shot zsh widget removes it when Prelude
-returns. Repeated hotkeys focus the effective terminal application. Keep a
-bounded stale lease and an explicit diagnostic/clear path so a killed terminal
-cannot lock Prelude out permanently.
+returns. Repeated hotkeys focus the effective terminal application.
+
+**A lease nobody can disprove is worse than no lease.** Liveness is the pid of
+the shell the launch created, which that shell writes into the lease itself —
+the helper cannot know whether a terminal appeared, and a timeout answers the
+question far too slowly. A force-quit terminal used to hold the chord for the
+full thirty minutes while the hotkey answered `already-open` to every press, and
+it left orphaned `fzf` processes to prove it. The remaining timeouts are bounds,
+not mechanisms: a short grace window for a lease not yet claimed, and the thirty
+minutes as a backstop against a recycled pid.
+
+The helper never exits on a busy chord. Spotlight or Raycast may hold the key at
+login and release it later; registration retries and says so once. launchd
+restarts it on any unclean exit — `KeepAlive`'s `Crashed` covers only the
+classic fault signals, which is not enough.
 
 `PRELUDE_AUTOSTART` is consumed only by the generated zsh integration. Its
 one-shot ZLE hook must dispatch the existing `_prelude_widget`, remove itself

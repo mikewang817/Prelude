@@ -168,6 +168,58 @@ Validation added for this milestone:
 - `54ea942` — Ghostty's supported `-e` launch path and exact active-application
   focusing; replaces a Launch Services success that opened no Prelude.
 
+## Milestone — a launcher that cannot strand itself `[x]`
+
+The previous milestone was accepted on a manual validation run. Three faults
+survived it, each of which stops the hotkey from working and none of which any
+test could see.
+
+- [x] A lease records the pid of the shell the launch created, and liveness is
+      that pid, not a timeout. The zsh integration writes it while the terminal
+      starts; a window that is quit, crashed or force-killed frees the next
+      hotkey immediately.
+- [x] An unclaimed lease survives only a short grace window, so a launch that
+      produced no terminal cannot hold the chord. The thirty minute bound
+      remains as a backstop against a recycled pid, not as the mechanism.
+- [x] The Ghostty launch verifies it received a *new* application instance.
+      Launch Services answering success while handing the request to the
+      running instance — which discards the bootstrap arguments — is a launch
+      failure, not a success.
+- [x] A Ghostty launcher window declines saved state, so it neither restores
+      the previous session's windows nor overwrites the saved state of the
+      Ghostty being worked in, and its instance retires with its shell.
+- [x] A busy chord no longer terminates the helper. Registration is retried
+      until it succeeds, and the person is told once rather than every attempt.
+- [x] The LaunchAgent restarts a helper that exits uncleanly.
+- [x] `status` distinguishes ready, starting and held-by-a-live-shell instead
+      of reporting any lease file as a healthy open launcher.
+
+Validation added for this milestone:
+
+- Measured on the machine that reported the fault. Before the change,
+  `~/.cache/prelude` held a sixteen-minute-old lease with no launcher behind
+  it and five orphaned `fzf` processes from two days earlier, and the hotkey
+  answered `already-open` to every press.
+- Ghostty 1.3.1 was re-checked against the recorded limitation: `+new-window`
+  still reports "not supported on this platform" and the CLI still refuses to
+  launch the emulator directly, so `open -na`/`NSWorkspace` remains the only
+  supported path and a second instance is unavoidable.
+- Three consecutive launches without `--window-save-state=never` left three
+  Ghostty instances alive, each having restored two windows of its own — one
+  press cost a duplicate of every window open at the time. With the flag, a
+  launch produced exactly one instance with exactly one window, and the
+  instance exited when its command did.
+- The singleton was re-exercised: a second press produced `already-open` and
+  no second instance. Cancelling Prelude released the lease with the shell
+  still alive. `SIGTERM` and `SIGKILL` on the terminal both returned status to
+  `ready` at once and left no orphaned `fzf`.
+- `SIGKILL` on the helper was restarted by launchd (`runs = 2`) and the chord
+  re-registered. `KeepAlive`'s `Crashed` key was tried first and rejected:
+  launchd counts only the classic fault signals, so it did not restart.
+- 136 Rust tests, release Clippy with `--all-targets -D warnings`,
+  `git diff --check`, Swift warnings-as-errors and three gather benchmarks
+  (medians 20.3–23.1 ms, maximum 32.1 ms against 40 ms) pass.
+
 ## Recorded limitations
 
 - macOS owns `Cmd+Space` for Spotlight by default, and Raycast commonly uses the
@@ -179,8 +231,11 @@ Validation added for this milestone:
 - Terminal.app asks for Automation consent the first time the helper controls
   it. Prelude cannot grant that permission itself.
 - Ghostty's macOS `+new-window` action is unavailable in the currently tested
-  1.3.1 build. The helper therefore asks Launch Services for a new application
-  instance, which gives the requested fresh window without Accessibility
-  scripting.
+  1.3.1 build, and its CLI declines to launch the emulator at all on macOS. The
+  helper therefore asks Launch Services for a new application instance, which
+  gives the requested fresh window without Accessibility scripting. A launcher
+  window is consequently a second Ghostty application rather than a window of
+  the one already open, and it runs with saved state disabled — windows created
+  inside it are not restored the next time that instance starts.
 - A global window starts in `$HOME`; there is no honest project directory to
   infer from an arbitrary foreground application.

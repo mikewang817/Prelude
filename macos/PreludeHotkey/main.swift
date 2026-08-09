@@ -133,18 +133,48 @@ private final class StatusWriter {
 
 private final class LauncherLease {
     private let path: String
+    // A claim that never produces a shell is a launch that did not happen. The
+    // grace window is long enough for a cold terminal and short enough that
+    // such a launch cannot hold the hotkey for the rest of the afternoon.
+    private let grace: TimeInterval = 20
+    // A backstop against a recycled pid, not against an open launcher.
     private let lifetime: TimeInterval = 30 * 60
 
     init(path: String) { self.path = path }
 
-    func active() -> Bool {
+    private func fields() -> [String]? {
         guard !path.isEmpty,
-              let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        return contents.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    private func drop() {
+        guard !path.isEmpty else { return }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The shell a launch creates writes its own pid into the lease, and that
+    /// pid is the only thing here that can be asked whether it is still alive.
+    /// A terminal killed outright therefore frees the launcher at once instead
+    /// of waiting out a timeout — which is what a stale lease used to do.
+    func active() -> Bool {
+        guard !path.isEmpty else { return false }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
               let modified = attributes[.modificationDate] as? Date,
               Date().timeIntervalSince(modified) < lifetime,
-              let contents = try? String(contentsOfFile: path, encoding: .utf8),
-              !contents.split(separator: "\n").isEmpty else {
-            if !path.isEmpty { try? FileManager.default.removeItem(atPath: path) }
+              let fields = fields(),
+              let token = fields.first,
+              !token.isEmpty else {
+            drop()
+            return false
+        }
+        guard fields.count > 2, !fields[2].isEmpty else {
+            if Date().timeIntervalSince(modified) < grace { return true }
+            drop()
+            return false
+        }
+        guard let pid = pid_t(fields[2]), pid > 0, kill(pid, 0) == 0 || errno == EPERM else {
+            drop()
             return false
         }
         return true
@@ -172,21 +202,19 @@ private final class LauncherLease {
     }
 
     func setBackend(_ backend: Backend, token: String) {
-        guard let current = try? String(contentsOfFile: path, encoding: .utf8),
-              current.split(separator: "\n").first.map(String.init) == token else { return }
+        guard let fields = fields(), fields.first == token else { return }
+        // The shell may already have claimed the lease; never write its pid away.
+        var body = "\(token)\n\(backend.rawValue)\n"
+        if fields.count > 2, !fields[2].isEmpty { body += "\(fields[2])\n" }
         do {
-            try Data("\(token)\n\(backend.rawValue)\n".utf8).write(
-                to: URL(fileURLWithPath: path), options: [.atomic]
-            )
+            try Data(body.utf8).write(to: URL(fileURLWithPath: path), options: [.atomic])
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
         } catch { return }
     }
 
     func backend() -> Backend? {
-        guard let current = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        let lines = current.split(separator: "\n")
-        guard lines.count > 1 else { return nil }
-        return Backend(rawValue: String(lines[1]))
+        guard let fields = fields(), fields.count > 1 else { return nil }
+        return Backend(rawValue: fields[1])
     }
 
     func release(_ token: String) {
@@ -380,12 +408,30 @@ private final class TerminalLauncher {
             .activate(options: [.activateAllWindows])
     }
 
+    private func ghosttyInstances() -> Set<pid_t> {
+        Set(
+            NSRunningApplication.runningApplications(withBundleIdentifier: ghosttyBundleID)
+                .filter { !$0.isTerminated }
+                .map(\.processIdentifier)
+        )
+    }
+
     private func openGhostty(_ url: URL, token: String, completion: @escaping (Bool, String) -> Void) {
+        let existing = ghosttyInstances()
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.createsNewApplicationInstance = true
         configuration.arguments = [
             "--working-directory=\(FileManager.default.homeDirectoryForCurrentUser.path)",
+            // Ghostty's macOS build has no way to add a window to the instance
+            // the person is already using, so a launch is always a second
+            // instance — and a second instance restores the previous session's
+            // windows and saves its own on the way out. One launcher press then
+            // costs a duplicate of every window you had. Declining saved state
+            // gives the one window that was asked for, leaves the state of the
+            // Ghostty being worked in untouched, and lets the instance retire
+            // when its shell exits instead of accumulating.
+            "--window-save-state=never",
             "-e",
             "/usr/bin/env",
             "PRELUDE_AUTOSTART=1",
@@ -405,10 +451,18 @@ private final class TerminalLauncher {
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] application, error in
             if let error {
                 finish(false, error.localizedDescription)
-            } else {
-                self?.activeApplication = application
-                finish(true, "")
+                return
             }
+            // A status event is not proof of a terminal. Launch Services can
+            // answer success having handed the request to the instance that was
+            // already running, which discards these arguments and opens no
+            // Prelude. The pid it returns is the only way to tell the two apart.
+            guard let application, !existing.contains(application.processIdentifier) else {
+                finish(false, "Launch Services reused the running Ghostty instance and discarded the launcher command")
+                return
+            }
+            self?.activeApplication = application
+            finish(true, "")
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
             finish(false, "Ghostty did not answer within 10 seconds")
@@ -479,7 +533,11 @@ private final class TerminalLauncher {
         }
     }
 
-    func fatalHotKeyError(_ message: String) {
+    /// Said once, and never by exiting. The helper that quits because a chord
+    /// was busy at login is a helper that stays dead after the other
+    /// application releases it, and nothing short of `prelude global start`
+    /// brings it back.
+    func hotKeyWarning(_ message: String) {
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
@@ -488,7 +546,6 @@ private final class TerminalLauncher {
             alert.alertStyle = .warning
             alert.addButton(withTitle: "OK")
             alert.runModal()
-            NSApp.terminate(nil)
         }
     }
 }
@@ -515,20 +572,11 @@ private final class HotKeyDelegate: NSObject, NSApplicationDelegate {
     let launcher = TerminalLauncher(paths: .bundled())
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
+    private var retry: Timer?
+    private var warned = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         globalDelegate = self
-        let spec = launcher.selectedHotKey()
-        if let owner = launcher.knownHotKeyOwner() {
-            StatusWriter(path: AppPaths.bundled().status).write(
-                event: "registration-failed", backend: "", ok: false,
-                detail: "\(spec.canonical) is already configured for \(owner)"
-            )
-            launcher.fatalHotKeyError(
-                "\(spec.canonical) is already configured for \(owner). Change it there or choose another with `prelude global hotkey HOTKEY`."
-            )
-            return
-        }
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
@@ -542,34 +590,65 @@ private final class HotKeyDelegate: NSObject, NSApplicationDelegate {
             &eventHandler
         )
         guard install == noErr else {
+            // Nothing to retry: without a handler no hotkey can ever arrive.
             StatusWriter(path: AppPaths.bundled().status).write(
                 event: "registration-failed", backend: "", ok: false,
                 detail: "could not install the macOS hotkey event handler (\(install))"
             )
-            launcher.fatalHotKeyError("macOS refused to install Prelude's hotkey event handler (\(install)).")
+            launcher.hotKeyWarning("macOS refused to install Prelude's hotkey event handler (\(install)).")
+            return
+        }
+        register()
+    }
+
+    /// Registration is attempted, not asserted. Raycast, Spotlight or any other
+    /// owner may hold the chord at login and release it later; keep asking.
+    private func register() {
+        let spec = launcher.selectedHotKey()
+        if let owner = launcher.knownHotKeyOwner() {
+            registrationFailed(
+                "\(spec.canonical) is already configured for \(owner)",
+                "\(spec.canonical) is already configured for \(owner). Change it there or choose another with `prelude global hotkey HOTKEY`. Prelude keeps trying until the chord is free."
+            )
             return
         }
         let id = EventHotKeyID(signature: hotKeySignature, id: 1)
+        var reference: EventHotKeyRef?
         let registered = RegisterEventHotKey(
             spec.keyCode, spec.modifiers, id,
-            GetApplicationEventTarget(), 0, &hotKey
+            GetApplicationEventTarget(), 0, &reference
         )
-        guard registered == noErr else {
-            StatusWriter(path: AppPaths.bundled().status).write(
-                event: "registration-failed", backend: "", ok: false,
-                detail: "\(spec.canonical) is already owned by macOS or another application (\(registered))"
-            )
-            launcher.fatalHotKeyError(
-                "\(spec.canonical) is already assigned to macOS or another application. Free it or choose another with `prelude global hotkey HOTKEY`, then run `prelude global start`."
+        guard registered == noErr, let reference else {
+            registrationFailed(
+                "\(spec.canonical) is already owned by macOS or another application (\(registered))",
+                "\(spec.canonical) is already assigned to macOS or another application. Free it or choose another with `prelude global hotkey HOTKEY`. Prelude keeps trying until the chord is free."
             )
             return
         }
+        hotKey = reference
+        retry?.invalidate()
+        retry = nil
         StatusWriter(path: AppPaths.bundled().status).write(
             event: "registered", backend: launcher.selectedBackend().rawValue, ok: true
         )
     }
 
+    private func registrationFailed(_ detail: String, _ advice: String) {
+        StatusWriter(path: AppPaths.bundled().status).write(
+            event: "registration-failed", backend: "", ok: false, detail: detail
+        )
+        if !warned {
+            warned = true
+            launcher.hotKeyWarning(advice)
+        }
+        guard retry == nil else { return }
+        retry = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.register()
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        retry?.invalidate()
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let eventHandler { RemoveEventHandler(eventHandler) }
     }
