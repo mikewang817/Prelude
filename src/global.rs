@@ -11,10 +11,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+const GHOSTTY_BUNDLE: &str = "com.mitchellh.ghostty";
+const GHOSTTY_APP: &str = "/Applications/Ghostty.app";
 const LABEL: &str = "app.prelude.hotkey";
-const APP_NAME: &str = "Prelude Hotkey.app";
-const EXECUTABLE: &str = "PreludeHotkey";
-const SWIFT: &str = include_str!("../macos/PreludeHotkey/main.swift");
+/// The launcher panel is a Ghostty quick terminal: a real macOS panel, hidden
+/// from the Dock and the app switcher, hosting one long-lived `prelude _panel`
+/// loop. Ghostty registers the chord itself, so nothing of Prelude's runs at
+/// press time and there is no terminal to build.
+const QUICK_CONFIG: &str = "quick-terminal.ghostty";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -263,10 +267,6 @@ pub struct GlobalStatus {
     pub launch_agent_installed: bool,
     pub helper_running: bool,
     pub hotkey_registered: bool,
-    pub launcher_active: bool,
-    /// The shell that owns the open launcher, when one has reported itself.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub launcher_pid: Option<u32>,
     pub selected_hotkey: String,
     /// The macOS shortcut or application known to hold the chord.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -285,12 +285,8 @@ pub struct GlobalStatus {
     pub last_event: Option<serde_json::Value>,
 }
 
-fn app_path() -> PathBuf {
-    crate::paths::home().join("Applications").join(APP_NAME)
-}
-
-fn executable_path() -> PathBuf {
-    app_path().join("Contents/MacOS").join(EXECUTABLE)
+fn quick_config_path() -> PathBuf {
+    crate::paths::config().join(QUICK_CONFIG)
 }
 
 fn launch_agent_path() -> PathBuf {
@@ -303,13 +299,7 @@ fn config_path() -> PathBuf {
     crate::paths::config().join("global.toml")
 }
 
-fn status_path() -> PathBuf {
-    crate::paths::cache().join("global-status.json")
-}
 
-fn active_path() -> PathBuf {
-    crate::paths::cache().join("global-active")
-}
 
 fn stdout_path() -> PathBuf {
     crate::paths::cache().join("global-hotkey.log")
@@ -374,10 +364,10 @@ fn write_config(config: &GlobalConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// The backend now decides only where a *handed-over command* opens, not what
+/// the launcher itself is: the panel is a Ghostty quick terminal or it does not
+/// exist, because no other terminal on macOS offers one.
 fn write_backend(backend: Backend) -> Result<(), String> {
-    if launcher_active() {
-        return Err("a global Prelude launcher is open; close it before changing the backend".into());
-    }
     let mut config = configured()?;
     config.backend = backend;
     write_config(&config)
@@ -406,19 +396,10 @@ fn clear_directory() -> Result<String, String> {
     ))
 }
 
-fn helper_supports_configurable_hotkey() -> bool {
-    helper_probe()
-        .and_then(|probe| probe.get("selected_hotkey").cloned())
-        .and_then(|value| value.as_str().map(str::to_string))
-        .is_some()
-}
 
 fn write_hotkey(hotkey: Hotkey) -> Result<String, String> {
     let mut config = configured()?;
     if let Some(owner) = known_conflict(&hotkey) {
-        if config.hotkey == hotkey {
-            stop_helper();
-        }
         return Err(format!(
             "{} is already configured for {owner}; change it there or choose another chord",
             hotkey.canonical()
@@ -427,57 +408,29 @@ fn write_hotkey(hotkey: Hotkey) -> Result<String, String> {
     if config.hotkey == hotkey {
         return Ok(format!("global hotkey already uses {}", hotkey.canonical()));
     }
-    if launcher_active() {
-        return Err(
-            "a global Prelude launcher is open; close it before changing the hotkey".into(),
-        );
-    }
-
     let old = std::fs::read(config_path()).ok();
-    let was_running = running();
-    let installed = executable_path().is_file();
-    stop_helper();
     config.hotkey = hotkey.clone();
-    if let Err(e) = write_config(&config) {
-        if was_running {
-            let _ = start_helper();
-        }
-        return Err(e);
-    }
-
-    if !installed {
+    write_config(&config)?;
+    if !quick_config_path().is_file() {
         return Ok(format!(
             "global hotkey: {} (install with `prelude global install`)",
             hotkey.canonical()
         ));
     }
-    if !helper_supports_configurable_hotkey() {
-        return Ok(format!(
-            "global hotkey: {}. The installed helper predates configurable keys; run `prelude global install` to upgrade and start it.",
-            hotkey.canonical()
-        ));
-    }
-
+    // Ghostty reads the chord from the panel's configuration at startup, so
+    // the instance is replaced rather than signalled.
     let restore = |bytes: Option<&[u8]>| {
-        match bytes {
-            Some(bytes) => {
-                let _ = crate::cache::write_atomic(&config_path(), bytes);
-                let _ = private_file(&config_path());
-            }
-            None => {
-                let _ = std::fs::remove_file(config_path());
-            }
+        if let Some(bytes) = bytes {
+            let _ = crate::cache::write_atomic(&config_path(), bytes);
+            let _ = private_file(&config_path());
+            let _ = write_quick_config(&quick_config_path());
         }
-        if was_running {
-            let _ = start_helper();
-        }
+        let _ = start_helper();
     };
-    if let Err(e) = check_hotkey_with(&executable_path()) {
+    stop_helper();
+    if let Err(e) = write_quick_config(&quick_config_path()) {
         restore(old.as_deref());
-        return Err(format!(
-            "{} is unavailable: {e}; the previous hotkey was restored",
-            hotkey.canonical()
-        ));
+        return Err(format!("{e}; the previous hotkey was restored"));
     }
     if let Err(e) = start_helper() {
         restore(old.as_deref());
@@ -507,43 +460,19 @@ fn xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn info_plist(config: &Path, status: &Path, active: &Path) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleExecutable</key><string>{EXECUTABLE}</string>
-  <key>CFBundleIdentifier</key><string>{LABEL}</string>
-  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>Prelude Hotkey</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>{version}</string>
-  <key>CFBundleVersion</key><string>{version}</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSUIElement</key><true/>
-  <key>NSAppleEventsUsageDescription</key><string>Prelude opens a new Terminal window when Ghostty is unavailable.</string>
-  <key>PreludeConfigPath</key><string>{config}</string>
-  <key>PreludeStatusPath</key><string>{status}</string>
-  <key>PreludeActivePath</key><string>{active}</string>
-</dict></plist>
-"#,
-        version = env!("CARGO_PKG_VERSION"),
-        config = xml(&config.to_string_lossy()),
-        status = xml(&status.to_string_lossy()),
-        active = xml(&active.to_string_lossy()),
-    )
-}
 
-fn launch_agent(executable: &Path, stdout: &Path, stderr: &Path) -> String {
+/// Start the panel's instance at login. `open` returns as soon as Launch
+/// Services has the request, so this job is expected to exit cleanly; there is
+/// nothing here to keep alive.
+fn launch_agent(config: &Path, stdout: &Path, stderr: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>{LABEL}</string>
-  <key>ProgramArguments</key><array><string>{executable}</string></array>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-nb</string><string>{GHOSTTY_BUNDLE}</string><string>--args</string><string>--config-file={config}</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Interactive</string>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -551,10 +480,67 @@ fn launch_agent(executable: &Path, stdout: &Path, stderr: &Path) -> String {
   <key>StandardErrorPath</key><string>{stderr}</string>
 </dict></plist>
 "#,
-        executable = xml(&executable.to_string_lossy()),
+        config = xml(&config.to_string_lossy()),
         stdout = xml(&stdout.to_string_lossy()),
         stderr = xml(&stderr.to_string_lossy()),
     )
+}
+
+/// Open one ordinary terminal window, for a command the launcher had nowhere
+/// else to put.
+///
+/// This is the only place left that builds a terminal, and it now runs when
+/// the answer needs one rather than on every press. The command itself is not
+/// passed here: it waits in a private file the new shell reads, so nothing
+/// selected reaches an argument list or an Apple Event.
+///
+/// Saved state is declined for the same reason the launcher declines it — a
+/// second Ghostty instance otherwise restores every window of the last
+/// session, so one deliberate window would arrive with a crowd.
+pub fn open_working_window() -> bool {
+    let config = configured().unwrap_or_default();
+    let directory = effective_directory(&config);
+    let directory = if directory.is_dir() {
+        directory
+    } else {
+        crate::paths::home()
+    };
+    let directory = directory.to_string_lossy().into_owned();
+    let ghostty = matches!(config.backend, Backend::Auto | Backend::Ghostty)
+        && std::path::Path::new(GHOSTTY_APP).is_dir();
+    if ghostty {
+        return Command::new("/usr/bin/open")
+            .args([
+                "-nb",
+                GHOSTTY_BUNDLE,
+                "--args",
+                &format!("--working-directory={directory}"),
+                "--window-save-state=never",
+                "-e",
+                "/usr/bin/env",
+                "PRELUDE_PRELOAD=1",
+                "/bin/zsh",
+                "-il",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+    }
+    // Terminal.app takes a command, not an environment, so the directory is
+    // the only thing interpolated — and `parse_directory` already refused
+    // every character that would need escaping here.
+    let script = format!(
+        "tell application id \"com.apple.Terminal\"\n do script \"cd '{directory}' && exec /usr/bin/env PRELUDE_PRELOAD=1 /bin/zsh -il\"\n activate\nend tell"
+    );
+    Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn run_visible(program: &str, args: &[&str]) -> Result<(), String> {
@@ -570,55 +556,61 @@ fn run_visible(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn build_app(destination: &Path) -> Result<(), String> {
-    let contents = destination.join("Contents");
-    let macos = contents.join("MacOS");
-    let resources = contents.join("Resources");
-    std::fs::create_dir_all(&macos)
-        .and_then(|_| std::fs::create_dir_all(&resources))
-        .map_err(|e| format!("could not create app bundle: {e}"))?;
-
-    let source = resources.join("main.swift");
-    std::fs::write(&source, SWIFT).map_err(|e| format!("could not stage helper source: {e}"))?;
-    std::fs::write(
-        contents.join("Info.plist"),
-        info_plist(&config_path(), &status_path(), &active_path()),
+/// The panel's Ghostty configuration.
+///
+/// Every line here is load-bearing, and three were found the hard way.
+/// `macos-hidden` is what keeps a launcher out of the Dock and the app
+/// switcher — Ghostty documents it for exactly this use. `initial-window`
+/// keeps the instance at rest with no window and no shell until the chord is
+/// first pressed. And `window-save-state` has to be declined or the instance
+/// restores the previous session's windows, so one press arrives with a crowd.
+///
+/// `unconsumed:escape` is the dismissal. It hides the panel *and* passes the
+/// key through, so fzf aborts, the loop starts a fresh launcher behind the
+/// hidden panel, and the next press is a reveal rather than a rebuild.
+fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
+    format!(
+        "# Prelude launcher panel. Written by `prelude global install`.\n\
+         # This configures a dedicated, hidden Ghostty instance; it does not\n\
+         # affect the Ghostty you work in.\n\
+         initial-window = false\n\
+         macos-hidden = always\n\
+         window-save-state = never\n\
+         quick-terminal-position = center\n\
+         quick-terminal-size = 62%,58%\n\
+         quick-terminal-autohide = true\n\
+         quick-terminal-space-behavior = move\n\
+         quick-terminal-animation-duration = 0.08\n\
+         confirm-close-surface = false\n\
+         working-directory = {directory}\n\
+         keybind = global:{chord}=toggle_quick_terminal\n\
+         keybind = unconsumed:escape=toggle_quick_terminal\n\
+         command = {exe} _panel\n",
+        chord = hotkey.canonical(),
+        exe = exe.display(),
+        directory = directory.display(),
     )
-    .map_err(|e| format!("could not write helper metadata: {e}"))?;
+}
 
-    let output = macos.join(EXECUTABLE);
-    let source_s = source.to_string_lossy().into_owned();
-    let output_s = output.to_string_lossy().into_owned();
+fn write_quick_config(destination: &Path) -> Result<(), String> {
+    let config = configured()?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("could not find the Prelude binary: {e}"))?;
+    let body = quick_config(&exe, &config.hotkey, &effective_directory(&config));
+    crate::cache::write_atomic(destination, body.as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", destination.display()))?;
+    let path = destination.to_string_lossy().into_owned();
     run_visible(
-        "/usr/bin/xcrun",
-        &[
-            "swiftc",
-            &source_s,
-            "-O",
-            "-warnings-as-errors",
-            "-o",
-            &output_s,
-            "-framework",
-            "AppKit",
-            "-framework",
-            "Carbon",
-        ],
-    )?;
-    let info = contents.join("Info.plist").to_string_lossy().into_owned();
-    run_visible("/usr/bin/plutil", &["-lint", &info])?;
-    let destination_s = destination.to_string_lossy().into_owned();
-    run_visible(
-        "/usr/bin/codesign",
-        &["--force", "--sign", "-", "--timestamp=none", &destination_s],
-    )?;
+        "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+        &["+validate-config", &format!("--config-file={path}")],
+    )
+    .map_err(|e| format!("Ghostty rejected the generated launcher configuration: {e}"))?;
     Ok(())
 }
 
 fn rollback_install(destination: &Path, backup: &Path, agent: &Path, old_agent: Option<&[u8]>) {
     stop_helper();
-    if destination.exists() {
-        let _ = std::fs::remove_dir_all(destination);
-    }
+    let _ = std::fs::remove_file(destination);
     if backup.exists() {
         let _ = std::fs::rename(backup, destination);
     }
@@ -651,9 +643,6 @@ unsafe fn libc_getuid() -> u32 {
     0
 }
 
-fn service() -> String {
-    format!("{}/{LABEL}", domain())
-}
 
 fn launchctl(args: &[&str]) -> bool {
     Command::new("/bin/launchctl")
@@ -665,34 +654,46 @@ fn launchctl(args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn service_info() -> String {
-    crate::exec::run(
-        &["/bin/launchctl", "print", &service()],
-        Duration::from_secs(2),
-    )
-}
 
-fn loaded() -> bool {
-    !service_info().is_empty()
+
+/// How many launcher instances are up. launchd only starts one at login —
+/// `open` exits immediately, so the job is never the thing to ask — but two
+/// can appear if something else starts one at the same moment, and two
+/// instances mean two panels fighting over one chord.
+fn instances() -> usize {
+    let marker = format!("config-file={}", quick_config_path().display());
+    crate::exec::run(&["/usr/bin/pgrep", "-f", &marker], Duration::from_secs(2))
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
 }
 
 fn running() -> bool {
-    let info = service_info();
-    info.lines().any(|line| line.trim() == "state = running")
-        && info
-            .lines()
-            .any(|line| line.trim_start().starts_with("pid = "))
+    instances() > 0
 }
 
 fn stop_helper() {
-    let path = launch_agent_path();
-    if path.exists() {
-        let _ = launchctl(&["bootout", &domain(), &path.to_string_lossy()]);
+    let marker = format!("config-file={}", quick_config_path().display());
+    let _ = crate::exec::run(&["/usr/bin/pkill", "-f", &marker], Duration::from_secs(2));
+    for _ in 0..20 {
+        if !running() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
+/// One panel, or none. Anything else is a chord with two owners.
+fn enforce_single_instance() -> Result<(), String> {
+    if instances() <= 1 {
+        return Ok(());
+    }
+    stop_helper();
+    start_helper()
+}
+
 fn wait_until_running() -> bool {
-    for _ in 0..30 {
+    for _ in 0..40 {
         if running() {
             return true;
         }
@@ -702,57 +703,60 @@ fn wait_until_running() -> bool {
 }
 
 fn start_helper() -> Result<(), String> {
-    let path = launch_agent_path();
-    if !path.exists() {
-        return Err("global hotkey is not installed; run `prelude global install`".into());
+    if !quick_config_path().is_file() {
+        return Err("the launcher panel is not installed; run `prelude global install`".into());
     }
     let config = configured()?;
     if let Some(owner) = known_conflict(&config.hotkey) {
-        stop_helper();
         return Err(format!(
             "{} is already configured for {owner}; change it there or choose another Prelude chord",
             config.hotkey.canonical()
         ));
     }
-    if loaded() {
-        stop_helper();
+    match instances() {
+        1 => return Ok(()),
+        // Two panels both claim the chord, and the one that loses registration
+        // still answers a toggle, so the panel appears to open every other
+        // press. Reduce to one rather than adding a third.
+        n if n > 1 => stop_helper(),
+        _ => {}
     }
-    if helper_supports_configurable_hotkey() {
-        check_hotkey_with(&executable_path())
-            .map_err(|e| format!("{} is unavailable: {e}", config.hotkey.canonical()))?;
-    }
-    if !launchctl(&["bootstrap", &domain(), &path.to_string_lossy()]) {
-        return Err(
-            "launchd could not start the Prelude hotkey helper; run `prelude global status`".into(),
-        );
+    let path = format!("--config-file={}", quick_config_path().display());
+    let started = Command::new("/usr/bin/open")
+        .args(["-nb", GHOSTTY_BUNDLE, "--args", &path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !started {
+        return Err("could not start the launcher panel's Ghostty instance".into());
     }
     if wait_until_running() {
         Ok(())
     } else {
-        Err("the Prelude hotkey helper exited during startup; run `prelude global status`".into())
+        Err("the launcher panel's Ghostty instance did not stay up; run `prelude global status`".into())
     }
 }
 
 fn install() -> Result<String, String> {
     if !cfg!(target_os = "macos") {
-        return Err("the global hotkey is available on macOS only".into());
+        return Err("the launcher panel is available on macOS only".into());
+    }
+    if !Path::new(GHOSTTY_APP).is_dir() {
+        return Err(
+            "the launcher panel is a Ghostty quick terminal, and Ghostty is not installed"
+                .into(),
+        );
     }
     let config = configured()?;
     if let Some(owner) = known_conflict(&config.hotkey) {
-        stop_helper();
         return Err(format!(
-            "{} is already configured for {}; change it there or choose another Prelude chord with `prelude global hotkey HOTKEY`",
+            "{} is already configured for {}; change it there or choose another chord with `prelude global hotkey HOTKEY`",
             config.hotkey.canonical(), owner
         ));
     }
-    if launcher_active() {
-        return Err(
-            "a global Prelude launcher is open; close it before upgrading the helper".into(),
-        );
-    }
     write_config(&config)?;
-    std::fs::create_dir_all(crate::paths::home().join("Applications"))
-        .map_err(|e| format!("could not create ~/Applications: {e}"))?;
     std::fs::create_dir_all(crate::paths::cache())
         .map_err(|e| format!("could not create the Prelude cache: {e}"))?;
     for log in [stdout_path(), stderr_path()] {
@@ -763,112 +767,76 @@ fn install() -> Result<String, String> {
         private_file(&log)?;
     }
 
-    let destination = app_path();
-    let staged = destination.with_file_name(format!(".{APP_NAME}.new-{}", std::process::id()));
-    if staged.exists() {
-        std::fs::remove_dir_all(&staged).map_err(|e| format!("could not clear staging: {e}"))?;
-    }
-    if let Err(e) = build_app(&staged) {
-        let _ = std::fs::remove_dir_all(&staged);
+    let destination = quick_config_path();
+    let staged = destination.with_file_name(format!(".{QUICK_CONFIG}.new-{}", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    if let Err(e) = write_quick_config(&staged) {
+        let _ = std::fs::remove_file(&staged);
         return Err(e);
     }
 
     let agent = launch_agent_path();
     let old_agent = std::fs::read(&agent).ok();
-    let backup = destination.with_file_name(format!(".{APP_NAME}.backup-{}", std::process::id()));
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup)
-            .map_err(|e| format!("could not clear old installer backup: {e}"))?;
-    }
+    let backup = destination.with_file_name(format!(".{QUICK_CONFIG}.backup-{}", std::process::id()));
+    let _ = std::fs::remove_file(&backup);
 
-    let was_running = running();
     stop_helper();
-    if let Err(e) = check_hotkey_with(&staged.join("Contents/MacOS").join(EXECUTABLE)) {
-        let _ = std::fs::remove_dir_all(&staged);
-        if was_running {
-            let _ = start_helper();
-        }
-        return Err(format!(
-            "{} is unavailable: {e}. Change the other application or run `prelude global hotkey HOTKEY`",
-            config.hotkey.canonical()
-        ));
-    }
     if destination.exists() {
         std::fs::rename(&destination, &backup)
-            .map_err(|e| format!("could not preserve the installed helper: {e}"))?;
+            .map_err(|e| format!("could not preserve the installed configuration: {e}"))?;
     }
     if let Err(e) = std::fs::rename(&staged, &destination) {
         if backup.exists() {
             let _ = std::fs::rename(&backup, &destination);
         }
-        if old_agent.is_some() {
-            let _ = start_helper();
-        }
+        let _ = start_helper();
         return Err(format!(
-            "could not install the new helper: {e}; the previous helper was restored"
+            "could not install the launcher configuration: {e}; the previous one was restored"
         ));
     }
 
-    let new_agent = launch_agent(&executable_path(), &stdout_path(), &stderr_path());
+    let new_agent = launch_agent(&destination, &stdout_path(), &stderr_path());
     if let Err(e) = crate::cache::write_atomic(&agent, new_agent.as_bytes()) {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
-        return Err(format!(
-            "could not write {}: {e}; the previous helper was restored",
-            agent.display()
-        ));
+        return Err(format!("could not write {}: {e}", agent.display()));
     }
     if let Err(e) = private_file(&agent) {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
-        return Err(format!("{e}; the previous helper was restored"));
+        return Err(e);
     }
     let agent_s = agent.to_string_lossy().into_owned();
     if let Err(e) = run_visible("/usr/bin/plutil", &["-lint", &agent_s]) {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
-        return Err(format!("{e}; the previous helper was restored"));
+        return Err(e);
     }
-    let _ = std::fs::remove_file(status_path());
-    if let Err(e) = start_helper() {
-        rollback_install(&destination, &backup, &agent, old_agent.as_deref());
-        return Err(format!("{e}; the previous helper was restored"));
-    }
-    for _ in 0..20 {
-        if status_path().is_file() {
-            break;
+    let _ = launchctl(&["bootout", &domain(), &agent_s]);
+    // RunAtLoad starts the instance, so bootstrapping *is* the start. Racing
+    // it with an explicit launch is how two panels end up sharing one chord.
+    let _ = launchctl(&["bootstrap", &domain(), &agent_s]);
+    if !wait_until_running() {
+        if let Err(e) = start_helper() {
+            rollback_install(&destination, &backup, &agent, old_agent.as_deref());
+            return Err(format!("{e}; the previous launcher was restored"));
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    if backup.exists() {
-        let _ = std::fs::remove_dir_all(&backup);
+    if let Err(e) = enforce_single_instance() {
+        rollback_install(&destination, &backup, &agent, old_agent.as_deref());
+        return Err(format!("{e}; the previous launcher was restored"));
     }
+    let _ = std::fs::remove_file(&backup);
 
     let mut result = format!(
-        "installed {}\nbackend: {}\nhotkey: {}\n",
+        "installed {}\nhotkey: {}\ncommands open in: {}\n",
         destination.display(),
-        config.backend.as_str(),
-        config.hotkey.canonical()
+        config.hotkey.canonical(),
+        effective_directory(&config).display(),
     );
-    let registration_failed = std::fs::read(status_path())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|event| {
-            event
-                .get("event")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .as_deref()
-        == Some("registration-failed");
-    if registration_failed {
-        result.push_str(
-            "The chord was claimed after preflight. Free it or choose another; the helper stays up and keeps retrying every few seconds.\n",
-        );
-    } else {
-        result.push_str("The global chord is registered; one launcher may be open at a time.\n");
-    }
-    result.push_str("Terminal.app may ask for Automation permission the first time it is used.\n");
+    result.push_str(
+        "The launcher is a hidden Ghostty panel. Press the chord to reveal it, Escape to dismiss.\n",
+    );
     if !zsh_widget_available() {
         result.push_str(
-            "The login zsh does not load _prelude_widget yet. Add `eval \"$(prelude init zsh)\"` to ~/.zshrc before using Cmd+Space.",
+            "The login zsh does not load _prelude_widget yet. Add `eval \"$(prelude init zsh)\"` to ~/.zshrc so handed-over commands land on a prompt.",
         );
     }
     Ok(result)
@@ -876,25 +844,19 @@ fn install() -> Result<String, String> {
 
 fn uninstall(reset: bool) -> Result<String, String> {
     stop_helper();
-    let _ = std::fs::remove_file(active_path());
     let agent = launch_agent_path();
     if agent.exists() {
+        let _ = launchctl(&["bootout", &domain(), &agent.to_string_lossy()]);
         std::fs::remove_file(&agent)
             .map_err(|e| format!("could not remove {}: {e}", agent.display()))?;
     }
-    let app = app_path();
-    if app.exists() {
-        std::fs::remove_dir_all(&app)
-            .map_err(|e| format!("could not remove {}: {e}", app.display()))?;
+    let quick = quick_config_path();
+    if quick.exists() {
+        std::fs::remove_file(&quick)
+            .map_err(|e| format!("could not remove {}: {e}", quick.display()))?;
     }
     if reset {
-        for path in [
-            config_path(),
-            status_path(),
-            active_path(),
-            stdout_path(),
-            stderr_path(),
-        ] {
+        for path in [config_path(), stdout_path(), stderr_path()] {
             if path.exists() {
                 std::fs::remove_file(&path)
                     .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
@@ -902,28 +864,12 @@ fn uninstall(reset: bool) -> Result<String, String> {
         }
     }
     Ok(if reset {
-        "removed the global hotkey helper and its Prelude-owned preferences".into()
+        "removed the launcher panel and its Prelude-owned preferences".into()
     } else {
-        "removed the global hotkey helper; backend preference retained".into()
+        "removed the launcher panel; preferences retained".into()
     })
 }
 
-fn helper_probe() -> Option<serde_json::Value> {
-    let exe = executable_path();
-    if !exe.is_file() {
-        return None;
-    }
-    let output = Command::new(exe)
-        .arg("--probe")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() || output.stdout.len() > 16 * 1024 {
-        return None;
-    }
-    serde_json::from_slice(&output.stdout).ok()
-}
 
 fn zsh_widget_available() -> bool {
     let out = crate::exec::run(
@@ -1062,85 +1008,12 @@ fn known_conflict(hotkey: &Hotkey) -> Option<String> {
     hotkey_owner(hotkey).owner
 }
 
-fn check_hotkey_with(executable: &Path) -> Result<(), String> {
-    let status = Command::new(executable)
-        .arg("--check-hotkey")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("could not check the requested global hotkey: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(
-            "the hotkey is already registered by macOS or another application such as Raycast"
-                .into(),
-        )
-    }
-}
 
-/// A launch that never produced a shell is not a launcher, and a shell that has
-/// gone is not one either. The grace window covers only the seconds between the
-/// helper claiming the lease and the terminal's zsh writing its pid into it.
-const LEASE_GRACE: Duration = Duration::from_secs(20);
-/// A backstop against a recycled pid, not against a launcher left open.
-const LEASE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Lease {
-    /// Nothing holds the launcher; the next hotkey creates one.
-    Free,
-    /// Claimed, with no shell reporting itself yet.
-    Starting,
-    /// A live shell owns the launcher.
-    Held(u32),
-}
 
-fn pid_alive(pid: u32) -> bool {
-    // A pid larger than the platform's own is not a process we can ask about.
-    i32::try_from(pid).is_ok_and(crate::exec::alive)
-}
 
-fn lease_at(path: &Path) -> Lease {
-    let Some(age) = std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|time| time.elapsed().ok())
-    else {
-        return Lease::Free;
-    };
-    if age >= LEASE_LIFETIME {
-        return Lease::Free;
-    }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Lease::Free;
-    };
-    let mut lines = text.lines();
-    if lines.next().is_none_or(|token| token.trim().is_empty()) {
-        return Lease::Free;
-    }
-    let _backend = lines.next();
-    match lines.next().and_then(|pid| pid.trim().parse::<u32>().ok()) {
-        Some(pid) if pid_alive(pid) => Lease::Held(pid),
-        Some(_) => Lease::Free,
-        None if age < LEASE_GRACE => Lease::Starting,
-        None => Lease::Free,
-    }
-}
 
-fn launcher_lease() -> Lease {
-    let path = active_path();
-    let lease = lease_at(&path);
-    if lease == Lease::Free && path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
-    lease
-}
 
-fn launcher_active() -> bool {
-    launcher_lease() != Lease::Free
-}
 
 pub fn status() -> GlobalStatus {
     let parsed = configured();
@@ -1159,49 +1032,27 @@ pub fn status() -> GlobalStatus {
     let hotkey = parsed
         .map(|config| config.hotkey)
         .unwrap_or_else(|_| GlobalConfig::default().hotkey);
-    let probe = helper_probe();
-    let ghostty_available = probe
-        .as_ref()
-        .and_then(|v| v.get("ghostty_available"))
-        .and_then(serde_json::Value::as_bool);
-    let effective_backend = probe
-        .as_ref()
-        .and_then(|v| v.get("effective_backend"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let last_event: Option<serde_json::Value> = std::fs::read(status_path())
-        .ok()
-        .filter(|v| v.len() <= 16 * 1024)
-        .and_then(|v| serde_json::from_slice(&v).ok());
-    let helper_running = running();
-    let registration_failed = last_event
-        .as_ref()
-        .and_then(|event| event.get("event"))
-        .and_then(serde_json::Value::as_str)
-        == Some("registration-failed");
     let owner = hotkey_owner(&hotkey);
-    let lease = launcher_lease();
+    let panel_running = running();
+    let installed = quick_config_path().is_file();
     GlobalStatus {
-        schema: 4,
-        app_installed: executable_path().is_file(),
+        schema: 5,
+        app_installed: installed,
         launch_agent_installed: launch_agent_path().is_file(),
-        helper_running,
-        hotkey_registered: helper_running && !registration_failed && owner.owner.is_none(),
-        launcher_active: lease != Lease::Free,
-        launcher_pid: match lease {
-            Lease::Held(pid) => Some(pid),
-            _ => None,
-        },
+        helper_running: panel_running,
+        // Ghostty registers the chord from the panel's configuration, so the
+        // panel being up with no known owner is the whole of the claim.
+        hotkey_registered: panel_running && owner.owner.is_none(),
         selected_hotkey,
         hotkey_owner: owner.owner,
         owner_checks_complete: owner.complete,
         selected_backend,
         launch_directory: directory.to_string_lossy().into_owned(),
         launch_directory_exists: directory.is_dir(),
-        ghostty_available,
-        effective_backend,
+        ghostty_available: Some(Path::new(GHOSTTY_APP).is_dir()),
+        effective_backend: Some("ghostty quick terminal".into()),
         zsh_widget_available: zsh_widget_available(),
-        last_event,
+        last_event: None,
     }
 }
 
@@ -1213,86 +1064,61 @@ fn print_status(json: bool) -> i32 {
             serde_json::to_string_pretty(&s).unwrap_or_else(|_| "{}".into())
         );
     } else {
-        println!("Prelude global hotkey\n");
-        line("helper app", s.app_installed, &app_path().to_string_lossy());
+        println!("Prelude launcher panel\n");
         line(
-            "LaunchAgent",
+            "panel configuration",
+            s.app_installed,
+            &quick_config_path().to_string_lossy(),
+        );
+        line(
+            "login agent",
             s.launch_agent_installed,
             &launch_agent_path().to_string_lossy(),
         );
         line(
-            "helper running",
+            "panel running",
             s.helper_running,
             if s.helper_running {
-                "native helper process active"
+                "hidden Ghostty instance up; press the chord to reveal it"
             } else {
-                "run: prelude global start"
+                "run: prelude global open"
             },
         );
         line(
             &format!("{} registered", s.selected_hotkey),
             s.hotkey_registered,
             if s.hotkey_registered {
-                "listener active"
+                "Ghostty owns the chord"
             } else {
-                "free the shortcut or choose another, then run: prelude global start"
-            },
-        );
-        line(
-            "launcher singleton",
-            true,
-            &match (s.launcher_active, s.launcher_pid) {
-                (true, Some(pid)) => format!("one Prelude launcher is open (shell {pid})"),
-                (true, None) => "a launcher is starting".into(),
-                (false, _) => "ready".to_string(),
+                "free the shortcut or choose another, then run: prelude global install"
             },
         );
         line(
             "zsh widget",
             s.zsh_widget_available,
             if s.zsh_widget_available {
-                "_prelude_widget is loaded"
+                "_prelude_widget is loaded; handed-over commands land on a prompt"
             } else {
                 "add eval \"$(prelude init zsh)\" to ~/.zshrc"
             },
         );
         println!(
-            "  {} backend  {}{}",
-            if s.effective_backend.is_some() {
-                "✓"
-            } else {
-                "✗"
-            },
-            s.selected_backend,
-            s.effective_backend
-                .as_ref()
-                .map(|v| format!(" → {v}"))
-                .unwrap_or_default()
-        );
-        println!(
-            "  {} directory  {}{}",
+            "  {} commands open in  {}{}",
             if s.launch_directory_exists { "✓" } else { "✗" },
             s.launch_directory,
             if s.launch_directory_exists {
                 String::new()
             } else {
-                format!(
-                    " (missing; launches fall back to {})",
-                    crate::paths::home().display()
-                )
+                format!(" (missing; falls back to {})", crate::paths::home().display())
             }
         );
         println!(
             "  {} Ghostty  {}",
+            if s.ghostty_available == Some(true) { "✓" } else { "✗" },
             if s.ghostty_available == Some(true) {
-                "✓"
+                "installed"
             } else {
-                "·"
-            },
-            match s.ghostty_available {
-                Some(true) => "installed",
-                Some(false) => "not installed; Terminal.app will be used",
-                None => "unknown until the helper is installed",
+                "required: the panel is a Ghostty quick terminal"
             }
         );
         println!(
@@ -1300,24 +1126,18 @@ fn print_status(json: bool) -> i32 {
             if s.hotkey_owner.is_some() { "✗" } else { "✓" },
             match (&s.hotkey_owner, s.owner_checks_complete) {
                 (Some(owner), _) => format!("{owner} owns this chord"),
-                // macOS names no registry of the applications that merely watch
-                // a key, so the honest claim is about what was looked at.
                 (None, true) => "no known owner".into(),
-                (None, false) => "no known owner, but some owner records could not be read".to_string(),
+                (None, false) =>
+                    "no known owner, but some owner records could not be read".to_string(),
             }
         );
-        if let Some(event) = &s.last_event {
-            println!(
-                "\nlast event: {}",
-                serde_json::to_string(event).unwrap_or_default()
-            );
-        }
     }
     if s.app_installed
         && s.launch_agent_installed
         && s.helper_running
         && s.hotkey_registered
         && s.zsh_widget_available
+        && s.ghostty_available == Some(true)
         && s.hotkey_owner.is_none()
     {
         0
@@ -1330,31 +1150,17 @@ fn line(label: &str, good: bool, detail: &str) {
     println!("  {} {label}  {detail}", if good { "✓" } else { "✗" });
 }
 
+/// `prelude global open` starts the panel's instance. It cannot *show* the
+/// panel: that is Ghostty's global chord, which is the whole point — nothing
+/// of Prelude's runs when the key is pressed.
 fn open_once() -> Result<(), String> {
-    let config = configured()?;
-    if let Some(owner) = known_conflict(&config.hotkey) {
-        return Err(format!(
-            "{} is already configured for {owner}; choose another with `prelude global hotkey HOTKEY`",
-            config.hotkey.canonical()
-        ));
+    if running() {
+        println!("the launcher panel is already running; press the chord to reveal it");
+        return Ok(());
     }
-    let exe = executable_path();
-    if !exe.is_file() {
-        return Err("global hotkey helper is not installed; run `prelude global install`".into());
-    }
-    let status = Command::new(exe)
-        .arg("--open")
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|e| format!("could not start the hotkey helper: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(
-            "the selected terminal backend could not open a window; run `prelude global status`"
-                .into(),
-        )
-    }
+    start_helper()?;
+    println!("launcher panel started; press the chord to reveal it");
+    Ok(())
 }
 
 pub fn dispatch(args: &[&str]) -> i32 {
@@ -1371,11 +1177,6 @@ pub fn dispatch(args: &[&str]) -> i32 {
         ["status"] => return print_status(false),
         ["status", "--json"] => return print_status(true),
         ["open"] => open_once(),
-        ["clear"] => {
-            let _ = std::fs::remove_file(active_path());
-            println!("cleared the global launcher lease");
-            Ok(())
-        }
         ["hotkey"] => configured().map(|config| println!("{}", config.hotkey.canonical())),
         ["hotkey", value] => Hotkey::parse(value).and_then(write_hotkey).map(|message| println!("{message}")),
         ["directory"] => {
@@ -1390,7 +1191,7 @@ pub fn dispatch(args: &[&str]) -> i32 {
             Ok(())
         }),
         _ => Err(
-            "usage: prelude global install|uninstall|start|stop|status|open|clear|hotkey [CHORD]|backend [auto|ghostty|terminal]|directory [PATH|--default]"
+            "usage: prelude global install|uninstall|start|stop|status|open|hotkey [CHORD]|backend [auto|ghostty|terminal]|directory [PATH|--default]"
                 .into(),
         ),
     };
@@ -1508,20 +1309,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_dismissed_launcher_window_closes_and_leaves_no_history() {
-        let zsh = crate::init::ZSH;
-        // `status` is a read-only alias for $? in zsh; declaring it local
-        // fails the whole widget before Prelude is ever run.
-        assert!(!zsh.contains("local out verb payload status"));
-        assert!(zsh.contains("_prelude_result"));
-        assert!(zsh.contains("(( code == 130 )) || _prelude_result=FAILED"));
-        assert!(zsh.contains("setopt hist_ignore_space"));
-        assert!(zsh.contains("BUFFER=' exit'"));
-        // Only the one-shot window closes itself; Ctrl+R must not.
-        let dispatch = zsh.find("_prelude_autostart_dispatch() {").unwrap();
-        assert!(zsh.find("BUFFER=' exit'").unwrap() > dispatch);
-    }
 
     #[test]
     fn raycast_hotkey_encoding_is_compared_as_a_chord_not_as_prose() {
@@ -1538,141 +1325,75 @@ mod tests {
 
     #[test]
     fn managed_paths_stay_inside_their_declared_user_roots() {
-        assert_eq!(
-            app_path(),
-            crate::paths::home().join("Applications").join(APP_NAME)
-        );
+        assert!(quick_config_path().starts_with(crate::paths::config()));
         assert_eq!(
             launch_agent_path(),
             crate::paths::home().join("Library/LaunchAgents/app.prelude.hotkey.plist")
         );
         assert!(config_path().starts_with(crate::paths::config()));
-        for path in [status_path(), active_path(), stdout_path(), stderr_path()] {
+        for path in [stdout_path(), stderr_path()] {
             assert!(path.starts_with(crate::paths::cache()));
         }
     }
 
     #[test]
     fn generated_metadata_escapes_paths_and_contains_no_selected_payload() {
-        let info = info_plist(
-            Path::new("/tmp/a&b/config"),
-            Path::new("/tmp/<status>"),
-            Path::new("/tmp/active"),
-        );
-        assert!(info.contains("/tmp/a&amp;b/config"));
-        assert!(info.contains("/tmp/&lt;status&gt;"));
-        assert!(info.contains("<key>LSUIElement</key><true/>"));
-        assert!(!info.contains("INSERT"));
         let agent = launch_agent(
-            Path::new("/tmp/a&b/helper"),
+            Path::new("/tmp/a&b/panel.ghostty"),
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
         );
-        assert!(agent.contains("/tmp/a&amp;b/helper"));
+        assert!(agent.contains("/tmp/a&amp;b/panel.ghostty"));
         assert!(agent.contains("<key>RunAtLoad</key><true/>"));
-        // A helper that dies must come back. `Crashed` is not enough: launchd
-        // counts only the classic fault signals as a crash, so a helper killed
-        // for memory pressure would stay dead until somebody noticed the
-        // hotkey had stopped working. `prelude global stop` boots the job out
-        // rather than exiting the process, so it is unaffected.
-        assert!(agent.contains("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>"));
-        assert!(!agent.contains("<key>KeepAlive</key><true/>"));
-        assert!(!agent.contains("<key>KeepAlive</key><false/>"));
+        // `open` hands the request to Launch Services and exits, so there is
+        // nothing here for launchd to keep alive. The panel's own Ghostty
+        // instance is the long-lived thing, and it is not a launchd job.
+        assert!(agent.contains("/usr/bin/open"));
+        assert!(agent.contains("<key>KeepAlive</key><false/>"));
+    }
+
+
+
+
+
+
+
+    #[test]
+    fn the_panel_is_hidden_warm_and_dismissible() {
+        let config = quick_config(
+            Path::new("/opt/homebrew/bin/prelude"),
+            &Hotkey::parse("cmd+shift+space").unwrap(),
+            Path::new("/Users/someone"),
+        );
+        // Out of the Dock and the app switcher: a launcher is not an app you
+        // alt-tab to.
+        assert!(config.contains("macos-hidden = always"));
+        // At rest it owns no window and runs no shell.
+        assert!(config.contains("initial-window = false"));
+        // Saved state would restore the previous session's windows, so one
+        // press would arrive with a crowd. This is the third time that trap
+        // has been paid for.
+        assert!(config.contains("window-save-state = never"));
+        // Ghostty registers the chord itself; nothing of Prelude's runs when
+        // the key is pressed.
+        assert!(config.contains("keybind = global:cmd+shift+space=toggle_quick_terminal"));
+        // Escape hides the panel *and* reaches fzf, so the launcher resets
+        // behind a hidden panel and the next press is a reveal, not a rebuild.
+        assert!(config.contains("keybind = unconsumed:escape=toggle_quick_terminal"));
+        assert!(config.contains("command = /opt/homebrew/bin/prelude _panel"));
+        assert!(config.contains("quick-terminal-position = center"));
+        assert!(config.contains("quick-terminal-autohide = true"));
     }
 
     #[test]
-    fn a_lease_is_only_held_while_the_shell_that_claimed_it_is_alive() {
-        let path = temp("lease");
-        let mine = std::process::id();
-
-        std::fs::write(&path, format!("token\nghostty\n{mine}\n")).unwrap();
-        assert_eq!(lease_at(&path), Lease::Held(mine));
-
-        // A launcher whose terminal was killed outright frees the hotkey at
-        // once; it does not wait out a timeout nobody can see.
-        std::fs::write(&path, "token\nghostty\n999999999\n").unwrap();
-        assert_eq!(lease_at(&path), Lease::Free);
-
-        // Claimed but not yet reported: real for a few seconds, then not.
-        std::fs::write(&path, "token\n").unwrap();
-        assert_eq!(lease_at(&path), Lease::Starting);
-
-        std::fs::write(&path, "\nghostty\n").unwrap();
-        assert_eq!(lease_at(&path), Lease::Free);
-        std::fs::write(&path, format!("token\n\n{mine}\n")).unwrap();
-        assert_eq!(lease_at(&path), Lease::Held(mine));
-
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(lease_at(&path), Lease::Free);
-        assert!(LEASE_GRACE < LEASE_LIFETIME);
-    }
-
-    #[test]
-    fn a_stale_grace_window_expires_without_a_reported_shell() {
-        // The grace window is measured from the lease's own mtime, so an old
-        // unclaimed lease is free however it was written.
-        let path = temp("lease-grace");
-        std::fs::write(&path, "token\n").unwrap();
-        let old = std::time::SystemTime::now() - (LEASE_GRACE + Duration::from_secs(5));
-        std::fs::File::open(&path)
-            .and_then(|file| file.set_modified(old))
-            .unwrap();
-        assert_eq!(lease_at(&path), Lease::Free);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn pid_liveness_answers_for_this_process_and_refuses_impossible_ones() {
-        assert!(pid_alive(std::process::id()));
-        assert!(!pid_alive(0));
-        assert!(!pid_alive(u32::MAX));
-    }
-
-    #[test]
-    fn swift_helper_uses_fixed_bootstrap_and_never_shells_a_selection() {
-        assert!(SWIFT.contains("PRELUDE_AUTOSTART=1"));
-        assert!(SWIFT.contains("com.mitchellh.ghostty"));
-        assert!(SWIFT.contains("createsNewApplicationInstance = true"));
-        // A launcher window is not a session to restore, and must not become
-        // the saved state of the Ghostty the person actually works in.
-        assert!(SWIFT.contains("\"--window-save-state=never\""));
-        // Launch Services answering success is not proof that the arguments
-        // above were delivered rather than dropped into the running instance.
-        assert!(SWIFT.contains("existing.contains(application.processIdentifier)"));
-        assert!(SWIFT.contains("\"-e\""));
-        assert!(SWIFT.contains("\"/usr/bin/env\""));
-        assert!(SWIFT.contains("\"PRELUDE_AUTOSTART=1\""));
-        assert!(SWIFT.contains("PRELUDE_GLOBAL_TOKEN="));
-        assert!(SWIFT.contains("/usr/bin/osascript"));
-        assert!(SWIFT.contains("did not answer within 10 seconds"));
-        assert!(SWIFT.contains("RegisterEventHotKey"));
-        assert!(SWIFT.contains("--check-hotkey"));
-        assert!(SWIFT.contains("PreludeActivePath"));
-        assert!(!SWIFT.contains("SELECTED_COMMAND"));
-        assert!(!SWIFT.contains("sh -c"));
-    }
-
-    #[test]
-    fn a_busy_chord_leaves_the_helper_running_and_retrying() {
-        // Exiting on a chord conflict strands the helper: the other owner can
-        // release the key and nothing will ever ask for it again.
-        assert!(!SWIFT.contains("NSApp.terminate"));
-        assert!(SWIFT.contains("Timer.scheduledTimer"));
-        assert!(SWIFT.contains("private func register()"));
-        assert!(SWIFT.contains("registration-failed"));
-        // And it says so once, not every five seconds.
-        assert!(SWIFT.contains("if !warned {"));
-    }
-
-    #[test]
-    fn the_shell_reports_its_pid_into_the_lease_and_removes_only_its_own() {
-        let zsh = crate::init::ZSH;
-        assert!(zsh.contains("_prelude_global_claim"));
-        assert!(zsh.contains("print -rl -- \"$owner\" \"$backend\" \"$$\""));
-        assert!(zsh.contains("[[ \"$owner\" == \"$PRELUDE_GLOBAL_TOKEN\" ]] || return 0"));
-        // The claim happens once the autostart shell exists, before Prelude opens.
-        let claim = zsh.find("  _prelude_global_claim").unwrap();
-        let widget = zsh.find("zle _prelude_widget").unwrap();
-        assert!(claim < widget);
+    fn the_panel_configuration_carries_no_selected_payload() {
+        let config = quick_config(
+            Path::new("/opt/homebrew/bin/prelude"),
+            &Hotkey::parse("cmd+space").unwrap(),
+            Path::new("/Users/someone"),
+        );
+        for verb in ["INSERT", "RUN", "MSG"] {
+            assert!(!config.contains(verb), "{verb}");
+        }
     }
 }

@@ -26,6 +26,7 @@ mod lend;
 mod minitoml;
 mod mcp_tools;
 mod openwith;
+mod panel;
 mod paths;
 mod preview;
 mod probe;
@@ -54,6 +55,9 @@ fn main() -> ExitCode {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match a.as_slice() {
         [] => ui::search(None),
+        // The process the quick-terminal launcher panel runs. It outlives
+        // every press, so a press reveals a launcher instead of building one.
+        ["_panel"] => panel::run(),
         ["paste"] => ui::search(ui::resolve_pane(None)),
         ["paste", pane] => ui::search(ui::resolve_pane(Some(pane))),
         ["doctor"] => doctor::run(),

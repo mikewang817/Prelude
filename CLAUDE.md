@@ -38,74 +38,52 @@ working inside an agent's terminal is correctly identified as that agent —
 which would otherwise make their own inbox unreachable from the very window
 they are sitting in.
 
-## Global hotkey helper
+## The launcher panel
 
-`docs/GLOBAL-HOTKEY.md` is the acceptance record. The helper is a separate
-AppKit executable built from `macos/PreludeHotkey/main.swift`; no GUI dependency
-belongs in the latency-sensitive Rust binary. It discovers Ghostty through
-Launch Services, falls back to one fixed Terminal Apple Event, and creates a
-fresh terminal rather than typing into an existing one. The configured chord
-must pass Spotlight, Raycast and native reservation checks before a helper is
-installed or restarted. Never rewrite another application's shortcut.
+`docs/GLOBAL-HOTKEY.md` is the acceptance record. The global launcher is a
+**Ghostty quick terminal**: a hidden, dedicated Ghostty instance configured by
+`~/.config/prelude/quick-terminal.ghostty`, hosting one long-lived
+`prelude _panel` loop. Ghostty registers the chord itself with a `global:`
+keybind, so nothing of Prelude's runs when the key is pressed.
 
-On macOS Ghostty must receive the bootstrap through `-e` as separate argv, and
-there is no way to add a window to the instance already open — `+new-window` is
-unsupported and the CLI refuses to launch the emulator — so a launch is always a
-second application instance. A status event is not proof of a terminal: Launch
-Services can answer success having handed the request to the running instance,
-which discards the arguments. Compare the returned pid against the instances
-that existed before the call. And a second instance restores the previous
-session's windows and saves its own on the way out, so one press costs a
-duplicate of every window you had; `--window-save-state=never` is what makes a
-launcher window a launcher window rather than a session.
+**A press reveals; it never creates.** The old design built a terminal on every
+press — a new application instance, a window, a login shell — 373ms of
+construction, torn down afterwards, including when the answer was a file that
+never needed a terminal. Every bug in launch and teardown came from that. There
+is now nothing to launch and nothing to strand: the loop outlives every press
+and the panel is shown and hidden.
 
-Only one launcher may be active. The helper's private lease contains a random
-token and no selected payload; the one-shot zsh widget removes it when Prelude
-returns. Repeated hotkeys focus the effective terminal application.
+Four config lines are load-bearing and each was found the hard way.
+`macos-hidden = always` keeps the launcher out of the Dock and the app switcher
+— Ghostty documents it for exactly this. `initial-window = false` keeps the
+instance at rest with no window and no shell. `window-save-state = never` stops
+a second instance restoring the last session's windows, so one press does not
+arrive with a crowd. And `unconsumed:escape=toggle_quick_terminal` is the
+dismissal: it hides the panel *and* passes Escape to fzf, so the launcher
+resets behind a hidden panel and the next press is a reveal, not a rebuild.
 
-**A lease nobody can disprove is worse than no lease.** Liveness is the pid of
-the shell the launch created, which that shell writes into the lease itself —
-the helper cannot know whether a terminal appeared, and a timeout answers the
-question far too slowly. A force-quit terminal used to hold the chord for the
-full thirty minutes while the hotkey answered `already-open` to every press, and
-it left orphaned `fzf` processes to prove it. The remaining timeouts are bounds,
-not mechanisms: a short grace window for a lease not yet claimed, and the thirty
-minutes as a backstop against a recycled pid.
+One instance or none. Two panels both claim the chord and the loser still
+answers a toggle, so the panel appears to open every other press;
+`RunAtLoad` starting the instance *is* the start, and racing it with an
+explicit launch is how that happens.
 
-**macOS records a shortcut only once it stops matching the default.** Asking
-whether Spotlight's entry is enabled answers nothing on an untouched Mac, where
-the entry is simply absent — which is how a chord Spotlight owns was reported
-free. Read the whole `AppleSymbolicHotKeys` table by key code and Cocoa
-modifier mask, then apply the known defaults for the ids nothing is recorded
-for. Name only the shortcuts worth naming and report the rest by id; an
-application that merely watches a key is in no registry at all, so "no known
-owner" is the strongest honest claim and the Carbon reservation is the backstop.
+**The launcher is not the destination.** A panel is no place to leave a command
+on a prompt, so `panel.rs` delivers. The frontmost application decides, and it
+is still answerable at the moment it is asked because the panel never takes
+frontmost status — `lsappinfo` answers it without linking AppKit. A terminal
+in front and a tmux pane to address means the command goes there, and the panel
+stands down because nothing else took focus. Anywhere else it gets one window,
+created on purpose, which takes focus itself and lets autohide dismiss the
+panel for free. Objects — files, folders, URLs, applications — still go
+straight to Launch Services and need no terminal at all.
 
-A window the hotkey opened closes itself when nothing was handed over — a
-dismissal, or an object acted on directly. `INSERT`, `RUN`, `MSG` and a Prelude
-failure all leave something to read and keep it. Only that one-shot window does
-this; Ctrl+R never closes a terminal. It exits through the line editor rather
-than calling `exit` inside a widget, and out of the history file, because
-Prelude indexes shell history and would otherwise feed itself a row per press.
-`zsh` reserves `status` as a read-only alias for `$?`: declaring it local fails
-the widget before Prelude runs, and only a pty exercise shows it.
+A handed-over command never reaches a command line. A history entry can hold a
+token and `ps` is readable by anything on the machine, so the payload waits in
+a 0600 file the new shell reads and removes, and the argument list carries only
+`PRELUDE_PRELOAD=1`.
 
-Where the window starts is `prelude global directory`, default `$HOME`. It
-reaches a process argument on one backend and an Apple Event on the other, so
-one rule strict enough for both is applied on the way in rather than two
-escapes that can disagree, and it is re-checked in the helper.
-
-The helper never exits on a busy chord. Spotlight or Raycast may hold the key at
-login and release it later; registration retries and says so once. launchd
-restarts it on any unclean exit — `KeepAlive`'s `Crashed` covers only the
-classic fault signals, which is not enough.
-
-`PRELUDE_AUTOSTART` is consumed only by the generated zsh integration. Its
-one-shot ZLE hook must dispatch the existing `_prelude_widget`, remove itself
-beforehand, and never sleep or send a timed operating-system key event. No
-selected payload may enter helper arguments, AppleScript, config, status or
-logs. `global install` may replace only Prelude's own app and LaunchAgent and
-must restore the prior installation if an upgrade cannot start.
+This binds the global launcher to Ghostty; no other macOS terminal has a quick
+terminal. `backend` now chooses only where a handed-over command opens.
 
 ## Agent Control Plane work
 

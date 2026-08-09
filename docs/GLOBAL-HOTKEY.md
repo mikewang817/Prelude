@@ -1,4 +1,4 @@
-# Global hotkey terminal
+# The launcher panel
 
 Implementation and acceptance record for Prelude's macOS-wide launcher entry
 point. This is a production surface, not a prototype: installation,
@@ -6,55 +6,45 @@ configuration, lifecycle, diagnostics and removal are part of the feature.
 
 ## Product contract
 
-The configured global hotkey (`Cmd+Space` by default) creates a **new terminal
-window** and invokes Prelude exactly as the existing zsh `Ctrl+R` widget does.
-It never takes over, types into or guesses at an existing terminal. While that
-launcher is still open, another press focuses its terminal application instead
-of creating a duplicate; once Prelude returns to the shell, the next press is a
-fresh launcher.
+The configured chord reveals a launcher that is already running, and dismissing
+it hides that launcher rather than destroying it. Nothing is created on a press
+and nothing is torn down afterwards.
 
-Backend selection is deterministic:
+The surface is a Ghostty quick terminal: a centred macOS panel belonging to a
+dedicated Ghostty instance that is hidden from the Dock and the app switcher,
+owns no window at rest, and never touches the Ghostty the person works in.
+Escape dismisses and resets. Any action that moves focus dismisses it too.
 
-1. use Ghostty when Launch Services reports `com.mitchellh.ghostty` installed;
-2. otherwise use Terminal.app;
-3. allow an explicit `auto`, `ghostty` or `terminal` preference;
-4. if an automatic Ghostty launch fails, report it and fall back to Terminal;
-   an explicitly requested backend fails visibly rather than silently changing
-   the user's choice.
-
-A launch creates a fresh terminal process. Commands still land on a prompt for
-review, objects still act directly, and no selected payload is ever put in
-AppleScript, process arguments, preferences or helper logs. Installation and
-hotkey changes first reserve the requested chord temporarily; Spotlight,
-Raycast or any other current owner must release it before Prelude changes the
-running helper.
+The launcher is not the destination. A command goes to the terminal that was in
+front when the chord was pressed, when tmux can address its pane, and otherwise
+to one window created deliberately for it. Objects — files, folders, URLs and
+applications — go straight to Launch Services and cost no terminal at all. No
+selected payload ever reaches a command line, an Apple Event, configuration or
+a log.
 
 ## Architecture
 
-The existing Rust binary and zsh widget remain authoritative for search and
-result handling. A separate, dependency-free AppKit helper owns only the global
-hotkey and terminal creation:
-
 ```text
-configured key -> Prelude Hotkey.app -> singleton lease
-                                      -> Ghostty.app or Terminal.app
-                                      -> PRELUDE_AUTOSTART=1 zsh -il
-                                      -> one-shot _prelude_widget
-                                      -> release lease when Prelude returns
+login -> LaunchAgent -> hidden Ghostty instance (no window)
+chord -> Ghostty's own global: keybind -> quick terminal panel
+                                       -> prelude _panel, forever
+                                          -> prelude -> fzf
+                                          -> deliver: tmux pane
+                                                    | one new window
+                                                    | Launch Services
+escape -> panel hidden, fzf aborted, loop starts a fresh launcher
 ```
 
-The helper is an `LSUIElement` application with no Dock icon. It registers the
-hotkey through Carbon `RegisterEventHotKey`, which does not require Accessibility
-keyboard monitoring. Ghostty is discovered by bundle identifier through Launch
-Services, never by a GUI process's incomplete `$PATH`. Terminal is controlled
-with one fixed Apple Event command containing no user-selected data.
+`~/.config/prelude/quick-terminal.ghostty` is written by
+`prelude global install` and validated with `ghostty +validate-config` before
+it is installed. The LaunchAgent exists only to start the instance at login;
+`open` exits as soon as Launch Services has the request, so the job is not the
+thing that runs. Prelude links no GUI framework: the frontmost application is
+read with `lsappinfo`.
 
-The helper source lives in `macos/PreludeHotkey`; `prelude global install`
-builds and ad-hoc signs an app in `~/Applications`, writes a LaunchAgent, and
-starts it. Installation is explicit and may invoke Xcode's installed Swift
-compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
+## Superseded — production global launcher `[x]`
 
-## Milestone — production global launcher `[x]`
+*Replaced by the launcher panel; kept for the traps it records.*
 
 - [x] `prelude init zsh` supports a one-shot `PRELUDE_AUTOSTART=1` ZLE hook and
       then restores an ordinary shell.
@@ -111,7 +101,7 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
   the release build passed. Five final settled gather runs had medians
   15.7–21.7 ms and an observed maximum 25.3 ms against the 40 ms budget.
 
-## Milestone — configurable, conflict-safe singleton `[x]`
+## Superseded — configurable, conflict-safe singleton `[x]`
 
 - [x] The global chord is configurable with `prelude global hotkey`, stored
       atomically beside the backend and parsed identically by installer and
@@ -168,7 +158,7 @@ Validation added for this milestone:
 - `54ea942` — Ghostty's supported `-e` launch path and exact active-application
   focusing; replaces a Launch Services success that opened no Prelude.
 
-## Milestone — a launcher that cannot strand itself `[x]`
+## Superseded — a launcher that cannot strand itself `[x]`
 
 The previous milestone was accepted on a manual validation run. Three faults
 survived it, each of which stops the hotkey from working and none of which any
@@ -286,3 +276,63 @@ Validation added for this milestone:
   and Raycast's preference are the two registries that can be read; an
   application that merely watches the key appears in neither, which is why the
   Carbon reservation remains the final generic check.
+
+
+## Milestone — the launcher stops building terminals `[x]`
+
+Everything above is the record of a design that created a terminal on every
+press. It was made correct — verified launches, pid-checked leases, restart on
+crash — and it was still the wrong shape. Measured on the machine that reported
+it, press-to-usable was **373 ms, identical cold and warm**, because a new
+macOS application instance was built every time. Prelude's own work, the 40 ms
+gather budget this codebase is organised around, was 5% of that. The rest was
+construction, and it was thrown away afterwards — including when the thing
+chosen was a file, which never needed a terminal at all.
+
+The replacement is a Ghostty quick terminal: a hidden instance hosting one
+`prelude _panel` loop that outlives every press.
+
+- [x] The chord is a `global:` Ghostty keybind. Nothing of Prelude's runs when
+      the key is pressed, so there is no launch to fail.
+- [x] The panel instance is hidden from the Dock and the app switcher, owns no
+      window at rest, and declines saved state.
+- [x] Escape hides the panel and reaches fzf, so the launcher resets behind a
+      hidden panel and stays warm.
+- [x] One instance or none, enforced; `RunAtLoad` is the start, not a race
+      partner for an explicit launch.
+- [x] The launcher is no longer the destination. Commands go to the tmux pane
+      of the terminal that was in front, or to one window created on purpose.
+      Objects go to Launch Services and cost no terminal.
+- [x] A handed-over command travels in a 0600 file, never on a command line.
+- [x] The Carbon helper, the lease, the grace window, the pid check, the
+      autostart ZLE hook, the Launch Services verification, `global clear` and
+      `macos/PreludeHotkey/main.swift` are deleted.
+
+Validation, measured rather than assumed:
+
+- Ghostty 1.3.1 was probed before anything was designed on top of it:
+  `macos-hidden = always` puts the instance at `activationPolicy = accessory`;
+  `initial-window = false` leaves it with no child process at all; `command` is
+  honoured by the quick terminal surface; `global:` and `unconsumed:` keybind
+  prefixes are supported on macOS.
+- Hiding and showing the panel rebuilds nothing: surface and `fzf` pids are
+  unchanged across toggles. Escape hides the panel *and* restarts the launcher
+  (`fzf` 16029 → 16209), which is warmth and dismissal at once.
+- Autohide fires on a genuine application switch, which is what dismisses the
+  panel after any action that moves focus.
+- `initial-window = false` was defeated on the first attempt by Ghostty
+  restoring the previous session's windows — the same trap this document has
+  now recorded three times.
+- Two instances appeared on the first real install, from `RunAtLoad` racing an
+  explicit start; the panel then opened on every other press.
+- `pgrep -f --config-file=…` silently matched nothing: a pattern beginning with
+  `--` is read as an option. The marker starts at the key.
+- The preload handoff was exercised end to end: a fresh window read the 0600
+  file and removed it.
+- 139 Rust tests, release Clippy with `-D warnings`, `git diff --check`, and
+  gather at a 17.9 ms median pass.
+
+### Recorded limitation
+
+The global launcher is now Ghostty-only, because no other macOS terminal offers
+a quick terminal. `backend` chooses only where a handed-over command opens.

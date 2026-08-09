@@ -1502,17 +1502,17 @@ pub fn run() -> i32 {
     let global = crate::global::status();
     if global.app_installed || global.launch_agent_installed {
         check(
-            "global Cmd+Space helper installed".into(),
+            "launcher panel installed".into(),
             global.app_installed && global.launch_agent_installed,
             &format!("backend {}", global.selected_backend),
         );
         check(
-            "global Cmd+Space helper running".into(),
+            "launcher panel instance".into(),
             global.helper_running,
             "prelude global start",
         );
         check(
-            "global terminal zsh widget".into(),
+            "launcher zsh widget".into(),
             global.zsh_widget_available,
             "eval \"$(prelude init zsh)\" must be in ~/.zshrc",
         );
@@ -1526,13 +1526,17 @@ pub fn run() -> i32 {
             &format!("{owner} may own it; free it or choose another, then run: prelude global start"),
         );
         check(
-            "global launcher singleton".into(),
-            true,
-            if global.launcher_active { "one launcher is open" } else { "ready" },
+            "launcher panel running".into(),
+            global.helper_running,
+            if global.helper_running {
+                "hidden Ghostty instance up"
+            } else {
+                "prelude global open"
+            },
         );
     } else {
         check(
-            "global Cmd+Space helper".into(),
+            "launcher panel".into(),
             true,
             "optional · install with: prelude global install",
         );

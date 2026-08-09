@@ -3,59 +3,10 @@
 pub const ZSH: &str = r#"# Prelude — zsh integration
 # Added by: prelude init zsh
 
-# The helper can only write a token; it cannot know whether a terminal really
-# appeared. This shell adds its own pid, which is the one fact about a launcher
-# that stays checkable — a window that is force-quit frees the next hotkey
-# immediately instead of leaving a lease nobody can disprove.
-_prelude_global_claim() {
-  [[ -n ${PRELUDE_GLOBAL_TOKEN:-} ]] || return 0
-  local active="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"
-  [[ -r "$active" ]] || return 0
-  local owner='' backend=''
-  { IFS= read -r owner; IFS= read -r backend } < "$active"
-  [[ "$owner" == "$PRELUDE_GLOBAL_TOKEN" ]] || return 0
-  local tmp="$active.$$"
-  if print -rl -- "$owner" "$backend" "$$" > "$tmp" 2>/dev/null; then
-    command chmod 600 "$tmp" 2>/dev/null
-    command mv -f -- "$tmp" "$active" 2>/dev/null || command rm -f -- "$tmp"
-  else
-    command rm -f -- "$tmp"
-  fi
-}
-
-_prelude_global_done() {
-  [[ -n ${PRELUDE_GLOBAL_TOKEN:-} ]] || return 0
-  local active="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"
-  local owner=''
-  [[ -r "$active" ]] && IFS= read -r owner < "$active"
-  if [[ "$owner" == "$PRELUDE_GLOBAL_TOKEN" ]]; then
-    command rm -f -- "$active"
-  fi
-  unset PRELUDE_GLOBAL_TOKEN
-}
-
-# What the last invocation left behind. Empty means nothing landed on the
-# prompt or the screen — the launcher was dismissed, or it acted on an object
-# directly and the result is in another application. Only a window created by
-# the global hotkey reads this; Ctrl+R does not care.
-_prelude_result=''
-
 _prelude_widget() {
-  # Not `status`: zsh reserves it as a read-only alias for $?, and declaring it
-  # local makes the whole widget fail before Prelude is ever run.
-  local out verb payload code
-  out="$(command prelude 2>/dev/null)"
-  code=$?
-  _prelude_result=''
-  if (( code != 0 )); then
-    # 130 is a dismissal and means exactly nothing happened. Any other failure
-    # is Prelude itself going wrong, which is worth leaving a window up for.
-    (( code == 130 )) || _prelude_result=FAILED
-    _prelude_global_done
-    zle reset-prompt
-    return 0
-  fi
-  [[ -z "$out" ]] && { _prelude_global_done; zle reset-prompt; return 0; }
+  local out verb payload
+  out="$(command prelude 2>/dev/null)" || { zle reset-prompt; return 0; }
+  [[ -z "$out" ]] && { zle reset-prompt; return 0; }
   verb="${out%%$'\t'*}"
   payload="${out#*$'\t'}"
   case "$verb" in
@@ -75,51 +26,38 @@ _prelude_widget() {
       # a silent no-op never happens.
       zle -M "prelude: $payload"
       ;;
-    *)
-      verb=''
-      ;;
   esac
-  _prelude_result="$verb"
-  _prelude_global_done
   zle reset-prompt
 }
 zle -N _prelude_widget
 
-# A terminal created by `prelude global` asks for exactly one invocation when
-# its first prompt becomes editable. Use ZLE's lifecycle rather than sending a
-# delayed Ctrl-R into a shell that may still be reading .zshrc. A widget cannot
-# safely take over the terminal *inside* line-init, so the hook queues one
-# private ZLE sequence and returns; ZLE then invokes the same _prelude_widget in
-# its normal dispatch cycle. Both the hook and private binding remove themselves
-# before opening Prelude, leaving a completely ordinary shell afterwards.
-if [[ -n ${PRELUDE_AUTOSTART:-} ]]; then
-  unset PRELUDE_AUTOSTART
-  _prelude_global_claim
+# A window opened for a command the launcher handed over. The command is not
+# on our argument list — a history entry can hold a token and `ps` is readable
+# by anything on the machine — so it waits in a private file, which this shell
+# reads once and removes. INSERT puts it on the prompt for you to agree to;
+# RUN was already agreed to in the launcher.
+if [[ -n ${PRELUDE_PRELOAD:-} ]]; then
+  unset PRELUDE_PRELOAD
+  _prelude_preload_once() {
+    add-zle-hook-widget -d line-init _prelude_preload_once
+    local file="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/preload"
+    [[ -r "$file" ]] || return 0
+    local verb='' payload=''
+    { IFS= read -r verb; IFS= read -r -d '' payload } < "$file"
+    command rm -f -- "$file"
+    payload="${payload%$'\n'}"
+    [[ -n "$payload" ]] || return 0
+    if [[ "$verb" == RUN ]]; then
+      BUFFER="$payload"
+      zle accept-line
+    else
+      LBUFFER="$payload"
+      RBUFFER=""
+    fi
+  }
   autoload -Uz add-zle-hook-widget
-  _prelude_autostart_dispatch() {
-    bindkey -r $'\e[27;99~'
-    zle _prelude_widget
-    # A window the global hotkey created exists to hand something over. When
-    # nothing was handed over there is nothing in it to read, and an empty
-    # $HOME shell left behind on every dismissed press is how a launcher turns
-    # into a window factory. INSERT, RUN, MSG and a failure all put something
-    # on screen, so those windows stay. Exiting through the line editor rather
-    # than calling `exit` inside a widget leaves the terminal as zsh found it.
-    [[ -n "$_prelude_result" ]] && return 0
-    # And it does not go through the history file. Prelude indexes shell
-    # history, so an `exit` recorded on every dismissed press would come back
-    # as a search result it had written itself.
-    setopt hist_ignore_space
-    BUFFER=' exit'
-    zle accept-line
-  }
-  zle -N _prelude_autostart_dispatch
-  bindkey $'\e[27;99~' _prelude_autostart_dispatch
-  _prelude_autostart_once() {
-    add-zle-hook-widget -d line-init _prelude_autostart_once
-    zle -U $'\e[27;99~'
-  }
-  add-zle-hook-widget line-init _prelude_autostart_once
+  zle -N _prelude_preload_once
+  add-zle-hook-widget line-init _prelude_preload_once
 fi
 
 # Ctrl-R by default: prelude is a superset of incremental history search, and
@@ -239,23 +177,35 @@ mod tests {
     use super::ZSH;
 
     #[test]
-    fn global_terminal_autostart_is_one_zle_invocation_not_a_timed_keypress() {
-        assert!(ZSH.contains("${PRELUDE_AUTOSTART:-}"));
-        assert!(ZSH.contains("add-zle-hook-widget line-init _prelude_autostart_once"));
-        assert!(ZSH.contains("add-zle-hook-widget -d line-init _prelude_autostart_once"));
-        assert!(ZSH.contains("zle -U $'\\e[27;99~'"));
-        assert!(ZSH.contains("zle _prelude_widget"));
-        assert!(ZSH.contains("bindkey -r $'\\e[27;99~'"));
-        assert!(ZSH.contains("${XDG_CACHE_HOME:-$HOME/.cache}/prelude/global-active"));
-        assert!(ZSH.contains("\"$owner\" == \"$PRELUDE_GLOBAL_TOKEN\""));
-        assert!(ZSH.contains("_prelude_global_done; zle reset-prompt; return 0"));
+    fn a_handed_over_command_arrives_by_file_and_lands_on_a_prompt() {
+        // The launcher panel is not a shell, so a command it hands over needs
+        // a window — and the command itself must not travel on that window's
+        // command line, where `ps` would show it to everything on the machine.
+        assert!(ZSH.contains("${PRELUDE_PRELOAD:-}"));
+        assert!(ZSH.contains("prelude/preload"));
+        assert!(ZSH.contains("command rm -f -- \"$file\""));
+        assert!(ZSH.contains("add-zle-hook-widget -d line-init _prelude_preload_once"));
+        // INSERT still waits for a human to press Enter; RUN was agreed to in
+        // the launcher. Both branches live inside the preload block, not in
+        // the Ctrl+R widget above it.
+        let block = &ZSH[ZSH.find("${PRELUDE_PRELOAD:-}").unwrap()..];
+        let block = &block[..block.find("\nfi\n").unwrap()];
+        assert!(block.contains("if [[ \"$verb\" == RUN ]]"));
+        assert!(block.contains("zle accept-line"));
+        assert!(block.contains("LBUFFER=\"$payload\""));
         assert!(!ZSH.contains("sleep "));
         assert!(!ZSH.contains("osascript"));
-        let remove_hook = ZSH.find("add-zle-hook-widget -d line-init").unwrap();
-        let queue = ZSH.find("zle -U $'\\e[27;99~'").unwrap();
-        let remove_binding = ZSH.find("bindkey -r $'\\e[27;99~'").unwrap();
-        let invoke = ZSH.find("zle _prelude_widget").unwrap();
-        assert!(remove_hook < queue, "the line hook must remove itself before dispatch");
-        assert!(remove_binding < invoke, "the private binding must be gone before Prelude opens");
+    }
+
+    #[test]
+    fn the_lease_and_the_autostart_hook_are_gone_with_the_terminal_they_managed() {
+        // Nothing is created on a press any more, so there is nothing to hold
+        // a lease on and no shell to bootstrap into a launcher.
+        assert!(!ZSH.contains("PRELUDE_AUTOSTART"));
+        assert!(!ZSH.contains("PRELUDE_GLOBAL_TOKEN"));
+        assert!(!ZSH.contains("global-active"));
+        // Ctrl+R is untouched, and never closes a terminal.
+        assert!(ZSH.contains("bindkey \"$PRELUDE_KEY\" _prelude_widget"));
+        assert!(!ZSH.contains("BUFFER=' exit'"));
     }
 }
