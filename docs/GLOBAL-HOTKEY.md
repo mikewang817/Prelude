@@ -6,9 +6,12 @@ configuration, lifecycle, diagnostics and removal are part of the feature.
 
 ## Product contract
 
-`Cmd+Space` creates a **new terminal window** and invokes Prelude exactly as the
-existing zsh `Ctrl+R` widget does. It never takes over, types into or guesses at
-an existing terminal.
+The configured global hotkey (`Cmd+Space` by default) creates a **new terminal
+window** and invokes Prelude exactly as the existing zsh `Ctrl+R` widget does.
+It never takes over, types into or guesses at an existing terminal. While that
+launcher is still open, another press focuses its terminal application instead
+of creating a duplicate; once Prelude returns to the shell, the next press is a
+fresh launcher.
 
 Backend selection is deterministic:
 
@@ -19,9 +22,12 @@ Backend selection is deterministic:
    an explicitly requested backend fails visibly rather than silently changing
    the user's choice.
 
-Every press creates a fresh terminal process. Commands still land on a prompt
-for review, objects still act directly, and no selected payload is ever put in
-AppleScript, process arguments, preferences or helper logs.
+A launch creates a fresh terminal process. Commands still land on a prompt for
+review, objects still act directly, and no selected payload is ever put in
+AppleScript, process arguments, preferences or helper logs. Installation and
+hotkey changes first reserve the requested chord temporarily; Spotlight,
+Raycast or any other current owner must release it before Prelude changes the
+running helper.
 
 ## Architecture
 
@@ -30,9 +36,11 @@ result handling. A separate, dependency-free AppKit helper owns only the global
 hotkey and terminal creation:
 
 ```text
-Cmd+Space -> Prelude Hotkey.app -> Ghostty.app or Terminal.app
-                                 -> PRELUDE_AUTOSTART=1 zsh -il
-                                 -> one-shot _prelude_widget
+configured key -> Prelude Hotkey.app -> singleton lease
+                                      -> Ghostty.app or Terminal.app
+                                      -> PRELUDE_AUTOSTART=1 zsh -il
+                                      -> one-shot _prelude_widget
+                                      -> release lease when Prelude returns
 ```
 
 The helper is an `LSUIElement` application with no Dock icon. It registers the
@@ -102,6 +110,32 @@ compiler; no Swift or AppKit dependency enters the latency-sensitive CLI.
 - Release Clippy passed with `--all-targets -D warnings`; `git diff --check` and
   the release build passed. Three final gather runs had medians 21.7–26.3 ms
   and an observed maximum 38.8 ms against the 40 ms budget.
+
+## Milestone — configurable, conflict-safe singleton `[>]`
+
+- [ ] The global chord is configurable with `prelude global hotkey`, stored
+      atomically beside the backend and parsed identically by installer and
+      helper.
+- [ ] Supported chords have one or more of `cmd`, `option`, `ctrl`, `shift` and
+      one `space`, letter or digit key; invalid or modifier-free values are
+      refused before configuration changes.
+- [ ] Installation and hotkey changes perform a Carbon reservation check before
+      replacing or restarting the helper. A conflict leaves the previous app,
+      config and registration running and names Spotlight/Raycast as likely
+      owners without pretending macOS reveals which app owns the chord.
+- [ ] Spotlight is checked directly when the requested chord is `Cmd+Space`;
+      Prelude never changes the system preference.
+- [ ] The helper maintains one private, token-checked launcher lease. Repeated
+      hotkeys while Prelude is open focus the effective terminal application
+      and create no second terminal.
+- [ ] The existing zsh widget releases that lease on cancel, direct object
+      action, `INSERT`, `RUN`, `MSG` or failure, without retaining the selected
+      payload or changing normal `Ctrl+R` behaviour.
+- [ ] A bounded stale lease cannot lock the launcher out permanently, and
+      status/Doctor expose whether a launcher is active.
+- [ ] Tests, both real terminal backends, repeated installation, release Clippy,
+      Swift warnings-as-errors and gather benchmark pass under the existing
+      budget.
 
 ## Implementation commits
 
