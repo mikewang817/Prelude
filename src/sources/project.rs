@@ -14,6 +14,23 @@ const MARKERS: &[&str] = &[
     "pyproject.toml", "go.mod",
 ];
 
+/// The project the launcher was opened inside, if it was opened inside one.
+///
+/// A marked directory is a project. An unmarked one is taken at its word and
+/// treated as its own project, which is right for a scratch directory of notes
+/// and wrong — expensively — for the containers that merely hold projects.
+///
+/// `$HOME` is the case that matters, because it is where the global panel
+/// stands. "The files in this project" became `fd --max-depth 6` over the
+/// whole home directory on every open: six levels into `~/Library`, which
+/// macOS protects as other applications' data. The launcher was fast enough
+/// that the first symptom was a TCC panel asking whether Ghostty should be
+/// allowed to read other apps' data — attributed to the terminal, because the
+/// terminal is what `fd` was running under, so nothing in it named Prelude.
+///
+/// `paths::is_protected` already draws this line for the Trash, and it is the
+/// same line: `$HOME`, `/`, `/Users`, `/Applications`, `/Volumes` and the
+/// system trees are places projects live, not projects.
 pub fn root() -> Option<PathBuf> {
     let cur = paths::cwd()?.canonicalize().ok()?;
     let mut dir: Option<&Path> = Some(&cur);
@@ -23,7 +40,7 @@ pub fn root() -> Option<PathBuf> {
         }
         dir = d.parent();
     }
-    Some(cur)
+    (!paths::is_protected(&cur)).then_some(cur)
 }
 
 fn read(p: &Path) -> Option<String> {

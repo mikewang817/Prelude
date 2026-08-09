@@ -33,6 +33,7 @@ mod probe;
 mod render;
 mod runhere;
 mod secrets;
+mod settings;
 mod sources;
 mod translate_build;
 mod tty;
@@ -54,12 +55,19 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match a.as_slice() {
-        [] => ui::search(None),
+        [] => ui::search(),
         // The process the quick-terminal launcher panel runs. It outlives
         // every press, so a press reveals a launcher instead of building one.
         ["_panel"] => panel::run(),
-        ["paste"] => ui::search(ui::resolve_pane(None)),
-        ["paste", pane] => ui::search(ui::resolve_pane(Some(pane))),
+        // `paste [pane]` typed the result into a tmux pane instead of
+        // returning it. Nothing types into anything now, and a command that
+        // silently became an ordinary search would be worse than one that
+        // says what happened to it.
+        ["paste", ..] => {
+            eprintln!("prelude: `paste` is gone with the tmux popup it served.");
+            eprintln!("prelude: run `prelude` and what you pick is copied.");
+            2
+        }
         ["doctor"] => doctor::run(),
         // The specialized reports. Each one is a report and nothing else;
         // `--repair` is a separate door that asks about each finding on its
@@ -123,6 +131,7 @@ fn main() -> ExitCode {
                 rest.contains(&"--json"),
             )
         }
+        ["settings", rest @ ..] => settings::dispatch(rest),
         ["skills", rest @ ..] => {
             json_dump(sources::agents::skills(), rest.contains(&"--json"))
         }
@@ -135,8 +144,7 @@ fn main() -> ExitCode {
         }
         ["clipd"] => clipd::watch(),
         ["build-translate"] => translate_build::build(),
-        ["init", "zsh"] => { print!("{}", init::ZSH); 0 }
-        ["init", "tmux"] => { print!("{}", init::TMUX); 0 }
+        ["init", "zsh"] => { print!("{}", init::zsh()); 0 }
         ["init", "agent"] => { print!("{}", init::AGENT); 0 }
         ["translate", lang, rest @ ..] if !rest.is_empty() => {
             match compute::translate(&rest.join(" "), lang) {
@@ -199,7 +207,7 @@ fn main() -> ExitCode {
         // checked.
         ["_actions", line] => match render::parse_line(line) {
             Some(i) => {
-                for (id, label, sub) in actions::actions_for(&i) {
+                for (id, label, sub) in actions::actions_for(&i, defaults::surface()) {
                     println!("{id:<18} {label}{}", if sub.is_empty() { String::new() } else { format!("   [{sub}]") });
                 }
                 0
@@ -245,18 +253,14 @@ fn main() -> ExitCode {
             }
             0
         }
+        // Where a handed-over row will land — a prompt or the clipboard — is
+        // inherited from whoever started the launcher, so this helper needs
+        // no argument to say the right thing.
         ["_footer", rest @ ..] => {
-            let agent = rest.contains(&"--agent");
-            let host = if agent { defaults::Host::Agent } else { defaults::Host::Shell };
-            // Which agent, when the pane could say — `search` resolved it
-            // once and passed it down, exactly as it does the column widths.
-            if let Some(i) = rest.iter().position(|a| *a == "--agent") {
-                defaults::set_host_agent(rest.get(i + 1).map(|s| s.to_string()));
-            }
             let item = rest.first().and_then(|l| render::parse_line(l));
             let primary = item
                 .as_ref()
-                .map(|i| defaults::describe(i, host))
+                .map(|i| defaults::describe(i, defaults::surface()))
                 .unwrap_or("Select")
                 .to_string();
             println!("{}", ui::footer_for(&primary));
@@ -311,23 +315,28 @@ const HELP: &str = "\
 prelude — a launcher for terminals, and a message bus for the agents in them
 
 HUMANS
-  prelude                search (what the Ctrl-R widget calls)
-  prelude paste [pane]   type the result into a tmux pane instead
+  prelude                search · Ctrl-R puts the result on your prompt,
+                         the global panel puts it on the clipboard
   prelude reply          answer the oldest question an agent is blocked on
   prelude fleet          every agent running on this machine, and its state
-  prelude fleet --status one short line for a tmux status bar
+  prelude fleet --status one short line for a status bar
   prelude watch          notify the moment an agent stops and waits for you
   prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
   prelude global install|uninstall|start|stop|status|open|clear
   prelude global hotkey [CHORD]
-  prelude global backend [auto|ghostty|terminal]
-                         configurable global key; Ghostty first, Terminal fallback
+                         configurable global key; the panel is a hidden
+                         Ghostty quick terminal
+  prelude settings [--json]
+                         Prelude's own preferences and their values
+  prelude settings add-root PATH | remove-root PATH | roots
+  prelude settings set key|height|preview|classic_enter VALUE
   prelude doctor agents|sessions|skills|mcp
                          what is wrong with the agent side of the machine
                          --json for fields · --repair asks about each finding
 
   Inside search:  : lists scopes · a: agents · s: sessions · f: files
-                  c: clipboard · h: history · g TERM searches Google
+                  c: clipboard · h: history · set: settings
+                  g TERM searches Google
 
 AGENTS  (run these from inside a conversation; see `prelude init agent`)
   prelude ask   TEXT     ask the human a question and wait for the answer
@@ -335,7 +344,7 @@ AGENTS  (run these from inside a conversation; see `prelude init agent`)
                          --timeout=N seconds (default 600) · --no-wait
   prelude tell  TEXT     tell the human something, without waiting
   prelude say   WHO TEXT send a line to another running agent
-                         WHO is a project, an agent name, or a pane address
+                         WHO is a project, an agent name, or a pid
   prelude inbox [--json] messages left for you · --all includes handled ones
                          --human shows questions waiting on a person instead
   prelude drain          mark your inbox collected
@@ -348,7 +357,7 @@ AGENTS  (run these from inside a conversation; see `prelude init agent`)
   prelude skills   [--json]   every skill and who has it, as data
 
 SETUP
-  prelude init zsh|tmux|agent   shell, tmux, and the block for CLAUDE.md
+  prelude init zsh|agent shell integration, and the block for CLAUDE.md
   prelude index          build the file index for f:name
   prelude doctor         diagnose the setup
   prelude bench          measure candidate-gathering
@@ -754,34 +763,30 @@ mod tests {
 
     #[test]
     fn enter_defaults_split_commands_from_objects() {
-        use crate::defaults::{on_enter, on_secondary, Default_, Host};
+        use crate::defaults::{on_enter, on_secondary, Default_, Surface};
         use crate::item::{Item, Kind::*};
-        // Commands are never acted on, in either host.
+        // Commands are never acted on.
         for k in [History, Script, Path, Snippet, Port, Proc, Sys] {
-            let it = Item::new("x", k);
-            for h in [Host::Shell, Host::Agent] {
-                assert_eq!(on_enter(&it, h), Default_::Insert, "{k:?} in {h:?}");
-            }
+            assert_eq!(on_enter(&Item::new("x", k)), Default_::Insert, "{k:?}");
         }
-        // Files, folders and apps act at a shell but hand over text to an agent.
+        // Files, folders and apps act.
         for k in [File, Dir, App] {
-            let it = Item::new("x", k);
-            assert!(matches!(on_enter(&it, Host::Shell), Default_::Act(_)), "{k:?}");
-            assert!(matches!(on_enter(&it, Host::Agent), Default_::InsertText(_)), "{k:?}");
+            assert!(matches!(on_enter(&Item::new("x", k)), Default_::Act(_)), "{k:?}");
         }
-        // URLs are external objects in both hosts. ^K still offers their text.
+        // A URL is an external object; ^K still offers its text.
         let link = Item::new("https://example.com", Link).put("url", "https://example.com");
-        for h in [Host::Shell, Host::Agent] {
-            assert_eq!(on_enter(&link, h), Default_::Act(crate::defaults::Verb::OpenUrl));
-            assert_eq!(on_secondary(&link, h), Some(Default_::InsertText(crate::defaults::Text::Name)));
-        }
+        assert_eq!(on_enter(&link), Default_::Act(crate::defaults::Verb::OpenUrl));
+        assert_eq!(
+            on_secondary(&link, Surface::Prompt),
+            Some(Default_::InsertText(crate::defaults::Text::Name))
+        );
         // The secondary sits directly under Enter's own entry in the ^K
         // panel, so it must differ from it rather than repeat it — two rows
         // saying the same thing is worse than one.
         for k in [History, Script, File, App, Calc, Clip, Session] {
             let it = Item::new("x", k);
-            let p = on_enter(&it, Host::Shell);
-            if let Some(s) = on_secondary(&it, Host::Shell) {
+            let p = on_enter(&it);
+            if let Some(s) = on_secondary(&it, Surface::Prompt) {
                 assert_ne!(p, s, "{k:?} primary and secondary are the same");
             }
         }
@@ -888,14 +893,14 @@ mod tests {
     /// not the action the user just declined by opening the panel.
     #[test]
     fn the_panel_contains_alternatives_not_the_default_again() {
-        use crate::defaults::{describe, describe_secondary, Host};
+        use crate::defaults::{describe, describe_secondary, Surface};
         use crate::item::{Item, Kind};
         let it = Item::new("/tmp/x.txt", Kind::File).title("x.txt").put("path", "/tmp/x.txt");
-        let acts = crate::actions::actions_for(&it);
+        let acts = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt);
         assert!(!acts.iter().any(|(id, ..)| *id == "default"));
-        assert!(!acts.iter().any(|(_, label, ..)| label == describe(&it, Host::Shell)));
+        assert!(!acts.iter().any(|(_, label, ..)| label == describe(&it, Surface::Prompt)));
         assert_eq!(acts[0].0, "secondary");
-        assert_eq!(acts[0].1, describe_secondary(&it, Host::Shell).unwrap());
+        assert_eq!(acts[0].1, describe_secondary(&it, Surface::Prompt).unwrap());
         assert_eq!(acts[0].2, "");
     }
 
@@ -905,7 +910,7 @@ mod tests {
     fn common_objects_have_intentional_action_menus() {
         use crate::item::{Item, Kind};
         let ids = |it: &Item| -> Vec<String> {
-            crate::actions::actions_for(it).iter().map(|(id, ..)| id.to_string()).collect()
+            crate::actions::actions_for(it, crate::defaults::Surface::Prompt).iter().map(|(id, ..)| id.to_string()).collect()
         };
 
         let file = Item::new("/tmp/readme.md", Kind::File).put("path", "/tmp/readme.md");
@@ -947,7 +952,7 @@ mod tests {
     fn stable_agent_objects_can_be_favourited_without_changing_native_data() {
         use crate::item::{Item, Kind};
         let ids = |item: &Item| -> Vec<String> {
-            crate::actions::actions_for(item).iter().map(|(id, ..)| id.to_string()).collect()
+            crate::actions::actions_for(item, crate::defaults::Surface::Prompt).iter().map(|(id, ..)| id.to_string()).collect()
         };
         for item in [
             Item::new("claude", Kind::Agent).put("agent", "claude"),
@@ -959,29 +964,33 @@ mod tests {
         }
     }
 
-    /// A popup over an agent is a conversation, not a shell prompt. Never
-    /// offer a command there that would be pasted as prose and submitted.
+    /// A skill's two bare forms are both offered, named, rather than one of
+    /// them being chosen for you.
+    ///
+    /// Prelude used to pick: it asked tmux which agent was running in the pane
+    /// underneath the popup, gave that agent `/name`, and gave everyone else
+    /// the instruction to read the skill's file. The guess is unavailable now,
+    /// and the failure it was avoiding is still real — `/name` at an agent
+    /// that does not have the skill is a line of prose that does nothing, and
+    /// does nothing *silently* — so both rows are present and say which is
+    /// which.
     #[test]
-    fn agent_host_gets_conversation_safe_actions() {
-        use crate::defaults::Host;
+    fn a_skill_offers_both_of_its_handover_forms() {
         use crate::item::{Item, Kind};
-        let ids = |it: &Item| -> Vec<String> {
-            crate::actions::actions_for_host(it, Host::Agent)
-                .iter().map(|(id, ..)| id.to_string()).collect()
-        };
-
-        let agent = Item::new("claude", Kind::Agent).put("agent", "claude");
-        let ai = ids(&agent);
-        assert!(!ai.iter().any(|id| id.starts_with("resume:") || id.starts_with("askagent:")), "{ai:?}");
-
         let skill = Item::new("/review", Kind::Skill)
-            .put("name", "review").put("agent", "claude").put("missing", "codex");
-        let si = ids(&skill);
-        assert!(!si.iter().any(|id| id.starts_with("run:") || id.starts_with("lend:")), "{si:?}");
-
-        let mcp = Item::new("claude mcp get tools", Kind::Mcp)
-            .put("name", "tools").put("agent", "claude");
-        assert!(ids(&mcp).contains(&"mcptools".to_string()));
+            .put("name", "review")
+            .put("agent", "claude")
+            .put("file", "/tmp/skills/review/SKILL.md")
+            .put("missing", "codex");
+        let acts = crate::actions::actions_for(&skill, crate::defaults::Surface::Prompt);
+        let ids: Vec<&str> = acts.iter().map(|(i, ..)| *i).collect();
+        assert!(ids.contains(&"skillcmd"), "{ids:?}");
+        assert!(ids.contains(&"skillfile"), "{ids:?}");
+        // And they are two different things to hand over, not one thing
+        // twice: the file form is an instruction, not a bare path.
+        let file = crate::defaults::text_for(&skill, crate::defaults::Text::SkillFile);
+        assert!(file.starts_with("Read ") && file.ends_with(" and follow it."), "{file}");
+        assert_ne!(file, skill.cmd);
     }
 
     /// What the ^K panel actually offers, without standing up an fzf to
@@ -993,7 +1002,7 @@ mod tests {
             .title("node_repl")
             .put("agent", "codex")
             .put("name", "node_repl");
-        let ids: Vec<&str> = crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+        let ids: Vec<&str> = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
         // Never back to the agent that already has it.
         assert!(!ids.contains(&"lend:codex"), "{ids:?}");
         // pi and opencode have no way to take one, so they are not offered
@@ -1036,22 +1045,16 @@ mod tests {
     /// still gets handed over.
     #[test]
     fn commands_are_handed_over_and_objects_just_happen() {
-        use crate::defaults::{on_enter, Default_, Host, Verb};
+        use crate::defaults::{on_enter, Default_, Verb};
         use crate::item::{Item, Kind::*};
         // Anything that denotes a command line, including an agent.
         for k in [Agent, History, Script, Snippet, Port, Proc, Clip] {
-            assert_eq!(on_enter(&Item::new("x", k), Host::Shell), Default_::Insert, "{k:?}");
+            assert_eq!(on_enter(&Item::new("x", k)), Default_::Insert, "{k:?}");
         }
         // Objects, where there is no command worth reading.
         for k in [File, Find, Config, Dir] {
-            assert_eq!(on_enter(&Item::new("x", k), Host::Shell), Default_::Act(Verb::Open), "{k:?}");
+            assert_eq!(on_enter(&Item::new("x", k)), Default_::Act(Verb::Open), "{k:?}");
         }
-        // Mid-conversation there is no prompt to paste onto, so "start it"
-        // can only mean a window beside the one you are in.
-        assert_eq!(
-            on_enter(&Item::new("pi", Agent), Host::Agent),
-            Default_::Act(Verb::SplitPane)
-        );
     }
 
     /// Resuming with a borrowed capability exists only where the Agent has a
@@ -1069,7 +1072,7 @@ mod tests {
                 .put("session_id", format!("{agent}:abc"))
         };
         let ids = |agent: &str| -> Vec<String> {
-            crate::actions::actions_for(&session(agent))
+            crate::actions::actions_for(&session(agent), crate::defaults::Surface::Prompt)
                 .iter().map(|(id, ..)| id.to_string()).collect()
         };
         // claude can take both; codex has no skill flag; pi has no MCP flag;
@@ -1084,12 +1087,12 @@ mod tests {
         assert!(!ids("opencode").contains(&"session-mcp".to_string()));
         // Never against a live Run: that is the competing resume the whole
         // active-Session rule exists to stop.
-        let active: Vec<String> = crate::actions::actions_for(&session("claude").put("active_run", "claude:7:1"))
+        let active: Vec<String> = crate::actions::actions_for(&session("claude").put("active_run", "claude:7:1"), crate::defaults::Surface::Prompt)
             .iter().map(|(id, ..)| id.to_string()).collect();
         assert!(!active.contains(&"session-skill".to_string()), "{active:?}");
         assert!(!active.contains(&"session-mcp".to_string()), "{active:?}");
         // The readable export sits beside the authoritative raw one.
-        let with_file: Vec<String> = crate::actions::actions_for(&session("claude").put("file", "/tmp/abc.jsonl"))
+        let with_file: Vec<String> = crate::actions::actions_for(&session("claude").put("file", "/tmp/abc.jsonl"), crate::defaults::Surface::Prompt)
             .iter().map(|(id, ..)| id.to_string()).collect();
         assert!(with_file.contains(&"session-export".to_string()));
         assert!(with_file.contains(&"session-export-md".to_string()));
@@ -1102,7 +1105,7 @@ mod tests {
     fn open_all_copies_appears_only_where_there_is_more_than_one() {
         use crate::item::{Item, Kind};
         let ids = |it: &Item| -> Vec<String> {
-            crate::actions::actions_for(it).iter().map(|(id, ..)| id.to_string()).collect()
+            crate::actions::actions_for(it, crate::defaults::Surface::Prompt).iter().map(|(id, ..)| id.to_string()).collect()
         };
         let one = Item::new("/demo", Kind::Skill)
             .title("demo")
@@ -1145,8 +1148,8 @@ mod tests {
     }
 
     /// The one signal that makes a fleet usable: an agent that is working
-    /// prints — tokens, tool output, a spinner — so tmux's activity clock
-    /// keeps moving. Silence is what a question looks like from outside the
+    /// appends to its conversation file as it goes, and writes nothing at all
+    /// while it waits. Silence is what a question looks like from outside the
     /// process, and those are the runs holding you up, so they sort first.
     #[test]
     fn a_quiet_agent_is_one_that_is_waiting_for_you() {
@@ -1156,7 +1159,7 @@ mod tests {
         assert!(matches!(classify(false, 29, None), State::Working));
         assert!(matches!(classify(false, 30, None), State::Waiting));
         assert!(matches!(classify(false, 9000, None), State::Waiting));
-        // A dead pane is not waiting for anything, whatever its clock says.
+        // A dead process is not waiting for anything, whatever its clock says.
         assert!(matches!(classify(true, 9000, None), State::Dead));
 
         // The false positive this exists to kill: a run three minutes into a
@@ -1210,27 +1213,28 @@ mod tests {
     fn a_message_is_never_delivered_to_a_guess() {
         use crate::bus::resolve;
         use crate::item::{Item, Kind};
-        let mk = |agent: &str, project: &str, addr: &str, pane: &str| {
-            Item::new("x", Kind::Run)
+        let mk = |agent: &str, project: &str, pid: &str| {
+            Item::new(format!("kill {pid}"), Kind::Run)
                 .put("agent", agent)
                 .put("project", project)
-                .put("addr", addr)
-                .put("pane", pane)
+                .put("addr", format!("pid {pid}"))
+                .put("pid", pid)
                 .put("cwd", format!("/Users/x/{project}"))
         };
         let runs = vec![
-            mk("claude", "api-gateway", "work:2.1", "%4"),
-            mk("claude", "api-gateway-tests", "work:2.2", "%5"),
-            mk("codex", "docs", "fleet:0.1", "%6"),
+            mk("claude", "api-gateway", "21"),
+            mk("claude", "api-gateway-tests", "22"),
+            mk("codex", "docs", "31"),
         ];
         // An exact project name wins outright, even though it is also a
         // prefix of another project's.
         let hit = resolve(&runs, "api-gateway");
         assert_eq!(hit.len(), 1, "exact match must not widen: {:?}", hit.len());
-        assert_eq!(hit[0].get("addr"), "work:2.1");
-        // Addressable the ways an agent might plausibly try.
-        assert_eq!(resolve(&runs, "work:2.2").len(), 1);
-        assert_eq!(resolve(&runs, "%6").len(), 1);
+        assert_eq!(hit[0].get("pid"), "21");
+        // Addressable the ways an agent might plausibly try. A tmux pane id
+        // used to be one of them and is not an address any more.
+        assert_eq!(resolve(&runs, "pid 22").len(), 1);
+        assert_eq!(resolve(&runs, "31").len(), 1);
         assert_eq!(resolve(&runs, "docs")[0].get("agent"), "codex");
         // Two claudes and a bare agent name: caller must be told, not guessed
         // at. `say` refuses on anything but exactly one hit.
@@ -1240,23 +1244,72 @@ mod tests {
         assert!(resolve(&runs, "nothing-like-this").is_empty());
     }
 
-    /// A question is answered, gone to, or left alone — never run. It arrives
-    /// as an English sentence, and "Run in the shell below" on a sentence is
-    /// the launcher offering to execute prose.
+    /// Where a handed-over command lands is the difference between "insert"
+    /// and "run", and the panel has nowhere to land it but the clipboard —
+    /// where the two are the same bytes. So neither the secondary nor the
+    /// generic tail may offer running as an alternative there: it would be
+    /// Enter again under a bolder name, on rows whose command lines are the
+    /// ones most worth reading first.
+    ///
+    /// Both routes are checked because they are separate code paths that
+    /// arrive at the same duplicate — suppressing one and not the other is
+    /// how it came back the first time.
+    #[test]
+    fn copying_leaves_no_row_that_claims_to_run_it() {
+        use crate::defaults::{on_secondary, Default_, Surface, Verb};
+        use crate::item::{Item, Kind};
+        for k in [Kind::History, Kind::Script, Kind::Snippet, Kind::Agent] {
+            let it = Item::new("deploy --prod", k).put("agent", "claude");
+            assert_eq!(
+                on_secondary(&it, Surface::Prompt),
+                Some(Default_::Act(Verb::RunInShell)),
+                "{k:?} at a prompt: running it is the real opposite of inserting it"
+            );
+            assert_eq!(on_secondary(&it, Surface::Clipboard), None, "{k:?} secondary");
+            let ids: Vec<&str> = crate::actions::actions_for(&it, Surface::Clipboard)
+                .iter()
+                .map(|(i, ..)| *i)
+                .collect();
+            assert!(!ids.contains(&"run"), "{k:?} generic tail: {ids:?}");
+            assert!(!ids.contains(&"secondary"), "{k:?} panel: {ids:?}");
+        }
+        // …and the same rows are there at a prompt, where they mean something.
+        let it = Item::new("deploy --prod", Kind::History);
+        let ids: Vec<&str> = crate::actions::actions_for(&it, Surface::Prompt)
+            .iter()
+            .map(|(i, ..)| *i)
+            .collect();
+        assert!(ids.contains(&"secondary"), "{ids:?}");
+    }
+
+    /// Every label states whether it acts or hands you text, so the ones that
+    /// hand you text have to change wording with the surface — "Insert into
+    /// prompt" is a lie about a panel that copies.
+    #[test]
+    fn a_label_says_where_the_text_actually_goes() {
+        use crate::defaults::{describe, Surface};
+        use crate::item::{Item, Kind};
+        let it = Item::new("claude", Kind::Agent).put("agent", "claude");
+        assert_eq!(describe(&it, Surface::Prompt), "Insert into prompt");
+        assert_eq!(describe(&it, Surface::Clipboard), "Copy the command");
+        // Acting is the same sentence in both: a file opens either way.
+        let f = Item::new("/tmp/x.txt", Kind::File).put("path", "/tmp/x.txt");
+        assert_eq!(describe(&f, Surface::Prompt), describe(&f, Surface::Clipboard));
+    }
+
+    /// A question is answered or left alone — never run. It arrives as an
+    /// English sentence, and "Run in the shell below" on a sentence is the
+    /// launcher offering to execute prose.
     #[test]
     fn a_question_offers_answers_and_never_execution() {
-        use crate::defaults::{describe, Host};
+        use crate::defaults::{describe, Surface};
         use crate::item::{Item, Kind};
         let it = Item::new("Proceed with the migration?", Kind::Msg)
             .title("claude · api asks")
             .put("id", "123-4")
-            .put("agent", "claude")
-            .put("pane", "%4");
-        assert_eq!(describe(&it, Host::Shell), "Answer it");
-        // The same wherever you are standing: there is one thing to do with
-        // a question, and the host does not change it.
-        assert_eq!(describe(&it, Host::Agent), "Answer it");
-        let acts = crate::actions::actions_for(&it);
+            .put("agent", "claude");
+        assert_eq!(describe(&it, Surface::Prompt), "Answer it");
+        let acts = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt);
         let ids: Vec<&str> = acts.iter().map(|(i, ..)| *i).collect();
         assert!(!ids.contains(&"run"), "{ids:?}");
         assert!(!ids.contains(&"runhere"), "{ids:?}");
@@ -1323,7 +1376,7 @@ mod tests {
         };
         for it in every_kind_row() {
             let ids: Vec<String> =
-                crate::actions::actions_for(&it).iter().map(|(i, ..)| i.to_string()).collect();
+                crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| i.to_string()).collect();
             let first = ids.iter().position(|i| destructive(it.kind, i));
             if let Some(first) = first {
                 assert!(
@@ -1348,7 +1401,7 @@ mod tests {
         let previewable = [Kind::History, Kind::Script, Kind::Path, Kind::Snippet, Kind::Sys, Kind::Git];
         for it in every_kind_row() {
             let ids: Vec<&str> =
-                crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+                crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
             assert_eq!(
                 ids.contains(&"runhere"),
                 previewable.contains(&it.kind),
@@ -1359,7 +1412,7 @@ mod tests {
         // Results, prose and capability rows are never treated as commands.
         for k in [Kind::Calc, Kind::Translate, Kind::Skill, Kind::Msg, Kind::Clip] {
             let it = every_kind_row().into_iter().find(|i| i.kind == k).unwrap();
-            let ids: Vec<&str> = crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+            let ids: Vec<&str> = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
             assert!(!ids.contains(&"run") && !ids.contains(&"runhere"), "{k:?}: {ids:?}");
         }
     }
@@ -1376,7 +1429,7 @@ mod tests {
         use crate::item::Kind;
         for it in every_kind_row() {
             let ids: Vec<&str> =
-                crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+                crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
             if matches!(it.kind, Kind::Port | Kind::Proc) {
                 assert!(
                     !ids.contains(&"runhere"),
@@ -1467,13 +1520,78 @@ mod tests {
         assert!(!is_protected(&tmp) || tmp.starts_with("/var"), "{}", tmp.display());
     }
 
+    /// A directory that merely *holds* projects is not one, and `$HOME` is the
+    /// case that bites: it is where the global panel stands.
+    ///
+    /// `root()` used to fall back to the current directory whenever no marker
+    /// was found above it, so "the files in this project" became `fd
+    /// --max-depth 6` over the whole home directory on every open — six levels
+    /// into `~/Library`, which macOS protects as other applications' data. It
+    /// surfaced as a TCC panel asking whether *Ghostty* should be allowed to
+    /// read other apps' data, because `fd` was running under the terminal and
+    /// the terminal is who gets asked. Nothing in that dialog said Prelude.
+    ///
+    /// The unmarked fallback itself is deliberate and stays: a scratch folder
+    /// of notes is its own project. It is the containers that are excluded.
+    #[test]
+    fn a_directory_that_holds_projects_is_not_one() {
+        use crate::paths::is_protected;
+        use std::path::PathBuf;
+        // `project::root`'s fallback is `(!is_protected(cur)).then_some(cur)`,
+        // so these are exactly the directories it will refuse to walk.
+        for holder in [
+            crate::paths::home(),
+            PathBuf::from("/"),
+            PathBuf::from("/Users"),
+            PathBuf::from("/Applications"),
+            PathBuf::from("/Volumes"),
+            PathBuf::from("/Library"),
+        ] {
+            assert!(is_protected(&holder), "{} must not be walked as a project", holder.display());
+        }
+        // …and an ordinary directory somebody works in still is one. Not the
+        // temp directory, which canonicalizes under `/private/var` and is
+        // therefore protected on the older rule as well.
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert!(!is_protected(&here), "{} is somebody's work", here.display());
+        let nested = here.join("src/sources");
+        assert!(!is_protected(&nested), "{} is somebody's work", nested.display());
+    }
+
+    /// A setting must state its value, and `^K` must not repeat Enter.
+    ///
+    /// Both are the panel's standing rules, and settings are where they are
+    /// easiest to break: every one of these rows has an obvious primary, so
+    /// listing it again is the natural mistake. Enter's own action is already
+    /// the panel's non-selectable header.
+    #[test]
+    fn a_setting_states_its_value_and_the_panel_never_repeats_enter() {
+        use crate::defaults::{describe, Surface};
+        for it in crate::settings::items() {
+            let enter = describe(&it, Surface::Prompt);
+            assert_ne!(enter, "Change it", "{} has no specific label: {enter}", it.title);
+            let acts = crate::actions::actions_for(&it, Surface::Prompt);
+            assert!(
+                !acts.iter().any(|(_, label, ..)| label == enter),
+                "{} lists Enter ({enter}) again: {:?}",
+                it.title,
+                acts.iter().map(|(_, l, ..)| l).collect::<Vec<_>>()
+            );
+            assert!(
+                !acts.iter().any(|(id, ..)| *id == "secondary"),
+                "{} got a generic secondary row",
+                it.title
+            );
+        }
+    }
+
     /// High-value management actions stay reachable after pruning the panel;
     /// a shorter menu must not make files, apps, or MCP servers dead ends.
     #[test]
     fn important_management_actions_remain_reachable() {
         use crate::item::{Item, Kind};
         let ids = |it: &Item| -> Vec<String> {
-            crate::actions::actions_for(it).iter().map(|(i, ..)| i.to_string()).collect()
+            crate::actions::actions_for(it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| i.to_string()).collect()
         };
         // Ordinary files can be removed recoverably.
         let f = Item::new("/tmp/x.txt", Kind::File).put("path", "/tmp/x.txt");
@@ -1493,7 +1611,7 @@ mod tests {
             .put("health", "needsauth");
         let mi = ids(&m);
         assert_eq!(
-            crate::defaults::describe(&m, crate::defaults::Host::Shell),
+            crate::defaults::describe(&m, crate::defaults::Surface::Prompt),
             "Show what it exposes",
             "inspection is the MCP default, not another action row"
         );
@@ -1588,7 +1706,7 @@ mod tests {
         // Two copies is a choice, so the panel carries one row and the agent
         // is picked after — seven rows of `Copy it to <agent>` and
         // `Delete <agent>'s copy` were three verbs and a parameter.
-        let ids: Vec<&str> = crate::actions::actions_for(&it).iter().map(|(i, ..)| *i).collect();
+        let ids: Vec<&str> = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
         assert!(ids.contains(&"menu:rm"), "{ids:?}");
         assert!(!ids.iter().any(|i| i.starts_with("rm:")), "not enumerated: {ids:?}");
         // …and every copy is still reachable through it.
@@ -1606,13 +1724,13 @@ mod tests {
             .title("demo")
             .put("name", "demo")
             .put("copies", r#"[["claude","/x/.claude/skills/demo"]]"#);
-        let ids: Vec<&str> = crate::actions::actions_for(&solo).iter().map(|(i, ..)| *i).collect();
+        let ids: Vec<&str> = crate::actions::actions_for(&solo, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
         assert!(ids.contains(&"rm:claude"), "{ids:?}");
         assert!(!ids.contains(&"menu:rm"), "{ids:?}");
 
         // A row with no copies recorded offers no delete at all.
         let bare = Item::new("/demo", Kind::Skill).title("demo");
-        let ids: Vec<&str> = crate::actions::actions_for(&bare).iter().map(|(i, ..)| *i).collect();
+        let ids: Vec<&str> = crate::actions::actions_for(&bare, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
         assert!(!ids.iter().any(|i| i.starts_with("rm:") || i.starts_with("menu:rm")), "{ids:?}");
     }
 
@@ -1761,24 +1879,19 @@ mod tests {
             .put("cwd", "/tmp/project")
             .put("requested_session", "abc")
             .put("state", "working")
-            .put("addr", "work:1.1")
-            .put("pane", "%1");
+            .put("addr", "pid 10");
         let mut runs = vec![explicit];
         attach_sessions(&mut runs, std::slice::from_ref(&session));
         assert_eq!(runs[0].get("session_id"), "claude:abc");
         assert_eq!(runs[0].get("session_match"), "explicit");
 
+        // A live run owns this conversation, so Enter must not start a
+        // competing resume of it. It hands over the project instead — which
+        // is now the only honest answer, there being no terminal to go to.
         let sessions = annotate_sessions(vec![session.clone()], &runs);
         assert_eq!(sessions[0].get("active_run"), "claude:10:1");
-        assert_eq!(sessions[0].get("pane"), "%1");
         assert_eq!(
-            crate::defaults::on_enter(&sessions[0], crate::defaults::Host::Shell),
-            crate::defaults::Default_::Act(crate::defaults::Verb::JumpTo),
-        );
-        let mut active_without_pane = sessions[0].clone();
-        active_without_pane.data.remove("pane");
-        assert_eq!(
-            crate::defaults::on_enter(&active_without_pane, crate::defaults::Host::Shell),
+            crate::defaults::on_enter(&sessions[0]),
             crate::defaults::Default_::Act(crate::defaults::Verb::CdThere),
         );
 
@@ -1864,13 +1977,13 @@ mod tests {
             .put("session_id", "claude:abc")
             .put("cwd", "/tmp/project")
             .put("file", "/tmp/abc.jsonl");
-        let inactive_ids: Vec<_> = crate::actions::actions_for(&inactive)
+        let inactive_ids: Vec<_> = crate::actions::actions_for(&inactive, crate::defaults::Surface::Prompt)
             .into_iter().map(|(id, ..)| id).collect();
         assert!(inactive_ids.contains(&"session-archive"));
         assert!(inactive_ids.contains(&"session-trash"));
 
         let active = inactive.clone().put("active_run", "claude:7:1");
-        let active_ids: Vec<_> = crate::actions::actions_for(&active)
+        let active_ids: Vec<_> = crate::actions::actions_for(&active, crate::defaults::Surface::Prompt)
             .into_iter().map(|(id, ..)| id).collect();
         assert!(!active_ids.contains(&"session-archive"));
         assert!(!active_ids.contains(&"session-trash"));

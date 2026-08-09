@@ -66,7 +66,7 @@ row whose displayed text does not contain `c:`.
 | `r:` | running agents, classified live |
 | `s:` | all conversation sessions |
 | `skill:` | all installed Skills; `/` remains the invocation accelerator |
-| `f:` | current-project files and the indexed roots |
+| `f:` | current-project files and the indexed roots; `set:` decides which roots |
 | `c:` | text, Finder files and images, strictly newest first |
 | `h:` | shell history |
 | `app:` | applications |
@@ -80,6 +80,7 @@ row whose displayed text does not contain `c:`.
 | `docker:` | running containers |
 | `mcp:` | MCP servers |
 | `cfg:` | agent configuration |
+| `set:` | Prelude's own settings, each with its current value |
 
 The bare prefix is useful: `c:` lists recent clipboard entries and `f:` lists
 files. `:` produces searchable scope commands; Enter on one fills its prefix
@@ -140,7 +141,7 @@ list that visibly collapses is a question you can see went wrong, while a
 filter that quietly matches everything looks exactly like one that worked.
 
 Every one of these filters runs against the one cached snapshot the launcher
-already wrote. No Agent CLI, no tmux, no directory walk, no relationship join
+already wrote. No Agent CLI, no directory walk, no relationship join
 — `scoped_rows` is called from the per-keystroke helper.
 
 Session filters are explicit words inside that scope:

@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 131 tests
+cargo test                 # 141 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -21,6 +21,17 @@ cargo clippy --release     # expected warning-free
 `_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
+
+`PRELUDE_TO_CLIPBOARD=1` in front of any of them renders the panel's surface
+rather than the prompt's, which is how the two label sets and the two action
+lists are compared without pressing the chord:
+
+```sh
+LINE=$(prelude _dump | head -1)
+prelude _footer "$LINE"                        # Insert into prompt
+PRELUDE_TO_CLIPBOARD=1 prelude _footer "$LINE" # Copy the command
+PRELUDE_TO_CLIPBOARD=1 prelude _actions "$LINE"
+```
 
 The agent-facing verbs (`ask --no-wait`, `tell`, `say`, `inbox`, `answer`,
 `answer-of`, `fleet --json`) are the same kind of door and are the fastest
@@ -67,23 +78,48 @@ answers a toggle, so the panel appears to open every other press;
 `RunAtLoad` starting the instance *is* the start, and racing it with an
 explicit launch is how that happens.
 
-**The launcher is not the destination.** A panel is no place to leave a command
-on a prompt, so `panel.rs` delivers. The frontmost application decides, and it
-is still answerable at the moment it is asked because the panel never takes
-frontmost status — `lsappinfo` answers it without linking AppKit. A terminal
-in front and a tmux pane to address means the command goes there, and the panel
-stands down because nothing else took focus. Anywhere else it gets one window,
-created on purpose, which takes focus itself and lets autohide dismiss the
-panel for free. Objects — files, folders, URLs, applications — still go
-straight to Launch Services and need no terminal at all.
+**`cargo build` does not change the running panel.** The loop was started at
+login and executes whatever the binary held then. Each press *does* spawn the
+new binary as its child — so fzf, the rows and the footer all update, and it
+looks like the build took — but the delivery decision is made by the parent,
+which is still old. That failure mode reads as "the change did nothing", and
+it lies in the most convincing possible way. Run `prelude global stop && prelude
+global start` after any build you intend to press the key against. There is no
+process to see afterwards: `initial-window = false` means the instance sits
+there with no surface until the first press creates one.
 
-A handed-over command never reaches a command line. A history entry can hold a
-token and `ps` is readable by anything on the machine, so the payload waits in
-a 0600 file the new shell reads and removes, and the argument list carries only
-`PRELUDE_PRELOAD=1`.
+**The launcher is not the destination, and it never builds one.** A command
+picked from the panel goes on the **clipboard**, and the panel stands down.
+Objects — files, folders, URLs, applications — still go straight to Launch
+Services and need no terminal at all.
+
+Everything that used to sit between those two sentences is gone, and it is
+worth knowing what, because each piece looked reasonable on its own.
+`panel.rs` read the frontmost application through `lsappinfo` and either typed
+the command into the tmux pane you were looking at or built a window to leave
+it in; a window meant a login shell, which meant the command could not travel
+on its argument list (a history entry can hold a token and `ps` is readable by
+anything on the machine), which meant a 0600 preload file and a zle hook in
+`prelude init zsh` to read it. Four mechanisms, all in service of a launcher
+guessing which prompt you meant — and it guessed wrong in both directions: the
+window arrived in a configured directory rather than the one you were working
+in, and the pane was whichever one tmux considered current, which on a machine
+with old sessions lying around is one nobody has looked at for days. A command
+delivered out of sight is indistinguishable from a launcher that did nothing.
+
+`^V` is not a worse answer than either. It is the only one that does not
+require Prelude to know something it cannot know.
+
+Two consequences to keep. The panel must **close** after copying — nothing
+else took focus, so autohide has nothing to react to and the panel would sit
+on top of whatever you meant to paste into; `run()` returns and Ghostty tears
+down the surface, which the next press rebuilds. And `INSERT` and `RUN`
+**collapse** here: the difference between them is whether a shell presses
+Enter for you, and the clipboard cannot, so anything whose only alternative
+was "and run it" must not offer that row.
 
 This binds the global launcher to Ghostty; no other macOS terminal has a quick
-terminal. `backend` now chooses only where a handed-over command opens.
+terminal.
 
 ## Agent Control Plane work
 
@@ -105,6 +141,41 @@ criteria and progress evidence in the same commit, and never call a milestone
 complete while it still has unchecked criteria. A conversation summary is not
 a substitute for updating that file.
 
+## Prelude's own settings
+
+`settings.rs` is the one place that answers "what is this preference set to".
+Every value shown in the launcher, printed by `prelude settings`, and obeyed at
+runtime comes through it, so a row and the behaviour cannot disagree.
+
+Six settings own a file each and are written by the code that owns that file —
+`roots.txt`, `global.toml`, `open.toml`, `snippets.toml`, `quicklinks.toml`,
+`favorites.txt`. Do not write any of them from here; a chord goes through
+`global::set_hotkey` so it gets the same validation, conflict check and panel
+restart the CLI performs. The four that had only an environment variable get
+`settings.toml`, and **the variable still wins** — a variable is a
+per-invocation instruction and a file is a standing one, so the narrower has to
+be able to override the broader. `toggle` says so when it is writing a file the
+environment is already overriding, because a setting that visibly does nothing
+is worse than one that refuses.
+
+The value goes **on the row**. A setting you cannot see the value of is one you
+change by trial, and most of these were previously invisible in exactly that
+way. `^K` holds the mutations and never repeats Enter — a test walks every
+setting and asserts it, because each of these rows has an obvious primary and
+listing it twice is the natural mistake.
+
+`prelude settings add-root` and its neighbours exist so the guards can be
+exercised without standing up fzf, which is the same reason `_dump` and the
+agent verbs exist. **Adding a root goes through `paths::is_protected`.** That
+is not tidiness: indexing `~` is seven levels of `fd` through `~/Library`,
+which macOS protects as other applications' data, and the dialog that results
+names the terminal rather than Prelude.
+
+Nothing here may read the file index to draw a row. Its size is recorded beside
+it when it is built; an index from an older build has no record, so the first
+reader counts it once and writes the number down rather than re-reading a
+megabyte on every gather.
+
 ## The rules that matter
 
 **Latency is the product.** fzf re-invokes the binary on *every keystroke*
@@ -120,6 +191,18 @@ run on threads and are waited for together, so the floor is the slowest one
 and the local work underneath it is free. That is the only shape worth
 optimising for: shaving a source that is not the slowest changes nothing,
 and the profile has to be re-read after every win because the floor moves.
+
+**One rule, two surfaces.** `defaults::Surface` is `Prompt` (the zsh widget)
+or `Clipboard` (the panel). It changes no behaviour — Enter does the same
+thing in both — only what may honestly be *said*: "Insert into prompt" is a
+lie about a panel that copies, so the labels switch, and the rows whose only
+content was "and submit it" disappear where nothing can submit. It is read
+from `PRELUDE_TO_CLIPBOARD` at each entry point rather than threaded down from
+one, because fzf's footer and preview helpers are separate processes and
+inherit the environment for free — but every rule below `surface()` takes it
+as a parameter, so the decisions stay testable without a process to read it
+out of. Do not reintroduce an env read inside a rule; a test that has to set a
+variable is a test that races every other test in the binary.
 
 **Two action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a mode.**
 Raycast has a third action — the secondary on its own key — and Prelude keeps
@@ -151,22 +234,24 @@ to the prompt or history. `openwith.rs` remembers file overrides per
 extension and `^K` is where they are made — that panel is the settings
 surface, not a second list of shortcuts.
 
-In a conversation the rule cannot hold, because there is no prompt to paste
-onto: whatever is handed over lands in a *conversation*. A path and a
-command still read as things to say to an agent, but an agent row does not —
-typing `codex` at claude sends claude the word "codex". There, Enter splits
-the pane instead — same window, same directory, so both conversations stay
-visible, which is the only reason to start a second one. `-h` above 170
-columns and `-v` below, since two agent TUIs at sixty columns each wrap
-their own output. tmux is guaranteed on that path, because the popup is how
-`Host::Agent` is reached at all.
+**Commands are handed over, objects act.** Inserting a file path when you
+wanted to read the file is a step backwards; opening a file is harmless in a
+way that `kill $(lsof -ti tcp:3000)` is not. This does not vary by surface —
+a file opens from the panel exactly as it does from the prompt, because
+Launch Services is the destination either way. `^K` still offers the text.
 
-**Commands insert, objects act.** Inserting a file path when you wanted to
-read the file is a step backwards; opening a file is harmless in a way that
-`kill $(lsof -ti tcp:3000)` is not. The default also depends on the host:
-the same file or folder means "open it" at a shell and "here is the path" in
-an agent's input box. URLs are deliberately consistent across hosts: Enter
-opens the browser, while `^K` offers `Insert URL` for a conversation.
+**A container is not a project, and `$HOME` is the one that bites.**
+`project::root` walks up for a marker and, finding none, used to take the
+current directory at its word. The global panel stands in `$HOME`, so "the
+files in this project" became `fd --max-depth 6` over the entire home
+directory on every open — six levels into `~/Library`, which macOS protects as
+other applications' data. The symptom named neither Prelude nor the source: a
+TCC panel saying *"Ghostty would like to access data from other apps"*, because
+`fd` ran under the terminal and the terminal is who gets asked. The unmarked
+fallback is deliberate and stays — a scratch folder of notes is its own
+project — but it goes through `paths::is_protected`, which already draws this
+line for the Trash and draws it in the same place. Anything that walks a
+directory the person did not choose belongs behind that check.
 
 **Sources degrade to nothing.** A source that fails, or finds nothing,
 returns an empty list. Never blocks, never panics, never prints. Anything
@@ -333,18 +418,23 @@ budget of forty, and nothing said so.
 
 ## Agents
 
-**Running is not the same as recorded, and tmux is not the requirement.**
+**Running is not the same as recorded, and no terminal is the requirement.**
 `sessions.rs` reads conversation files; `running.rs` reads the machine. The
 backbone is the process list — an agent in a terminal tab is no less running
-than one in a pane, and a fleet view that sees half the fleet is worse than
-none. tmux only adds an *address*, and with it the two things a bare pid
-cannot do: jump there, and type into it.
+than one anywhere else, and a fleet view that sees half the fleet is worse
+than none.
 
-The state signal is silence, and it has two clocks. A pane's
-`#{window_activity}` moves when the TUI redraws; an agent's session file gets
-appended to as it works and not at all while it waits. The second needs no
-terminal, which is why it is the one that generalises — and it is why
-`sessions.rs` records each session's `file`.
+It once asked tmux as well, which bought an *address* for the subset of runs
+that had a pane, and with it the two things a bare pid cannot do: jump there,
+and type into it. Both are gone. Every run now answers the same questions, and
+a view that is sharper about some of its rows than others is harder to read
+than one that treats them alike.
+
+The state signal is silence, and there is one clock: an agent's session file
+gets appended to as it works and not at all while it waits. It needs no
+terminal, which is why it is the one that survived — and it is why
+`sessions.rs` records each session's `file`. (A pane's `#{window_activity}`
+was the second, consulted alongside it where there was one.)
 
 But silence alone lies, in the expensive direction: an agent three minutes
 into a build is as quiet as one asking a question, and a badge that cries
@@ -356,8 +446,7 @@ the last 64KB: one tool result holding a large file can be tens of kilobytes
 on its own, so a small window would miss the last complete line.
 
 Cost splits the work in two, and the split is the design. *Finding* the fleet
-is ~95ms (`ps` with full command lines, one bulk `lsof` for directories,
-tmux) and is cached. Deciding what each run is *doing* is a `stat` and a
+(`ps` with full command lines, one bulk `lsof` for directories) is cached. Deciding what each run is *doing* is a `stat` and a
 `kill(pid, 0)` per row — syscalls, not subprocesses — so it runs live on
 every gather. A cached state is a state that was true a minute ago, which for
 this view is worse than none.
@@ -369,11 +458,10 @@ views over it. Run ids are `agent:pid:started`, Session ids are
 is exact. Cwd-latest is allowed only when one run of that agent exists in the
 directory; with two, mark it `ambiguous` rather than attaching both to the
 same conversation. Never retain the full process command or prompt while
-extracting the hint — either can hold credentials. An active Session jumps to
-its pane, or hands over its project when no pane exists, instead of starting a
-competing resume. `gather` writes the derived `sessions-linked` snapshot only
-when its bytes change; `s:` filters that file. Never repeat the join or call
-tmux in the per-keystroke helper.
+extracting the hint — either can hold credentials. An active Session hands over
+its project instead of starting a competing resume. `gather` writes the
+derived `sessions-linked` snapshot only when its bytes change; `s:` filters
+that file. Never repeat the join in the per-keystroke helper.
 
 **Session metadata is an overlay, never the conversation authority.** Local
 names, pins and archive state live in the 0600 XDG data file
@@ -409,12 +497,10 @@ same-project Run refuses the move. Never broaden this to an arbitrary path
 carried by a Session-shaped Item. Metadata is deliberately retained after trash so a file
 restored from Finder recovers its name and pin.
 
-Four traps, each already paid for. A pane reports the pid of its *root*
-process, so an agent started by typing `claude` at that pane's shell is a
-child; matching pids alone finds none of them and lists every one twice.
-`finish` dedupes on `(kind, cmd)`, so a run's `cmd` must differ per run or
-two agents in the same project collapse into one row — precisely the case
-this source exists for. Batch runs (`claude -p`, `codex exec`) keep no
+Three traps, each already paid for. `finish` dedupes on `(kind, cmd)`, so a
+run's `cmd` must differ per run or two agents in the same project collapse
+into one row — precisely the case this source exists for; `kill <pid>` is
+what makes it unique now that no address does. Batch runs (`claude -p`, `codex exec`) keep no
 conversation file, so silence says nothing about them; they are never
 reported as stuck. Finally, `etime` has day, hour and minute forms; parse all
 of them before deriving a stable start time.
@@ -428,11 +514,16 @@ the bus lets it say so itself. Four verbs an agent runs from its own shell —
 agent), `inbox` — plus `--json` on every listing so an agent reads fields
 rather than a table.
 
-**Identity is discovered, never declared.** `$TMUX_PANE` is a reply address
-every pane exports for free, `$PWD` is the project, and the enclosing agent
-comes from climbing the process tree — an agent's tool call runs `sh -c`, so
-the agent is a grandparent, not a parent. That is why the interface is four
-words with no configuration.
+**Identity is discovered, never declared.** `$PWD` is the project, and the
+enclosing agent comes from climbing the process tree — an agent's tool call
+runs `sh -c`, so the agent is a grandparent, not a parent. That is why the
+interface is four words with no configuration.
+
+There used to be a third signal, `$TMUX_PANE`, and it was the only one that
+could carry a message *to* an agent rather than merely label one it came from,
+because a pane can be typed into. So `$PWD` is now the whole of an inbox
+address, and two agents in one directory share one — which is exactly why
+`say` refusing an ambiguous target matters more than it used to.
 
 Four things are pinned by tests, each already a bug. `Kind::Msg` sits at 1010
 because a question explicitly waiting on a person must lead the 1000-point
@@ -444,15 +535,17 @@ reads as the human's own words. The flag split stops at the first non-flag
 word, so a question containing `--no-verify` keeps it. And a question is
 never `run` — it is an English sentence.
 
-Delivery to a pane *does* press Enter, unlike everything else in this
-codebase, because the sender is another agent and there is nobody to press it
-for them. The line is attributed (`[via prelude, from …]`) so the receiver
-does not read a peer's message as its owner's.
+Delivery is always to the inbox, and `bus::leave` is the one door — `prelude
+say` and the launcher's "Leave it a message…" both go through it, so the two
+cannot disagree about what a message is. The sender is named where the inbox
+is rendered rather than baked into the stored text, so the record keeps what
+was written and the receiver still cannot read a peer's message as its
+owner's.
 
 The fleet is also reachable without the launcher, through `fleet.rs`:
 `prelude fleet` (the list as text, re-finding identities inline because an
 explicit call wants the truth now), `prelude fleet --status` (one line for a
-tmux status bar — cached identities only, it runs every few seconds), and
+status bar — cached identities only, it runs every few seconds), and
 `prelude watch` (a daemon that posts a notification on the working→waiting
 edge). The two decisions that matter — what the status line says, and when
 a notification fires — are pure functions pinned by tests: the bar is empty
@@ -530,13 +623,15 @@ launcher has closed. Borrowing writes only inside Prelude's own cache: the
 claude plugin shim symlinks the owner's skill rather than copying it, so
 editing the original is enough.
 
-Mid-conversation there is a third route that needs no flag at all: hand the
-agent the skill's own file. `pane_current_command` says which agent a pane
-runs (a Claude Code pane reports `claude`, not `node`), so a skill row gives
-its owner `/name` and everyone else `Read <path> and follow it.` — the two
-swap between Enter and the secondary. The host agent is ambient
-(`defaults::host_agent`) and travels to the per-keystroke footer helper on
-its argv, like the column widths; it is never asked for per keystroke.
+There is a third route that needs no flag at all: hand the agent the skill's
+own file. A skill row therefore carries both bare forms in `^K` —
+`Insert the slash command` (`/name`) and `Point an agent at its file`
+(`Read <path> and follow it.`) — named, rather than one of them chosen for
+you. Prelude used to choose, by asking `pane_current_command` which agent the
+pane under the popup was running and handing its owner `/name` and everyone
+else the file. Nothing can answer that now; the failure it avoided is still
+real, because `/name` at an agent that lacks the skill is prose that does
+nothing, and does nothing *silently*.
 
 Two traps are pinned by tests. `--mcp-config` is *variadic*, so written with
 a space it swallows a prompt typed after it as another config file — always

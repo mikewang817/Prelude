@@ -5,21 +5,21 @@
 //! only question that matters once there are eighty of them — which ones have
 //! stopped and are waiting for you.
 //!
-//! **The backbone is the process list, not tmux.** An agent in a terminal tab
-//! is no less running than one in a pane, and a fleet view that sees half the
-//! fleet is worse than none. tmux is an enhancement: a run that has a pane
-//! also gains an address you can jump to and type into.
+//! **The backbone is the process list.** An agent in a terminal tab is no less
+//! running than one anywhere else, and a fleet view that sees half the fleet
+//! is worse than none. This once asked tmux as well, which added an address
+//! for the subset of runs that had a pane — something to jump to and type
+//! into. Every one of those two abilities has gone, and with them the reason
+//! to treat one terminal's runs as richer than another's.
 //!
-//! The signal for "is it stuck" is silence, and every agent emits it twice
-//! over. A pane's `#{window_activity}` moves whenever the TUI redraws. And
-//! every agent appends to its session file as it works — a tool call, a
-//! message — while writing nothing at all as it waits for you. The second
-//! clock needs no terminal of any kind, which is why it is the one that
-//! generalises.
+//! The signal for "is it stuck" is silence, and an agent appends to its
+//! session file as it works — a tool call, a message — while writing nothing
+//! at all as it waits for you. That clock needs no terminal of any kind,
+//! which is why it is the one that survived.
 //!
-//! Cost splits the work in two. *Finding* the fleet is ~95ms — `ps` with full
-//! command lines, one bulk `lsof` for their directories, tmux — and lives in
-//! the cache tier. Deciding what each one is *doing* is then a `stat` and a
+//! Cost splits the work in two. *Finding* the fleet is `ps` with full command
+//! lines plus one bulk `lsof` for their directories, and lives in the cache
+//! tier. Deciding what each one is *doing* is then a `stat` and a
 //! `kill(pid, 0)` per row: syscalls, not subprocesses. So that half runs live
 //! on every gather, and the state you read is the state now rather than the
 //! state when the cache was written.
@@ -251,8 +251,8 @@ fn is_agent(cmd: &str) -> Option<&'static str> {
 /// Subcommands that are tooling rather than a conversation.
 ///
 /// Every agent binary is also its own admin CLI, and those invocations are
-/// not runs: nobody is talking to `claude mcp list`, it has no session and no
-/// pane worth jumping to, and it exits in under a second.
+/// not runs: nobody is talking to `claude mcp list`, it has no session, and it
+/// exits in under a second.
 ///
 /// This is not hypothetical — Prelude asks each agent for its MCP status on
 /// every refresh, so without this filter the launcher listed *its own probes*
@@ -638,25 +638,6 @@ fn mtime_of(path: &str) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-/// (pane id, pid of the process rooted in it, address, last activity).
-///
-/// One subprocess for every pane on the machine — the fields are asked for by
-/// name, so a hundred panes cost what one does.
-fn panes() -> Vec<(String, String, String, u64)> {
-    const F: &str = "#{pane_id}\u{1f}#{pane_pid}\u{1f}#{window_activity}\u{1f}\
-                     #{session_name}:#{window_index}.#{pane_index}";
-    let out = crate::exec::run(&["tmux", "list-panes", "-a", "-F", F], Duration::from_secs(2));
-    out.lines()
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\u{1f}').collect();
-            if f.len() < 4 {
-                return None;
-            }
-            Some((f[0].into(), f[1].into(), f[3].into(), f[2].parse().unwrap_or(0)))
-        })
-        .collect()
-}
-
 struct Found {
     pid: String,
     ppid: String,
@@ -673,9 +654,9 @@ struct Found {
 
 /// Find the fleet. Expensive, and therefore cached.
 ///
-/// Records identity only — which agent, which pid, which directory, which
-/// pane if any, and an explicit resume id when the process supplied one.
-/// Nothing here says what a run is
+/// Records identity only — which agent, which pid, which directory, and an
+/// explicit resume id when the process supplied one. Nothing here says what a
+/// run is
 /// *doing*: that is decided live, because a state read out of a cache is a
 /// state that was true some minutes ago.
 pub fn fleet() -> Vec<Item> {
@@ -722,20 +703,13 @@ pub fn fleet() -> Vec<Item> {
         return Vec::new();
     }
     let cwds = cwd_of_agents();
-    // A pane reports the pid of its *root* process — the shell you typed
-    // `claude` into — while ps reports claude itself. So a run is matched to
-    // a pane by its own pid or its parent's; matching pids alone finds none
-    // of the agents anybody actually starts.
-    let panes = panes();
 
     found
         .into_iter()
         .map(|found| {
             let Found { pid, ppid, agent, etime, started, batch, requested, skills, mcp } = found;
+            let _ = &ppid;
             let cwd = cwds.get(&pid).cloned().unwrap_or_default();
-            let pane = panes
-                .iter()
-                .find(|(_, root, ..)| *root == pid || *root == ppid);
             let run_id = format!("{agent}:{pid}:{started}");
             let mut it = Item::new(format!("kill {pid}"), Kind::Run)
                 .title(agent)
@@ -748,9 +722,6 @@ pub fn fleet() -> Vec<Item> {
                 .put("etime", etime);
             if batch {
                 it = it.put("batch", "1");
-            }
-            if let Some((pane_id, _, addr, _)) = pane {
-                it = it.put("pane", pane_id).put("addr", addr);
             }
             if let Some(id) = requested {
                 it = it.put("requested_session", id);
@@ -887,16 +858,15 @@ pub fn annotate_sessions(mut sessions: Vec<Item>, runs: &[Item]) -> Vec<Item> {
             session.data.insert("active_pid".into(), run.get("pid").into());
             session.data.insert("active_state".into(), run.get("state").into());
             session.data.insert("active_addr".into(), run.get("addr").into());
-            session.data.insert("pane".into(), run.get("pane").into());
         }
     }
     sessions
 }
 
 /// Relationship-only view for per-keystroke Session search. It reads cached
-/// identities, checks pids with syscalls and attaches Sessions, but never asks
-/// tmux or starts a subprocess. State may be absent; ownership and pane are
-/// still current enough to prevent a duplicate resume.
+/// identities, checks pids with syscalls and attaches Sessions, but never
+/// starts a subprocess. State may be absent; ownership is still current enough
+/// to prevent a duplicate resume.
 pub fn linked_identities(sessions: &[Item]) -> Vec<Item> {
     let mut runs: Vec<Item> = crate::cache::read_cached("fleet")
         .into_iter()
@@ -907,8 +877,8 @@ pub fn linked_identities(sessions: &[Item]) -> Vec<Item> {
 }
 
 /// Fresh identities for a destructive decision. This deliberately pays for
-/// `ps`, lsof and tmux again: a launcher row may have been open long enough
-/// for a Session to start after its snapshot was built.
+/// `ps` and lsof again: a launcher row may have been open long enough for a
+/// Session to start after its snapshot was built.
 pub fn fresh_identities_with_sessions(sessions: &[Item]) -> Vec<Item> {
     let mut runs = fleet();
     attach_sessions(&mut runs, sessions);
@@ -927,10 +897,8 @@ pub fn live() -> Vec<Item> {
 /// The same live view for a caller that already parsed the session cache.
 pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
     let now = now();
-    // Which runs still exist is a `kill(pid, 0)` each and settles the common
-    // case — nothing running — before tmux is asked anything. `list-panes` is
-    // a subprocess, and spawning one to decorate an empty list is the whole
-    // cost of this source on a machine with no agents on it.
+    // Which runs still exist is a `kill(pid, 0)` each, and it settles the
+    // common case — nothing running — before anything else is read.
     let mut runs: Vec<Item> = crate::cache::read_cached("fleet")
         .into_iter()
         .filter(|it| alive(it.get("pid")))
@@ -939,22 +907,19 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
         return Vec::new();
     }
     attach_sessions(&mut runs, sessions);
-    let panes = panes();
     // Runs in one project share a branch, and a project is usually where
     // several of them are. Two file reads is cheap; twenty is still worth not
     // doing.
     let mut branches: HashMap<String, Option<Head>> = HashMap::new();
     runs.into_iter()
         .map(|mut it| {
-            // Two clocks, one meaning. The pane's is the more direct when
-            // there is one; the session file is the one that exists
-            // everywhere. Whichever moved last is what this run last did.
-            let by_pane = panes
-                .iter()
-                .find(|(id, ..)| id == it.get("pane"))
-                .map(|(.., act)| *act);
-            let by_file = mtime_of(it.get("session"));
-            let last = by_pane.into_iter().chain(by_file).max();
+            // One clock: the session file, which every agent appends to as it
+            // works and leaves alone while it waits. A pane's redraw time used
+            // to be consulted alongside it and was the more direct answer for
+            // the runs that had one — but only for those, and a fleet view
+            // that is sharper about some of its rows than others is harder to
+            // read than one that treats them alike.
+            let last = mtime_of(it.get("session"));
             let silent = last.map(|t| now.saturating_sub(t)).unwrap_or(0);
             // A batch run writes to a pipe and keeps no conversation file, so
             // silence tells you nothing about it, and neither does a run with
@@ -989,17 +954,14 @@ pub fn live_with_sessions(sessions: &[Item]) -> Vec<Item> {
                 "" => crate::paths::tilde(&cwd),
                 p => p.to_string(),
             };
-            let addr = match it.get("addr") {
-                "" => format!("pid {}", it.get("pid")),
-                a => a.to_string(),
-            };
+            let addr = format!("pid {}", it.get("pid"));
             let subject = it.get("subject").to_string();
             it.fields = vec![project.clone(), state.label(silent), addr.clone(), subject];
-            it.cmd = if it.get("pane").is_empty() {
-                format!("kill {}", it.get("pid"))
-            } else {
-                format!("tmux switch-client -t {addr}")
-            };
+            // `finish` dedupes on (kind, cmd), so this must differ per run or
+            // two agents in the same project collapse into one row — which is
+            // precisely the case this source exists for. The pid is what makes
+            // it unique now that no address does.
+            it.cmd = format!("kill {}", it.get("pid"));
             it.data.insert("project".into(), project);
             it.data.insert("addr".into(), addr);
             it.data.insert("state".into(), state.key().into());
@@ -1544,7 +1506,7 @@ mod tests {
         let scratch = Scratch::new("context");
         scratch.write("repo/.git/HEAD", "ref: refs/heads/main\n");
 
-        let run = Item::new("tmux switch-client -t work:1.0", Kind::Run)
+        let run = Item::new("kill 77", Kind::Run)
             .title("claude")
             .put("agent", "claude")
             .put("run_id", "claude:77:1000")
@@ -1555,7 +1517,7 @@ mod tests {
             .put("session_id", "claude:abc")
             .put("session_match", "explicit")
             .put("subject", "milestone five")
-            .fields(["repo", "waiting 4m", "work:1.0", "milestone five"]);
+            .fields(["repo", "waiting 4m", "pid 77", "milestone five"]);
 
         let context = effective_context(&run);
         let value = |label: &str| {

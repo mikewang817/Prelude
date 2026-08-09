@@ -736,28 +736,19 @@ fn run_rows(runs: &[crate::item::Item]) -> Vec<Row> {
 
 /// Inbox records addressed to something that no longer exists.
 ///
-/// A message left for an agent is collected by pane or by working directory,
-/// so losing both leaves a record nothing can ever pick up. Reported and never
-/// swept here: an uncollected instruction is exactly the thing that must not
-/// disappear because a diagnostic tidied up.
+/// A message left for an agent is collected by working directory, so a
+/// directory that has gone leaves a record nothing can ever pick up. Reported
+/// and never swept here: an uncollected instruction is exactly the thing that
+/// must not disappear because a diagnostic tidied up.
 fn inbox_rows() -> Vec<Row> {
     let mut rows = Vec::new();
-    let panes = live_panes();
     let messages = crate::bus::all();
     let mut inbox_row = Row::new("inbox", format!("{} messages on the bus", messages.len()));
-    if panes.is_none() {
-        inbox_row.note("tmux is not installed, so whether a recipient pane still exists cannot be asked");
-    }
     let stranded: Vec<&crate::bus::Msg> = messages
         .iter()
         .filter(|m| m.to != "human" && m.answer.is_none())
         .filter(|m| {
-            undeliverable(
-                &m.to_pane,
-                &m.to_cwd,
-                panes.as_deref(),
-                !m.to_cwd.is_empty() && Path::new(&m.to_cwd).is_dir(),
-            )
+            undeliverable(&m.to_cwd, !m.to_cwd.is_empty() && Path::new(&m.to_cwd).is_dir())
         })
         .collect();
     if !stranded.is_empty() {
@@ -765,7 +756,7 @@ fn inbox_rows() -> Vec<Row> {
             inbox_row.issue(
                 "inbox-unreachable",
                 format!(
-                    "{} for `{}` has neither a live pane nor an existing project, so nobody can collect it",
+                    "{} for `{}` names a project that is not there, so nobody can collect it",
                     m.id, m.to
                 ),
             );
@@ -779,35 +770,15 @@ fn inbox_rows() -> Vec<Row> {
     rows
 }
 
-/// Pane ids tmux currently knows about, or `None` when tmux cannot be asked.
-///
-/// The difference matters. An empty list means every pane really is gone; a
-/// missing tmux means the question has no answer here, and a report that
-/// treated those the same would declare every pending message stranded on a
-/// machine that simply does not use tmux.
-fn live_panes() -> Option<Vec<String>> {
-    which("tmux")?;
-    let out = crate::exec::run(
-        &["tmux", "list-panes", "-a", "-F", "#{pane_id}"],
-        Duration::from_secs(5),
-    );
-    Some(out.lines().map(|l| l.trim().to_string()).filter(|l| l.starts_with('%')).collect())
-}
-
 /// Can this message still reach anybody?
 ///
-/// Both addresses have to be gone. A pane that has closed is normal — the
-/// agent's project is still there and `prelude inbox` finds the message by cwd
-/// — and a project that has moved is normal while the pane is still open.
-/// Only losing both leaves a record nothing can collect.
-fn undeliverable(pane: &str, cwd: &str, panes: Option<&[String]>, cwd_exists: bool) -> bool {
-    let pane_gone = match (pane.is_empty(), panes) {
-        (true, _) => true,
-        (false, Some(live)) => !live.iter().any(|p| p == pane),
-        // tmux could not be asked, so nothing is claimed about the pane.
-        (false, None) => false,
-    };
-    pane_gone && (cwd.is_empty() || !cwd_exists)
+/// The working directory is the whole of the address, so this is the whole of
+/// the question. There used to be a second address, a tmux pane, and a message
+/// counted as stranded only when both were gone — a closed pane was normal
+/// while the project was still there, and a moved project was normal while the
+/// pane was open.
+fn undeliverable(cwd: &str, cwd_exists: bool) -> bool {
+    cwd.is_empty() || !cwd_exists
 }
 
 fn agents_report() -> Report {
@@ -1497,14 +1468,13 @@ pub fn run() -> i32 {
     check("fzf installed".into(), fzf.is_some(),
           &fzf.map(|p| p.to_string_lossy().into_owned()).unwrap_or("brew install fzf".into()));
     check("zoxide (folder ranking)".into(), which("zoxide").is_some(), "optional");
-    check("tmux (popup rendering)".into(), which("tmux").is_some(), "optional");
 
     let global = crate::global::status();
     if global.app_installed || global.launch_agent_installed {
         check(
             "launcher panel installed".into(),
             global.app_installed && global.launch_agent_installed,
-            &format!("backend {}", global.selected_backend),
+            "ghostty quick terminal",
         );
         check(
             "launcher panel instance".into(),
@@ -1579,10 +1549,18 @@ pub fn run() -> i32 {
     let ql = crate::compute::quicklinks();
     println!("    {GREEN}✓{RESET} links    {DIM}{}{RESET}",
              ql.keys().filter(|k| !k.is_empty()).cloned().collect::<Vec<_>>().join(" "));
-    match std::fs::read_to_string(crate::compute::fileindex_path()) {
-        Ok(t) => println!("    {GREEN}✓{RESET} f:name   {DIM}{} files indexed · prelude index to refresh{RESET}",
-                          t.lines().count()),
-        Err(_) => println!("    {YELLOW}✗{RESET} f:name   {DIM}no index — run:  prelude index{RESET}"),
+    // The roots decide what `f:` can find, and an index built before they
+    // last changed answers from a set nothing on screen describes. Silence
+    // there is the failure worth naming here.
+    let roots = crate::settings::root_rows().len();
+    match crate::settings::index_count() {
+        Some(n) if crate::settings::index_stale() => println!(
+            "    {YELLOW}✗{RESET} f:name   {DIM}{n} files from {roots} roots · roots changed — run:  prelude index{RESET}"
+        ),
+        Some(n) => println!(
+            "    {GREEN}✓{RESET} f:name   {DIM}{n} files from {roots} roots · set: to change them{RESET}"
+        ),
+        None => println!("    {YELLOW}✗{RESET} f:name   {DIM}no index — run:  prelude index{RESET}"),
     }
 
     println!("\n  {CYAN}translation{RESET} {DIM}(Apple, on-device){RESET}");
@@ -2060,19 +2038,14 @@ mod tests {
     }
 
     #[test]
-    fn a_message_is_only_stranded_when_both_addresses_are_gone() {
-        let panes = vec!["%1".to_string()];
-        // Pane still open: reachable, whatever happened to the directory.
-        assert!(!undeliverable("%1", "/gone", Some(&panes), false));
-        // Project still there: reachable by cwd.
-        assert!(!undeliverable("%9", "/here", Some(&panes), true));
-        // Both gone.
-        assert!(undeliverable("%9", "/gone", Some(&panes), false));
-        // No address was ever recorded, so nobody can ever collect it.
-        assert!(undeliverable("", "", Some(&panes), false));
-        // tmux cannot be asked, so nothing is claimed about the pane.
-        assert!(!undeliverable("%9", "/gone", None, false));
-        assert!(undeliverable("", "/gone", None, false));
+    fn a_message_is_stranded_when_its_project_is_gone() {
+        // The working directory is the whole of the address, so it is the
+        // whole of the question. A second address — a tmux pane — used to
+        // keep a message reachable after its project moved, and vice versa.
+        assert!(!undeliverable("/here", true));
+        assert!(undeliverable("/gone", false));
+        // Nothing was ever recorded, so nobody can ever collect it.
+        assert!(undeliverable("", false));
     }
 
     /// Batch runs keep no conversation file, so silence about a Session says

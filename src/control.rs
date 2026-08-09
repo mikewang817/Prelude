@@ -50,8 +50,6 @@ pub struct RunRecord {
     pub cwd: String,
     pub project: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pane: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -194,7 +192,6 @@ impl Snapshot {
                     state: run.get("state").to_string(),
                     cwd: run.get("cwd").to_string(),
                     project: run.get("project").to_string(),
-                    pane: some(run.get("pane")),
                     address: some(run.get("addr")),
                     session: some(run.get("session_id")),
                     session_match: some(run.get("session_match")),

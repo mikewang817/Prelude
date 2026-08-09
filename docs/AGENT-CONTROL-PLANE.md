@@ -81,7 +81,7 @@ Rules for every Control Plane change:
 ### Latency
 
 - Gather median and maximum must remain below the 40 ms product budget.
-- No Agent CLI, tmux query, directory hash or relationship join runs per keystroke.
+- No Agent CLI, directory hash or relationship join runs per keystroke.
 - Process liveness and mtimes may be updated through syscalls on the live path.
 - Session inventory, Skill hashes, MCP health/tools and relationship snapshots use caches.
 

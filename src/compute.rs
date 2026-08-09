@@ -778,6 +778,7 @@ pub enum Scope {
     Skills,
     Mcp,
     Config,
+    Settings,
 }
 
 struct ScopeDef {
@@ -806,6 +807,9 @@ const SCOPES: &[ScopeDef] = &[
     ScopeDef { scope: Scope::Containers, prefix: "docker:", title: "Containers", desc: "running Docker containers" },
     ScopeDef { scope: Scope::Mcp, prefix: "mcp:", title: "MCP Servers", desc: "all agent integrations" },
     ScopeDef { scope: Scope::Config, prefix: "cfg:", title: "Agent Config", desc: "settings and instruction files" },
+    // Prelude's own, as opposed to the four agents' above it. It was the only
+    // thing in this list the launcher could not reach.
+    ScopeDef { scope: Scope::Settings, prefix: "set:", title: "Prelude Settings", desc: "search roots, hotkey, keys and rules" },
 ];
 
 fn scope_item(d: &ScopeDef) -> Item {
@@ -1217,6 +1221,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         Scope::Skills => kind == Skill,
         Scope::Mcp => kind == Mcp,
         Scope::Config => kind == Config,
+        Scope::Settings => kind == Setting,
         Scope::Agent | Scope::Running | Scope::Sessions | Scope::Files => false,
     };
     static_items.iter()
@@ -1317,6 +1322,9 @@ pub fn build_fileindex() -> usize {
         lines.extend(out.lines().map(str::to_string));
     }
     let _ = crate::cache::write_atomic(&fileindex_path(), lines.join("\n").as_bytes());
+    // Recorded so the settings row can state the size without reading a
+    // megabyte of paths on every gather.
+    crate::settings::record_index_count(lines.len());
     lines.len()
 }
 

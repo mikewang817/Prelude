@@ -14,6 +14,8 @@ pub enum Kind {
     Run,
     Session,
     Config,
+    /// One of Prelude's own preferences, carrying its current value.
+    Setting,
     /// A search provider or scoped search waiting for its argument.
     Search,
     Translate,
@@ -68,6 +70,11 @@ impl Kind {
             Mcp => 985,
             Session => 980,
             Config => 975,
+            // Below the agent cluster and above the search commands: these
+            // are never what you opened the launcher for, and `set:` is the
+            // only place they appear — `root_items` does not admit the kind,
+            // so the band decides nothing but their order among themselves.
+            Setting => 440,
             Search => 430,
             Translate => 420,
             Calc => 400,
@@ -102,6 +109,7 @@ impl Kind {
             Run => (GREEN, "running"),
             Session => (MAGENTA, "session"),
             Config => (YELLOW, "config"),
+            Setting => (YELLOW, "setting"),
             Search => (CYAN, "search"),
             Translate => (CYAN, "translate"),
             Calc => (YELLOW, "="),
@@ -129,7 +137,7 @@ impl Kind {
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
-            Msg, Agent, Run, Session, Config, Search, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
+            Msg, Agent, Run, Session, Config, Setting, Search, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
             Clip, Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }

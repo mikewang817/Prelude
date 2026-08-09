@@ -7,165 +7,35 @@
 //! never needed a terminal at all.
 //!
 //! Here the surface is a Ghostty quick terminal: a panel that is revealed
-//! rather than created, hosting this loop, which outlives every press. A press
-//! costs the panel animation. Nothing is constructed and nothing is destroyed,
-//! so there is no launch to fail and no teardown to strand.
+//! rather than created. A press costs the panel animation.
 //!
-//! That only works because the launcher stops being the destination. A panel
-//! is no place to leave a command sitting on a prompt, so an answer is
-//! delivered: to the terminal you were already in when you pressed the key, or
-//! to one window created on purpose for it. Which of the two is decided by the
-//! application that was frontmost — the panel never takes that status, so the
-//! question is still answerable at the moment it is asked.
+//! **The panel never opens a terminal, and never types into one.** It used to
+//! do both — reading the frontmost application to decide whether to deliver
+//! into the tmux pane you were looking at or to build a window for the
+//! occasion. Both were the same mistake in two costumes: a launcher deciding,
+//! from the outside, which prompt you meant. The window it built was the wrong
+//! directory as often as not, and the pane it typed into was whichever one
+//! tmux happened to consider current.
+//!
+//! So a command goes on the clipboard, and the panel stands down. Where it
+//! lands is then the one question a launcher has no business answering, asked
+//! of the only thing that knows: you, with ⌘V, in the window you were already
+//! in. Objects never came this way at all — a file, a folder, a URL or an
+//! application goes straight to Launch Services and needs no prompt anywhere.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// Terminals whose window can be typed into, given tmux. The list is only ever
-/// used to decide *whether the person was looking at a terminal*; delivery
-/// itself goes through tmux, which is the only way to reach a pane without
-/// synthesizing keystrokes into somebody else's window.
-const TERMINALS: &[&str] = &[
-    "com.mitchellh.ghostty",
-    "com.apple.Terminal",
-    "com.googlecode.iterm2",
-    "net.kovidgoyal.kitty",
-    "org.alacritty",
-    "io.alacritty",
-    "dev.warp.Warp-Stable",
-    "co.zeit.hyper",
-    "com.github.wez.wezterm",
-];
 
 /// A launcher run that ended without producing anything: fzf's own dismissal
 /// code, which Prelude passes through.
 const DISMISSED: i32 = 130;
 
-#[derive(Debug, PartialEq, Eq)]
-enum Destination {
-    /// The person pressed the hotkey while looking at a terminal, and tmux can
-    /// address the pane they were in.
-    Pane(String),
-    /// Everywhere else. A command gets one window, created deliberately.
-    NewWindow,
-}
-
-/// The frontmost application's bundle identifier.
+/// How long a confirmation stays on the panel before it closes.
 ///
-/// `NSWorkspace` would answer this too, but `lsappinfo` answers it without
-/// linking AppKit into the launcher — and this is asked once per action, not
-/// per keystroke, so two short subprocesses are affordable where they would
-/// not be anywhere else in this codebase.
-fn frontmost_bundle() -> Option<String> {
-    let asn = crate::exec::run(&["/usr/bin/lsappinfo", "front"], Duration::from_secs(2));
-    let asn = asn.trim();
-    if asn.is_empty() {
-        return None;
-    }
-    let info = crate::exec::run(
-        &["/usr/bin/lsappinfo", "info", "-only", "bundleID", asn],
-        Duration::from_secs(2),
-    );
-    // "CFBundleIdentifier"="com.apple.finder"
-    let id = info.split('=').nth(1)?.trim().trim_matches('"').to_string();
-    if id.is_empty() { None } else { Some(id) }
-}
-
-fn destination() -> Destination {
-    let front = frontmost_bundle();
-    let in_terminal = front
-        .as_deref()
-        .is_some_and(|id| TERMINALS.iter().any(|t| t.eq_ignore_ascii_case(id)));
-    if !in_terminal {
-        return Destination::NewWindow;
-    }
-    // A terminal was in front, but only tmux can say which pane and only tmux
-    // can type into it. Without it there is nothing to address, and guessing
-    // would put a command in a window nobody was looking at.
-    match attached_pane() {
-        Some(pane) => Destination::Pane(pane),
-        None => Destination::NewWindow,
-    }
-}
-
-/// The pane of the one attached tmux client, when there is exactly one.
-///
-/// `tmux display-message -p '#{pane_id}'` looks like the answer and is not:
-/// asked from outside a client it names whatever session tmux considers
-/// current, which on a machine with old sessions lying around is a pane nobody
-/// has looked at for days. Typing a command there is not a near miss — it is
-/// invisible, and indistinguishable from the launcher doing nothing.
-///
-/// One attached client is the only unambiguous case. Zero means tmux is
-/// running but nobody is in it; more than one means the front window cannot be
-/// told from the others without asking the window server which pane belongs to
-/// which tty. Both open a window instead, which is the safe direction: a
-/// window that appears is at worst unnecessary, while a command delivered out
-/// of sight is a launcher that lies.
-fn attached_pane() -> Option<String> {
-    let clients = crate::exec::run(
-        &["tmux", "list-clients", "-F", "#{client_session}"],
-        Duration::from_secs(1),
-    );
-    let sessions: Vec<&str> = clients.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-    let [session] = sessions[..] else {
-        return None;
-    };
-    let pane = crate::exec::run(
-        &[
-            "tmux",
-            "display-message",
-            "-p",
-            "-t",
-            session,
-            "#{pane_id}",
-        ],
-        Duration::from_secs(1),
-    );
-    let pane = pane.trim();
-    if pane.is_empty() {
-        None
-    } else {
-        Some(pane.to_string())
-    }
-}
-
-fn preload_path() -> std::path::PathBuf {
-    crate::paths::cache().join("preload")
-}
-
-/// Hand a command to a window that does not exist yet.
-///
-/// The command never goes on a command line. A history entry can hold a
-/// token and a `ps` listing is readable by every process on the machine, so
-/// the payload goes into a 0600 file the new shell reads and removes, and the
-/// argument list carries only the fact that there is one.
-fn stage_preload(path: &std::path::Path, verb: &str, cmd: &str) -> bool {
-    if crate::cache::write_atomic(path, format!("{verb}\n{cmd}").as_bytes()).is_err() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_err() {
-            let _ = std::fs::remove_file(path);
-            return false;
-        }
-    }
-    true
-}
-
-fn open_window_with(verb: &str, cmd: &str) -> bool {
-    let path = preload_path();
-    if !stage_preload(&path, verb, cmd) {
-        return false;
-    }
-    let ok = crate::global::open_working_window();
-    if !ok {
-        let _ = std::fs::remove_file(&path);
-    }
-    ok
-}
+/// Long enough to read four words, short enough that it is not a step in the
+/// way of the paste. The panel has to close either way — nothing else took
+/// focus, so it is still covering whatever you wanted to paste into.
+const CONFIRM: Duration = Duration::from_millis(1200);
 
 /// What the loop should do after one run of the launcher.
 #[derive(Debug, PartialEq, Eq)]
@@ -173,32 +43,10 @@ enum After {
     /// Stay warm and show a fresh launcher. The panel is already gone, or the
     /// person dismissed it and expects it gone.
     Continue,
-    /// Leave, which closes the surface and with it the panel. Used when
-    /// something was delivered into the window directly behind the panel:
-    /// nothing else took focus, so autohide has nothing to react to.
+    /// Leave, which closes the surface and with it the panel. Used when the
+    /// answer is on the clipboard: nothing else took focus, so autohide has
+    /// nothing to react to and the panel would sit on top of the destination.
     Close,
-}
-
-fn deliver(verb: &str, cmd: &str, to: &Destination) -> After {
-    match to {
-        Destination::Pane(pane) => {
-            crate::ui::paste_into_pane(pane, cmd, verb == "RUN");
-            // The terminal was already frontmost, so nothing changed focus and
-            // the panel is still covering the answer. Standing down is the
-            // only way to get out of the way.
-            After::Close
-        }
-        Destination::NewWindow => {
-            if open_window_with(verb, cmd) {
-                // The new window takes focus, the panel autohides, and this
-                // loop stays warm for the next press.
-                After::Continue
-            } else {
-                println!("prelude: could not open a window for that command");
-                After::Continue
-            }
-        }
-    }
 }
 
 /// One run of the launcher, as a child process.
@@ -206,15 +54,19 @@ fn deliver(verb: &str, cmd: &str, to: &Destination) -> After {
 /// A child rather than a call, because the verb contract on stdout is what the
 /// zsh widget has always consumed and is worth having exactly one of. fzf
 /// draws on `/dev/tty`, so capturing stdout takes nothing away from it.
-fn once(to: &Destination) -> (i32, After) {
+///
+/// The child is told two things about the surface it is drawing into, both by
+/// environment so that fzf's per-keystroke helpers inherit them for free:
+/// the window is entirely ours, and text it hands over will be copied rather
+/// than put on a prompt. The second is what keeps every label in the footer
+/// and the action panel honest.
+fn once() -> (i32, After) {
     let Ok(exe) = std::env::current_exe() else {
         return (2, After::Continue);
     };
-    // The child always reports back rather than delivering. Letting it deliver
-    // into a pane itself — which `prelude paste` does — means it prints
-    // nothing, so this loop cannot tell a delivery from a dismissal and never
-    // stands the panel down. One delivery path, decided here.
     let Ok(out) = Command::new(exe)
+        .env("PRELUDE_FULL_SURFACE", "1")
+        .env("PRELUDE_TO_CLIPBOARD", "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -231,10 +83,19 @@ fn once(to: &Destination) -> (i32, After) {
         return (code, After::Continue);
     };
     match verb {
-        "INSERT" | "RUN" => (code, deliver(verb, payload, to)),
+        // INSERT and RUN are one thing here. The difference between them is
+        // whether a shell should press Enter for you, and there is no shell in
+        // this surface to press it in — the distinction survives at the zsh
+        // widget, which is the only place it can mean anything.
+        "INSERT" | "RUN" => {
+            crate::ui::copy(payload);
+            println!("copied: {}", crate::width::flatten(payload));
+            std::thread::sleep(CONFIRM);
+            (code, After::Close)
+        }
         "MSG" => {
             println!("prelude: {payload}");
-            std::thread::sleep(Duration::from_millis(1200));
+            std::thread::sleep(CONFIRM);
             (code, After::Continue)
         }
         _ => (code, After::Continue),
@@ -246,8 +107,7 @@ pub fn run() -> i32 {
     let mut consecutive_faults = 0;
     loop {
         let started = Instant::now();
-        let to = destination();
-        let (code, after) = once(&to);
+        let (code, after) = once();
         if after == After::Close {
             return 0;
         }
@@ -272,84 +132,56 @@ pub fn run() -> i32 {
 mod tests {
     use super::*;
 
+    /// The whole of the delivery decision, which is that there isn't one.
+    ///
+    /// Both verbs copy. A test rather than a comment because the two used to
+    /// take different roads out of here — one typed into a tmux pane, one
+    /// opened a window — and each road had its own way of putting a command
+    /// somewhere nobody was looking.
     #[test]
-    fn only_a_terminal_in_front_can_be_typed_into() {
-        // The list decides one thing: whether the person was looking at a
-        // terminal. Anything else has to get its own window, because typing a
-        // command into a pane nobody is looking at is worse than opening one.
-        assert!(TERMINALS.contains(&"com.mitchellh.ghostty"));
-        assert!(TERMINALS.contains(&"com.apple.Terminal"));
-        assert!(!TERMINALS.contains(&"com.google.Chrome"));
-        assert!(!TERMINALS.contains(&"com.apple.finder"));
+    fn both_handover_verbs_copy_and_stand_the_panel_down() {
+        for verb in ["INSERT", "RUN"] {
+            assert_eq!(after_for(verb), After::Close, "{verb}");
+        }
+        // A refusal has nothing to paste, so the panel stays and shows it.
+        assert_eq!(after_for("MSG"), After::Continue);
+        // Anything else means the launcher acted on an object itself; the
+        // application it opened took focus and autohide has already run.
+        assert_eq!(after_for(""), After::Continue);
     }
 
-    #[test]
-    fn a_pane_is_addressed_only_when_exactly_one_client_is_attached() {
-        // Zero attached clients still leaves tmux able to name a "current"
-        // pane — a stale session from days ago — and delivering there is
-        // indistinguishable from the launcher doing nothing at all.
-        assert_eq!(pane_for_sessions(&[]), None);
-        assert_eq!(pane_for_sessions(&["work"]), Some("work"));
-        assert_eq!(pane_for_sessions(&["work", "other"]), None);
-    }
-
-    /// The decision `attached_pane` makes, without asking tmux.
-    fn pane_for_sessions<'a>(sessions: &[&'a str]) -> Option<&'a str> {
-        match sessions {
-            [one] => Some(one),
-            _ => None,
+    /// The branch of `once` that decides, without running a launcher.
+    fn after_for(verb: &str) -> After {
+        match verb {
+            "INSERT" | "RUN" => After::Close,
+            _ => After::Continue,
         }
     }
 
+    /// The child is told what surface it is drawing into, and it is told by
+    /// environment rather than argv so that fzf's per-keystroke footer and
+    /// preview helpers — grandchildren of this process — inherit it without
+    /// anything being threaded through them.
     #[test]
-    fn a_delivered_answer_stands_down_and_a_new_window_does_not() {
-        // Nothing else took focus in the pane case, so the panel is still on
-        // top of the answer and has to leave. A new window takes focus itself,
-        // which is what dismisses the panel, so the loop stays warm.
-        assert_eq!(
-            deliver_decision(&Destination::Pane("%1".into())),
-            After::Close
-        );
-        assert_eq!(deliver_decision(&Destination::NewWindow), After::Continue);
+    fn the_surface_is_declared_by_inheritance() {
+        let source = include_str!("panel.rs");
+        let body = source.split("fn once()").nth(1).expect("the launcher call");
+        let body = &body[..body.find("\n/// `prelude _panel`").unwrap_or(body.len())];
+        assert!(body.contains("PRELUDE_FULL_SURFACE"));
+        assert!(body.contains("PRELUDE_TO_CLIPBOARD"));
     }
 
-    /// The branch of `deliver` that decides, without performing the delivery.
-    fn deliver_decision(to: &Destination) -> After {
-        match to {
-            Destination::Pane(_) => After::Close,
-            Destination::NewWindow => After::Continue,
+    /// Nothing in this module may reach for a terminal or a pane. Both used to
+    /// live here, and both were a launcher guessing which prompt you meant.
+    #[test]
+    fn the_panel_owns_no_terminal() {
+        let source = include_str!("panel.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        for forbidden in ["tmux", "lsappinfo", "open_working_window", "-e", "osascript"] {
+            assert!(
+                !code.contains(&format!("\"{forbidden}\"")),
+                "the panel must not invoke {forbidden}"
+            );
         }
-    }
-
-    #[test]
-    fn a_handed_over_command_waits_in_a_private_file_not_on_a_command_line() {
-        // A history entry can hold a token and `ps` is readable by anything on
-        // the machine, so the payload travels by file and the argument list
-        // carries only the fact that there is one.
-        let path = std::env::temp_dir().join(format!("prelude-preload-{}", std::process::id()));
-        assert!(stage_preload(&path, "INSERT", "deploy --token=hunter2"));
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(body, "INSERT\ndeploy --token=hunter2");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn the_window_a_command_gets_is_told_only_that_one_is_waiting() {
-        let source = include_str!("global.rs");
-        let launch = source
-            .split("pub fn open_working_window")
-            .nth(1)
-            .expect("the working-window launch");
-        let launch = &launch[..launch.find("\nfn ").unwrap_or(launch.len())];
-        assert!(launch.contains("PRELUDE_PRELOAD=1"));
-        // Saved state would bring the whole of the last session along with the
-        // one window that was asked for.
-        assert!(launch.contains("--window-save-state=never"));
     }
 }

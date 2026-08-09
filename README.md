@@ -6,8 +6,9 @@ reach you from.
 Press one key. A search box appears with your agents, skills and MCP servers.
 Type a name to search that root, or open an explicit scope for project scripts,
 shell history, ports, processes, apps, clipboard and the other machine-wide
-sources. Commands are **typed onto your prompt** for review; files, folders,
-apps and links open directly in their owning macOS application.
+sources. Commands are **handed to you to read before they run** — onto your
+prompt from the shell widget, onto the clipboard from the global panel; files,
+folders, apps and links open directly in their owning macOS application.
 
 Enter performs the default stated in the footer.
 
@@ -65,11 +66,16 @@ a wrong guess made at 2am. [Jump to the details](#agents-can-use-it-too).
 The line is not danger. It is whether there is anything you might want to
 change before it happens.
 
-**A command line goes onto your prompt, never executed.** History, scripts,
+**A command line is handed to you, never executed.** History, scripts,
 `$PATH`, snippets, ports, processes — and agents, skills and sessions too,
 because those are the ones you most often want to add something to:
 `claude` wants `--resume`, or a model, or a question. One keystroke buys you
 that, and costs nothing on the times you just press Enter.
+
+Where it is handed *to* depends on which surface you opened. `Ctrl+R` puts it
+on the prompt you are standing at. The global panel has no prompt — it is not
+the destination — so it copies, and gets out of the way. The footer says
+which.
 
 That is also what makes it safe to bind this to a key you hit dozens of
 times a day, and safe for the launcher to offer killing whatever holds port
@@ -83,8 +89,8 @@ Launch Services — no `open ...` command touches the prompt or shell history.
 | | `Enter` |
 |---|---|
 | **a question an agent asked** | **answers it, and unblocks the agent** |
-| a running agent | goes to its pane |
-| an agent, a skill, a session | onto your prompt, ready to edit |
+| a running agent | hands you `cd` to what it is working on |
+| an agent, a skill, a session | handed over, ready to edit |
 | a file or config | opens in its default application |
 | a folder | opens in Finder |
 | an app | launches it |
@@ -106,23 +112,6 @@ override that, for once or for good:
 
 Choices are remembered per extension in `~/.config/prelude/open.toml`, so a
 blanket `"*"` still leaves `.png` going to Preview.
-
-### In a conversation, there is no prompt to paste onto
-
-From the popup over an agent's input box, "onto your prompt" means something
-else entirely: whatever you hand over lands in a *conversation*. So a file or
-folder gives its path and a command gives its text — both useful to say to an
-agent — but an agent row cannot. Typing `codex` into Claude's box sends Claude
-the word "codex". A URL is the deliberate exception: Enter opens the browser;
-`Ctrl+K → Insert URL` hands it to the conversation.
-
-The only reading of "start it" that means anything there is **a second agent
-beside the first**, so that is what Enter does: it splits the pane you are
-in, in the same directory, and starts the agent there. Both conversations
-stay on screen — which is the whole reason to open one while talking to
-another. Side by side when the window is wide enough for two, stacked below
-about 170 columns, because an agent's TUI starts wrapping its own output
-much under eighty.
 
 `^K` states the current Enter default in a non-selectable header; the rows
 under it are alternatives rather than a repetition of Enter.
@@ -149,32 +138,36 @@ Press **Ctrl-R**. Run `prelude doctor` to check the setup.
 > before the `eval` line. Ctrl-Space is deliberately not used: macOS binds it
 > to "Select the previous input source" and the OS eats it first.
 
-Two more, both optional and both one line:
+One more, optional and one line:
 
 ```sh
-prelude init tmux  >> ~/.tmux.conf     # the launcher over any pane, and a status segment
 prelude init agent >> CLAUDE.md        # teach your agents they can reach you
 ```
 
-The second is what makes the first half of this README happen at all — an
-agent that has not been told it can ask you a question will not ask you a
-question. See [teaching an agent](#teaching-an-agent-it-can-do-this).
+It is what makes the first half of this README happen at all — an agent that
+has not been told it can ask you a question will not ask you a question. See
+[teaching an agent](#teaching-an-agent-it-can-do-this).
 
 ### Open Prelude globally with Cmd+Space
 
-The terminal `Ctrl+R` binding is local to a prompt. To create a fresh terminal
-from Finder, a browser or any other application, install Prelude's native
-hotkey helper:
+The `Ctrl+R` binding is local to a shell prompt. To reach the launcher from
+Finder, a browser or any other application, install the global panel:
 
 ```sh
 prelude global install
 prelude global status
 ```
 
-Installation compiles and ad-hoc signs the small AppKit helper with the Swift
-compiler supplied by Xcode Command Line Tools, then loads a per-user
-LaunchAgent. It is repeatable and restores the previous helper if an upgrade
-cannot be started.
+The panel is a **Ghostty quick terminal**: a hidden, dedicated Ghostty
+instance, kept out of the Dock and the app switcher, hosting one long-lived
+`prelude _panel` loop. Ghostty registers the chord itself, so nothing of
+Prelude's runs when you press the key.
+
+**A press reveals; it never creates.** An earlier design built a terminal on
+every press — a new application instance, a window, a login shell — 373ms of
+construction, torn down afterwards, including when the answer turned out to be
+a file that never needed a terminal. Every bug in launch and teardown came from
+that. There is nothing to launch now and nothing to strand.
 
 The default is `Cmd+Space`. Before installation or a key change Prelude checks
 Spotlight, Raycast's configured global key, and a native Carbon reservation. A
@@ -185,49 +178,61 @@ Spotlight**, change Raycast's Hotkey setting, or choose another chord:
 
 ```sh
 prelude global hotkey cmd+shift+space
+prelude global directory ~/src        # where the panel stands; default $HOME
+prelude global open                   # reveal it without the key
 ```
 
 A chord is one or more of `cmd`, `option`, `ctrl`, `shift` plus `space`, a
 letter or a digit. Modifiers are normalized, malformed or modifier-free keys
 are refused, and `prelude global status` names known conflicts.
 
-A launch creates a new login-zsh terminal in `$HOME` and invokes the same
-`_prelude_widget` as `Ctrl+R` — there is no delayed synthetic keypress and no
-existing terminal is reused. While that Prelude launcher remains open, further
-hotkeys focus its terminal application instead of opening duplicates. As soon
-as Prelude returns to the prompt, its private token-checked lease is released
-and the next hotkey creates a fresh launcher. If Ghostty is installed, Prelude asks Launch
-Services for a new Ghostty app/window. Otherwise it creates a new Terminal.app
-window. Terminal may request Automation permission on first use.
+#### The panel copies; it does not open a terminal
 
-```sh
-prelude global backend auto       # default: Ghostty, then Terminal.app
-prelude global backend ghostty    # require Ghostty; do not silently fall back
-prelude global backend terminal   # always use Terminal.app
-prelude global open               # exercise the selected backend without the key
+**A command you pick from the panel goes on the clipboard**, and the panel
+stands down. Objects are unaffected — a file, a folder, a URL or an
+application goes straight to Launch Services, which is the whole point of it
+not being a command.
+
+This is the one place Prelude used to guess. It read the frontmost application
+and either typed the command into the tmux pane you were looking at, or built
+a window to leave it in. Both were the same mistake wearing different clothes:
+a launcher deciding, from the outside, which prompt you meant. The window
+arrived in the wrong directory as often as not, and the pane was whichever one
+tmux happened to consider current — a command delivered out of sight is
+indistinguishable from a launcher that did nothing.
+
+Where it lands is the one question a launcher has no business answering, so it
+is asked of the only thing that knows: you, with ⌘V, in the window you were
+already in.
+
+The footer says which surface you are in, because "hands you text" is two
+different sentences:
+
+```text
+Ctrl+R at a prompt     Insert into prompt  Enter   ·   Actions  Ctrl+K
+the global panel       Copy the command    Enter   ·   Actions  Ctrl+K
 ```
 
-Commands still land on that new shell's prompt for review. Files, URLs and
-applications still open directly. A killed terminal cannot reserve the
-launcher forever: the lease expires after 30 minutes, and `prelude global
-clear` removes only that Prelude-owned lease when immediate recovery is needed.
-`prelude global uninstall` removes the app
-and LaunchAgent while retaining the backend preference; add `--reset` to remove
-Prelude's global-helper preference and status files too. The helper has no Dock
-icon, starts through a per-user LaunchAgent and carries no selected result in
-AppleScript, arguments, preferences or logs. See
+`^K` follows the same rule. At a prompt a command's alternative is **Run it in
+the shell**; from the panel that row is gone, because a submitted command and
+an unsubmitted one are the same bytes on a clipboard and two rows saying the
+same thing is worse than one. **Run and show output** stays in both — it runs
+inside Prelude and shows you the result, which needs no shell on the other end.
+
+`prelude global uninstall` removes the panel configuration and the LaunchAgent;
+add `--reset` to remove Prelude's global preference and status files too. See
 [the implementation and acceptance record](docs/GLOBAL-HOTKEY.md).
 
 ## Running dozens of agents at once
 
 `s:` searches conversations on disk. **`r:` searches what is alive right
 now** — every agent process on the machine, wherever it happens to be
-running: a tmux pane, a terminal tab, over ssh, or nothing at all:
+running: a terminal tab, a split, over ssh, or nothing at all:
 
 ```
-▸ claude · api-gateway     · waiting 12m · work:2.1  · fix the rate limiter   running
-  claude · TerminalRaycast · waiting 32m · pid 2557  · Create Raycast-like…   running
-  codex  · docs            · working     · fleet:0.1 · rewrite the README     running
+▸ claude · api-gateway     · waiting 12m · pid 2119 · fix the rate limiter   running
+  claude · TerminalRaycast · waiting 32m · pid 2557 · Create Raycast-like…   running
+  codex  · docs            · working     · pid 3081 · rewrite the README     running
 ```
 
 The middle column is the one that matters. An agent that is working *prints*
@@ -244,11 +249,11 @@ conversation file says which kind of quiet it is. **A turn that ends in a
 tool call is still going; a turn that ends in prose has handed back to you.**
 A ten-minute test run never reports as stuck.
 
-**None of that needs tmux.** The backbone is the process list — `ps` for what
-is alive, one bulk `lsof` for where each one is — and the clock is the mtime
-of the conversation file each agent is appending to. Quick Look reads that
-file too, so you can see what an agent last said without going anywhere
-near its terminal:
+**None of this needs a particular terminal.** The backbone is the process list
+— `ps` for what is alive, one bulk `lsof` for where each one is — and the
+clock is the mtime of the conversation file each agent is appending to. Quick
+Look reads that file too, so you can see what an agent last said without going
+anywhere near its window:
 
 ```
 what it last said
@@ -256,21 +261,16 @@ what it last said
 ›  use a percentile instead of the max
 ```
 
-tmux is an enhancement, not a requirement. A run that has a pane also has an
-address, and gains the two things a bare pid cannot offer:
+Every run therefore answers the same questions, whatever started it: what
+project, how long quiet, working or waiting, what it last said, its directory,
+and ending it. `^K` also leaves it a line in its inbox, which it collects with
+`prelude inbox`.
 
-| | anywhere | in a tmux pane |
-|---|---|---|
-| listed, with project and age | ✅ | ✅ |
-| working or waiting | ✅ | ✅ |
-| read what it last said | ✅ | ✅ (its live screen) |
-| end it | ✅ | ✅ |
-| **Enter goes to it** | — | ✅ |
-| **answer it without leaving** | — | ✅ |
-
-So `^K` on a pane offers "Send it a line, without going there" — typed
-straight into its pane — while on a stray it offers what a pid allows: its
-directory, and ending it.
+Two things used to be offered for the subset of runs that had a tmux pane —
+Enter putting your cursor in it, and a message typed straight into it — and
+both are gone. Prelude does not reach into a terminal it does not own, and a
+fleet view that is sharper about some of its rows than others is harder to read
+than one that treats them alike.
 
 Batch runs (`claude -p`, `codex exec`) are marked rather than mixed in. They
 keep no conversation file and have no terminal, so silence means nothing
@@ -288,10 +288,10 @@ prelude fleet --status     # "2 waiting · 3 working" — or nothing at all
 prelude watch              # notify the moment an agent stops and waits
 ```
 
-`fleet --status` is made for a tmux status bar — `prelude init tmux` prints
-the two lines to uncomment — and never pays for subprocesses itself: cached
-identities, live states, exactly the launcher's deal. An idle machine shows
-an empty segment, not a permanent `0 waiting`.
+`fleet --status` is made for a status bar or a prompt, and never pays for
+subprocesses itself: cached identities, live states, exactly the launcher's
+deal. An idle machine prints nothing at all rather than a permanent
+`0 waiting`.
 
 `prelude watch` closes the loop. Silence is what a question looks like from
 outside the process, and the watcher makes it audible: the moment a run goes
@@ -344,11 +344,11 @@ takes the oldest one waiting:
 ▸ claude · api-gateway asks  · asked 4m ago  · the migration drops legacy_…  asking you
      ^K  →  Answer "no"          ← one keystroke, unblocks it
             Answer "go ahead"
-            Go to it, zoomed full-screen
+            Show conversation context
 ```
 
-The tmux status bar leads with the count, because a question is your problem
-in a way that a merely-quiet agent is not:
+The status line leads with the count, because a question is your problem in a
+way that a merely-quiet agent is not:
 
 ```
 1 asking · 2 waiting · 3 working
@@ -357,22 +357,28 @@ in a way that a merely-quiet agent is not:
 ### Agents talking to each other
 
 `prelude fleet --json` gives an agent the same fleet the launcher shows —
-project, state, working directory, pane address — so "check whether anyone
-else is already on this" becomes a command rather than a guess.
+project, state, working directory, pid — so "check whether anyone else is
+already on this" becomes a command rather than a guess.
 
-`prelude say` delivers a line straight into another agent's conversation,
-attributed so the receiver knows it came from a peer rather than from the
-human:
+`prelude say` leaves a line in another agent's inbox, attributed so the
+receiver knows it came from a peer rather than from the human:
 
 ```
-[via prelude, from claude · api-gateway] I changed the auth schema — you will need to rebase
+$ prelude inbox
+· claude · api-gateway  I changed the auth schema — you will need to rebase  [17…-4]
 ```
 
-Address it by project, agent name, or pane. **If more than one thing matches
-it refuses and lists them**, because a message delivered to the wrong
-conversation reads as the human's own words and is worse than one not sent.
-An agent with no pane cannot be typed into, so the line waits in its inbox
-for `prelude inbox`.
+Address it by project, agent name, or pid. **If more than one thing matches it
+refuses and lists them**, because a message delivered to the wrong conversation
+reads as the human's own words and is worse than one not sent — and a working
+directory is the whole of an inbox address.
+
+Delivery is always to the inbox. There was a faster path once, for a target
+that had a tmux pane: the line was typed into it and submitted, putting it in
+front of the agent immediately. It was also the only delivery that worked for
+part of the fleet and not the rest, and a sending agent could not tell which
+kind of peer it was addressing. One route for everyone is worth more than a
+fast route for some.
 
 ### Teaching an agent it can do this
 
@@ -385,41 +391,27 @@ returns, and *when to reach for them*, which is the part that matters. A
 capability an agent has to be reminded of every session is not a capability
 it has.
 
-## Using it inside an agent conversation
+## Using another agent's skill mid-conversation
 
-The Ctrl-R widget only exists at a shell prompt. Inside a coding agent's TUI
-the agent owns the keyboard, so nothing bound in your shell can reach you.
+A skill row hands over either of two things, both named in `^K`:
 
-tmux sits *above* whatever runs in the pane, so a tmux binding works
-everywhere:
+| | |
+|---|---|
+| `Insert the slash command` | `/skill-name` |
+| `Point an agent at its file` | `Read …/SKILL.md and follow it.` |
 
-```sh
-prelude init tmux >> ~/.tmux.conf
-tmux source-file ~/.tmux.conf
-```
+The second is the one worth knowing about. `/skill-name` typed at an agent that
+does not have the skill is a line of prose that means nothing, and it fails
+silently. Pointing that agent at the file needs no restart, no flag, and no
+cooperation from its CLI — a skill is a file of instructions, and every agent
+can read a file. It is the only way in for codex and opencode, which cannot
+load a borrowed skill at all.
 
-**prefix + r** now opens the launcher in a floating popup over whatever you
-are doing, and picking something **types it into the pane underneath** —
-into the agent's input box, vim, a REPL, an ssh session — without submitting
-it. `^O` instead runs the command inside the popup, so the agent never sees
-it at all.
-
-### Using another agent's skill mid-conversation
-
-tmux says which agent a pane is running, so Prelude knows who you are talking
-to, and a skill row hands over whichever of two things is useful:
-
-| | `Enter` | secondary |
-|---|---|---|
-| the agent **has** the skill | `/skill-name` | `Read …/SKILL.md and follow it.` |
-| it **does not** | `Read …/SKILL.md and follow it.` | `/skill-name` |
-
-The second row is the point. `/skill-name` typed at an agent that does not
-have the skill is a line of prose that means nothing, and it fails silently.
-Pointing that agent at the file needs no restart, no flag, and no cooperation
-from its CLI — a skill is a file of instructions, and every agent can read a
-file. It is the only way in for codex and opencode, which cannot load a
-borrowed skill at all.
+Prelude used to pick between them for you: `prefix + r` opened the launcher in
+a tmux popup over the pane you were in, tmux said which agent that pane was
+running, and the row handed over whichever form suited it. Nothing can answer
+that question now, and the failure it was avoiding is still real — so both rows
+are present and say which is which, and you paste the one you want.
 
 If you want the skill loaded properly *as* a skill without losing the
 conversation, resume it with the loan attached:
@@ -526,6 +518,7 @@ shows files. The same rule applies to the other sources:
 ```text
 a: agents      r: running      s: sessions      f: files
 c: clipboard   h: history      app: apps         cmd: commands
+set: settings
 ```
 
 Applications, history, files, clipboard entries and `$PATH` executables
@@ -560,6 +553,7 @@ rules that keep computed rows from being filtered out by fzf.
 | **Ports / processes** | `port:` / `proc:` | Listening TCP ports and the heaviest processes |
 | **Containers** | `docker:` | Running Docker containers |
 | **MCP / config** | `mcp:` / `cfg:` | Agent integrations and settings |
+| **Prelude settings** | `set:` | Search roots, hotkey, keys and rules |
 
 Clipboard history is chronological rather than frecent: the thing copied most
 recently is always first. Text is retained as text; one or several files remain
@@ -593,8 +587,7 @@ README.md → preadme
 
 From then on, typing `preadme` resolves back to a file row. Enter uses the
 same default as the original — its owning application for a file, Finder for
-a folder, the default browser for a URL. In an agent popup, file and folder
-quicklinks hand over their paths as usual.
+a folder, the default browser for a URL.
 
 Created definitions are appended to `quicklinks.toml` without rewriting its
 comments or hand-written search templates. A generated definition can be
@@ -664,10 +657,11 @@ a server whose environment holds an API key is refused for both, because
 `mcp add` takes the definition inline and there is no version of that which
 keeps the key out of your shell history.
 
-**The panel knows where you opened it from.** Over an agent's input box it
-drops resume, lending and one-off shell commands, which would land in the
-conversation as prose; what stays local — opening settings, opening an editor,
-revealing in Finder — runs in the popup instead of being typed into the chat.
+**The panel knows which surface you opened it from.** From the global panel it
+drops the rows whose only meaning was "and submit it for you", because a
+clipboard cannot submit anything. Everything that acts — opening settings, an
+editor, Finder, running something inside Prelude and showing the output — is
+identical in both.
 
 The reasoning for every entry, and for what was deliberately left out, is in
 [docs/ACTIONS.md](docs/ACTIONS.md).
@@ -698,9 +692,9 @@ each side names the other when the evidence is sound. An explicit native
 resume id is exact; the newest Session in a directory is inferred only when
 there is exactly one run of that Agent there. Two Claude processes in the same
 project remain visibly ambiguous instead of both claiming the same Session.
-`Ctrl+P` shows how a match was made. Selecting an active Session goes to its
-tmux pane when one exists; without a pane it inserts the active project
-instead. Neither path starts a competing resume.
+`Ctrl+P` shows how a match was made. Selecting a Session a live run already
+owns hands you that run's project rather than starting a competing resume of
+the same conversation.
 
 The same graph is scriptable without launcher rows:
 
@@ -839,9 +833,9 @@ the launcher stays open so you can ask the next thing:
 
 It uses each agent's non-interactive mode (`claude -p`, `codex exec`,
 `pi --print`, `opencode run`) so the reply is plain text rather than a
-full-screen TUI taking over the terminal. Resuming an existing session still
-goes onto your prompt, because a long-lived session belongs in a real
-terminal rather than a popup that closes.
+full-screen TUI taking over the terminal. Resuming an existing session is
+still handed over rather than run here, because a long-lived session belongs
+in a real terminal rather than a launcher that closes.
 
 Each agent is invoked with its own syntax (`opencode` needs `opencode run`,
 the others take the prompt positionally), and `@` completes only against
@@ -897,6 +891,74 @@ health, refresh a stdio tool inventory, and show a structural redacted
 Definition Diff. A one-time migration removes definitions and derived search
 rows written by older builds. `prelude doctor mcp` reports transport, stale
 health/tools, duplicate owner/name records, auth failures and privacy state.
+
+## Settings
+
+Prelude has no settings window. It has settings *rows*, in their own scope,
+each carrying its current value:
+
+```
+⌕ set:
+▸ Search roots            · 3 folders · 53,409 files · indexed 2d ago  setting
+  Global hotkey           · cmd+shift+space                            setting
+  Panel directory         · ~                                          setting
+  Launcher key at a shell · ^R                                         setting
+  Inline height           · 90%                                        setting
+  Quick Look              · on                                         setting
+  What Enter does         · per kind                                   setting
+  Open-with rules         · 4 extensions                               setting
+  Snippets                · 5 saved                                    setting
+  Quicklinks              · 11 keywords                                setting
+  Favorites               · 3 promoted                                 setting
+```
+
+The value on the row is the point. A setting you cannot see the value of is
+one you change by trial, and most of these were previously invisible: four
+existed only as environment variables that had to be exported before the
+`eval` line in `.zshrc`, and `roots.txt` — which decides what `f:` can find at
+all — was documented in a README, defaulted from a hard-coded list, and had to
+be created by hand.
+
+Enter changes the setting; `^K` holds everything else, and never repeats
+Enter. **Search roots** is the one worth knowing:
+
+```
+ Search roots · setting
+ Default: Add a folder… · Enter
+
+ Action › Remove a folder…            leaves the folder alone
+          Rebuild the index now       runs prelude index here
+          Show every root
+          Open the file               ~/.config/prelude/roots.txt
+```
+
+The row says `indexed 2d ago`, and says **roots changed — run Rebuild** when
+you have added a folder the index does not know about yet. That silence was
+the actual bug: you add a folder, `f:` keeps answering from the old set, and
+nothing anywhere tells you the index is why.
+
+Adding a root goes through the same guard the Trash uses, so `~`, `/`,
+`/Users` and `/Applications` are refused. Indexing a home directory means
+seven levels of `fd` through `~/Library`, which macOS protects as other
+applications' data — and the only symptom is a system dialog naming your
+*terminal*, with nothing in it that says Prelude.
+
+Everything is also a plain command, on the same code path:
+
+```sh
+prelude settings                      # the table above
+prelude settings --json               # …as fields
+prelude settings roots                # each root, and whether it still exists
+prelude settings add-root ~/work
+prelude settings remove-root ~/work
+prelude settings set key '^T'         # also height, preview, classic_enter
+```
+
+Six settings own a file each and are edited by the code that owns it, so a
+chord typed here goes through the same validation and the same panel restart
+as `prelude global hotkey`. The four that had only an environment variable get
+`settings.toml` — and the variable still wins wherever it is exported, because
+a variable is a per-invocation instruction and a file is a standing one.
 
 ## It learns
 
@@ -964,18 +1026,19 @@ run for themselves.
 | | |
 |---|---|
 | `prelude` | search — what the Ctrl-R widget calls |
-| `prelude paste [pane]` | type the result into a tmux pane instead |
 | `prelude reply` | answer the oldest question an agent is blocked on |
 | `prelude fleet` | every agent running, and its state |
-| `prelude fleet --status` | one line for a tmux status bar |
+| `prelude fleet --status` | one line for a status bar |
 | `prelude watch` | notify the moment an agent stops and waits |
-| `prelude global install` | install and start the native Cmd+Space helper |
-| `prelude global status [--json]` | helper, backend, zsh and Spotlight diagnostics |
-| `prelude global open` | open or focus the singleton launcher without pressing the hotkey |
+| `prelude global install` | install and start the Cmd+Space launcher panel |
+| `prelude global status [--json]` | panel, chord, zsh and Spotlight diagnostics |
+| `prelude global open` | reveal the panel without pressing the hotkey |
 | `prelude global hotkey CHORD` | inspect or change the validated global chord |
-| `prelude global backend auto\|ghostty\|terminal` | choose terminal fallback behaviour |
-| `prelude global start\|stop\|uninstall` | manage or remove the per-user helper |
-| `prelude global clear` | clear only a stale singleton lease |
+| `prelude global directory [PATH]` | where the panel stands · `--default` for `$HOME` |
+| `prelude global start\|stop\|uninstall` | manage or remove the panel instance |
+| `prelude settings [--json]` | every preference and its current value |
+| `prelude settings add-root PATH` | what `f:` indexes · `remove-root` · `roots` |
+| `prelude settings set KEY VALUE` | `key`, `height`, `preview`, `classic_enter` |
 
 **Your agents**
 
@@ -998,7 +1061,7 @@ run for themselves.
 
 | | |
 |---|---|
-| `prelude init zsh` · `tmux` · `agent` | shell, tmux, and the block for CLAUDE.md |
+| `prelude init zsh` · `agent` | shell integration, and the block for CLAUDE.md |
 | `prelude index` | build the file index for `f:name` |
 | `prelude doctor` | diagnose the setup |
 | `prelude doctor mcp` | MCP transport, health, tool inventory and privacy diagnostics |
@@ -1007,21 +1070,25 @@ run for themselves.
 
 ## Configuration
 
-| Variable | Effect |
-|---|---|
-| `PRELUDE_KEY='^T'` | Change the hotkey (default `^R`) |
-| `PRELUDE_HEIGHT=80%` | How much of the terminal the inline view uses |
-| `PRELUDE_NO_POPUP=1` | Never open a tmux popup; render inline |
-| `PRELUDE_NO_PREVIEW=1` | Disable `Ctrl+P` Quick Look |
-| `PRELUDE_DEBUG=1` | Report source failures and fzf fallbacks on stderr |
+Everything below has a row in `set:` and a `prelude settings` command. The
+variables remain, and still win where they are exported.
+
+| Variable | Setting | Effect |
+|---|---|---|
+| `PRELUDE_KEY='^T'` | `key` | Change the shell hotkey (default `^R`) |
+| `PRELUDE_HEIGHT=80%` | `height` | How much of the terminal the inline view uses |
+| `PRELUDE_NO_PREVIEW=1` | `preview` | Disable `Ctrl+P` Quick Look |
+| `PRELUDE_CLASSIC_ENTER=1` | `classic_enter` | Enter inserts everything, whatever kind |
+| `PRELUDE_DEBUG=1` | — | Report source failures and fzf fallbacks on stderr |
 
 Files, all under the usual XDG locations:
 
 | Path | What |
 |---|---|
+| `$XDG_CONFIG_HOME/prelude/settings.toml` | Key, height, Quick Look and Enter behaviour |
 | `$XDG_CONFIG_HOME/prelude/snippets.toml` | Your snippets |
 | `$XDG_CONFIG_HOME/prelude/quicklinks.toml` | Your quicklinks |
-| `$XDG_CONFIG_HOME/prelude/global.toml` | Global hotkey and `auto`, `ghostty` or `terminal` backend |
+| `$XDG_CONFIG_HOME/prelude/global.toml` | Global hotkey and the panel's starting directory |
 | `$XDG_CONFIG_HOME/prelude/roots.txt` | Which folders `f:` indexes |
 | `$XDG_DATA_HOME/prelude/frecency.tsv` | What you pick, so it learns |
 | `$XDG_DATA_HOME/prelude/sessions.json` | Local Session names, pins and archive state |

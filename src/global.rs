@@ -1,10 +1,13 @@
 //! Production macOS global hotkey integration.
 //!
 //! The latency-sensitive launcher remains a terminal program. This module is
-//! reached only through an explicit `prelude global ...` command and manages a
-//! tiny AppKit helper which owns Cmd+Space and creates a fresh Ghostty or
-//! Terminal.app window. No GUI framework or hotkey dependency is linked into
-//! the Prelude binary itself.
+//! reached only through an explicit `prelude global ...` command and manages
+//! the hidden Ghostty instance that owns the chord and hosts the panel. No GUI
+//! framework or hotkey dependency is linked into the Prelude binary itself.
+//!
+//! There is no terminal backend to choose. There was, while a press built a
+//! window to leave a command in; the panel copies instead, so the only
+//! terminal in this module is the one the panel itself is.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -19,35 +22,6 @@ const LABEL: &str = "app.prelude.hotkey";
 /// loop. Ghostty registers the chord itself, so nothing of Prelude's runs at
 /// press time and there is no terminal to build.
 const QUICK_CONFIG: &str = "quick-terminal.ghostty";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    Auto,
-    Ghostty,
-    Terminal,
-}
-
-impl Backend {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value.trim() {
-            "auto" => Ok(Self::Auto),
-            "ghostty" => Ok(Self::Ghostty),
-            "terminal" => Ok(Self::Terminal),
-            other => Err(format!(
-                "unknown terminal backend {other:?}; choose auto, ghostty or terminal"
-            )),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Ghostty => "ghostty",
-            Self::Terminal => "terminal",
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Hotkey {
@@ -212,9 +186,8 @@ fn key_code(key: &str) -> Option<u32> {
 
 #[derive(Clone, Debug)]
 struct GlobalConfig {
-    backend: Backend,
     hotkey: Hotkey,
-    /// Where a launcher window starts. `None` is `$HOME`, and stays unwritten
+    /// Where the panel itself stands. `None` is `$HOME`, and stays unwritten
     /// so the config carries no personal path until somebody asks for one.
     directory: Option<PathBuf>,
 }
@@ -222,7 +195,6 @@ struct GlobalConfig {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            backend: Backend::Auto,
             hotkey: Hotkey::parse("cmd+space").expect("default hotkey"),
             directory: None,
         }
@@ -274,12 +246,10 @@ pub struct GlobalStatus {
     /// False when a source could not be read, so an absent owner means none
     /// was found rather than none exists.
     pub owner_checks_complete: bool,
-    pub selected_backend: String,
-    /// Where a launcher window starts, and whether it is still there.
+    /// Where the panel itself stands, and whether it is still there.
     pub launch_directory: String,
     pub launch_directory_exists: bool,
     pub ghostty_available: Option<bool>,
-    pub effective_backend: Option<String>,
     pub zsh_widget_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event: Option<serde_json::Value>,
@@ -317,11 +287,8 @@ fn config_from(path: &Path) -> Result<GlobalConfig, String> {
     };
     let parsed = crate::minitoml::parse(&text);
     let root = parsed.get("");
-    let backend = Backend::parse(
-        root.and_then(|table| table.get("backend"))
-            .map(String::as_str)
-            .unwrap_or("auto"),
-    )?;
+    // A `backend` key written by an older build is simply not read. It chose
+    // where a handed-over command opened, and nothing opens now.
     let hotkey = Hotkey::parse(
         root.and_then(|table| table.get("hotkey"))
             .map(String::as_str)
@@ -333,11 +300,7 @@ fn config_from(path: &Path) -> Result<GlobalConfig, String> {
         .filter(|value| !value.trim().is_empty())
         .map(parse_directory)
         .transpose()?;
-    Ok(GlobalConfig {
-        backend,
-        hotkey,
-        directory,
-    })
+    Ok(GlobalConfig { hotkey, directory })
 }
 
 fn configured() -> Result<GlobalConfig, String> {
@@ -350,8 +313,7 @@ fn config_body(config: &GlobalConfig) -> String {
         None => String::new(),
     };
     format!(
-        "# Terminal, chord and starting directory used by the global launcher\n# helper. auto prefers Ghostty and falls back to Terminal.app; an unset\n# directory means $HOME.\nbackend = \"{}\"\nhotkey = \"{}\"\n{directory}",
-        config.backend.as_str(),
+        "# Chord and starting directory for the global launcher panel.\n# An unset directory means $HOME.\nhotkey = \"{}\"\n{directory}",
         config.hotkey.canonical()
     )
 }
@@ -364,17 +326,6 @@ fn write_config(config: &GlobalConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// The backend now decides only where a *handed-over command* opens, not what
-/// the launcher itself is: the panel is a Ghostty quick terminal or it does not
-/// exist, because no other terminal on macOS offers one.
-fn write_backend(backend: Backend) -> Result<(), String> {
-    let mut config = configured()?;
-    config.backend = backend;
-    write_config(&config)
-}
-
-/// Changing where a window opens needs no helper restart: the helper reads the
-/// directory when it launches one, so the next press uses it.
 fn write_directory(value: &str) -> Result<String, String> {
     let directory = parse_directory(value)?;
     if !directory.is_dir() {
@@ -396,6 +347,59 @@ fn clear_directory() -> Result<String, String> {
     ))
 }
 
+
+/// What the settings panel shows without parsing `global.toml` itself.
+///
+/// One reader, so a row and `prelude global status` cannot disagree about
+/// which chord is configured.
+pub struct GlobalSummary {
+    pub hotkey: String,
+    pub directory: String,
+}
+
+pub fn configured_summary() -> GlobalSummary {
+    let config = configured().unwrap_or_default();
+    GlobalSummary {
+        hotkey: config.hotkey.canonical(),
+        directory: effective_directory(&config).to_string_lossy().into_owned(),
+    }
+}
+
+/// Set the chord from the settings panel, with the same validation, the same
+/// conflict check and the same panel restart the CLI performs.
+pub fn set_hotkey(value: &str) -> Result<String, String> {
+    Hotkey::parse(value).and_then(write_hotkey)
+}
+
+pub fn set_directory(value: &str) -> Result<String, String> {
+    write_directory(value)
+}
+
+pub fn set_directory_default() -> Result<String, String> {
+    clear_directory()
+}
+
+/// Start the panel instance if it is not up. There is nothing to reveal
+/// without one, and the chord belongs to Ghostty rather than to us — so this
+/// is "make sure it exists", not "show it".
+pub fn open_panel() -> Result<(), String> {
+    if running() {
+        return Err("the panel is already running — press the chord to reveal it".into());
+    }
+    start_helper()
+}
+
+/// Stop and restart the instance, which is what a rebuilt binary needs.
+///
+/// The loop was started with whatever the binary held then and executes it
+/// until it exits. Each press does spawn the new binary as its child, so the
+/// rows and the footer update and it looks like the build took — while the
+/// half that decides what to do with an answer is still the old one.
+pub fn restart_panel() -> Result<String, String> {
+    stop_helper();
+    start_helper()?;
+    Ok("panel restarted; it now runs the binary on disk".into())
+}
 
 fn write_hotkey(hotkey: Hotkey) -> Result<String, String> {
     let mut config = configured()?;
@@ -484,63 +488,6 @@ fn launch_agent(config: &Path, stdout: &Path, stderr: &Path) -> String {
         stdout = xml(&stdout.to_string_lossy()),
         stderr = xml(&stderr.to_string_lossy()),
     )
-}
-
-/// Open one ordinary terminal window, for a command the launcher had nowhere
-/// else to put.
-///
-/// This is the only place left that builds a terminal, and it now runs when
-/// the answer needs one rather than on every press. The command itself is not
-/// passed here: it waits in a private file the new shell reads, so nothing
-/// selected reaches an argument list or an Apple Event.
-///
-/// Saved state is declined for the same reason the launcher declines it — a
-/// second Ghostty instance otherwise restores every window of the last
-/// session, so one deliberate window would arrive with a crowd.
-pub fn open_working_window() -> bool {
-    let config = configured().unwrap_or_default();
-    let directory = effective_directory(&config);
-    let directory = if directory.is_dir() {
-        directory
-    } else {
-        crate::paths::home()
-    };
-    let directory = directory.to_string_lossy().into_owned();
-    let ghostty = matches!(config.backend, Backend::Auto | Backend::Ghostty)
-        && std::path::Path::new(GHOSTTY_APP).is_dir();
-    if ghostty {
-        return Command::new("/usr/bin/open")
-            .args([
-                "-nb",
-                GHOSTTY_BUNDLE,
-                "--args",
-                &format!("--working-directory={directory}"),
-                "--window-save-state=never",
-                "-e",
-                "/usr/bin/env",
-                "PRELUDE_PRELOAD=1",
-                "/bin/zsh",
-                "-il",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-    }
-    // Terminal.app takes a command, not an environment, so the directory is
-    // the only thing interpolated — and `parse_directory` already refused
-    // every character that would need escaping here.
-    let script = format!(
-        "tell application id \"com.apple.Terminal\"\n do script \"cd '{directory}' && exec /usr/bin/env PRELUDE_PRELOAD=1 /bin/zsh -il\"\n activate\nend tell"
-    );
-    Command::new("/usr/bin/osascript")
-        .args(["-e", &script])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 fn run_visible(program: &str, args: &[&str]) -> Result<(), String> {
@@ -826,7 +773,7 @@ fn install() -> Result<String, String> {
     let _ = std::fs::remove_file(&backup);
 
     let mut result = format!(
-        "installed {}\nhotkey: {}\ncommands open in: {}\n",
+        "installed {}\nhotkey: {}\npanel stands in: {}\n",
         destination.display(),
         config.hotkey.canonical(),
         effective_directory(&config).display(),
@@ -1017,10 +964,6 @@ fn known_conflict(hotkey: &Hotkey) -> Option<String> {
 
 pub fn status() -> GlobalStatus {
     let parsed = configured();
-    let selected_backend = parsed
-        .as_ref()
-        .map(|config| config.backend.as_str().to_string())
-        .unwrap_or_else(|e| format!("invalid: {e}"));
     let selected_hotkey = parsed
         .as_ref()
         .map(|config| config.hotkey.canonical())
@@ -1046,11 +989,9 @@ pub fn status() -> GlobalStatus {
         selected_hotkey,
         hotkey_owner: owner.owner,
         owner_checks_complete: owner.complete,
-        selected_backend,
         launch_directory: directory.to_string_lossy().into_owned(),
         launch_directory_exists: directory.is_dir(),
         ghostty_available: Some(Path::new(GHOSTTY_APP).is_dir()),
-        effective_backend: Some("ghostty quick terminal".into()),
         zsh_widget_available: zsh_widget_available(),
         last_event: None,
     }
@@ -1103,7 +1044,7 @@ fn print_status(json: bool) -> i32 {
             },
         );
         println!(
-            "  {} commands open in  {}{}",
+            "  {} panel stands in  {}{}",
             if s.launch_directory_exists { "✓" } else { "✗" },
             s.launch_directory,
             if s.launch_directory_exists {
@@ -1184,14 +1125,15 @@ pub fn dispatch(args: &[&str]) -> i32 {
         }
         ["directory", "--default"] => clear_directory().map(|message| println!("{message}")),
         ["directory", value] => write_directory(value).map(|message| println!("{message}")),
-        ["backend"] => configured().map(|config| println!("{}", config.backend.as_str())),
-        ["backend", value] => Backend::parse(value).and_then(|backend| {
-            write_backend(backend)?;
-            println!("global terminal backend: {}", backend.as_str());
-            Ok(())
-        }),
+        // `backend` chose which terminal a handed-over command opened in.
+        // Nothing opens now, so it is gone rather than accepted and ignored.
+        ["backend", ..] => Err(
+            "there is no terminal backend any more: the panel copies what it hands over, \
+             and opens nothing"
+                .into(),
+        ),
         _ => Err(
-            "usage: prelude global install|uninstall|start|stop|status|open|hotkey [CHORD]|backend [auto|ghostty|terminal]|directory [PATH|--default]"
+            "usage: prelude global install|uninstall|start|stop|status|open|hotkey [CHORD]|directory [PATH|--default]"
                 .into(),
         ),
     };
@@ -1217,20 +1159,19 @@ mod tests {
     }
 
     #[test]
-    fn config_accepts_only_public_backends_and_canonical_hotkeys() {
-        let path = temp("backend");
+    fn config_canonicalizes_hotkeys_and_ignores_a_retired_backend() {
+        let path = temp("hotkey");
         std::fs::write(
             &path,
             "backend = \"ghostty\"\nhotkey = \"Shift+Command+K\"\n",
         )
         .unwrap();
+        // A `backend` left by an older build must not make the config
+        // unreadable, and must not be honoured either: nothing opens a
+        // terminal any more, so there is nothing for it to select.
         let config = config_from(&path).unwrap();
-        assert_eq!(config.backend, Backend::Ghostty);
         assert_eq!(config.hotkey.canonical(), "cmd+shift+k");
-        std::fs::write(&path, "backend = \"something-else\"\n").unwrap();
-        assert!(config_from(&path)
-            .unwrap_err()
-            .contains("auto, ghostty or terminal"));
+        assert!(!config_body(&config).contains("backend"));
         for bad in ["space", "cmd", "cmd+f1", "cmd+space+q", "cmd+cmd+q"] {
             std::fs::write(&path, format!("hotkey = \"{bad}\"\n")).unwrap();
             assert!(config_from(&path).is_err(), "{bad}");
@@ -1239,15 +1180,15 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_directory_is_optional_absolute_and_safe_in_both_backends() {
+    fn the_panel_directory_is_optional_absolute_and_safe() {
         let home = crate::paths::home();
         assert_eq!(parse_directory("~/").unwrap(), home);
         assert_eq!(parse_directory("/tmp").unwrap(), PathBuf::from("/tmp"));
         for bad in ["relative/path", "", "~notauser/x"] {
             assert!(parse_directory(bad).is_err(), "{bad}");
         }
-        // One rule covers a process argument and an Apple Event, rather than
-        // two escapes that can disagree.
+        // The directory is interpolated into a generated Ghostty config, so
+        // one rule refuses every character that would need escaping there.
         for bad in ["/tmp/a\"b", "/tmp/a'b", "/tmp/a`b", "/tmp/a$b", "/tmp/a\nb"] {
             assert!(parse_directory(bad).is_err(), "{bad}");
         }
@@ -1255,7 +1196,7 @@ mod tests {
         // Unset means $HOME, and stays out of the file so no personal path is
         // written until somebody asks for one.
         let path = temp("directory");
-        std::fs::write(&path, "backend = \"auto\"\nhotkey = \"cmd+space\"\n").unwrap();
+        std::fs::write(&path, "hotkey = \"cmd+space\"\n").unwrap();
         let config = config_from(&path).unwrap();
         assert_eq!(config.directory, None);
         assert_eq!(effective_directory(&config), home);

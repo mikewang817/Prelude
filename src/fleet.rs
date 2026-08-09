@@ -10,8 +10,8 @@
 //! uses, so they cannot disagree with it:
 //!
 //!   * `prelude fleet` — the list as text, for a human or a script.
-//!   * `prelude fleet --status` — one short line for a tmux status bar,
-//!     empty when there is nothing to say.
+//!   * `prelude fleet --status` — one short line for a status bar or a
+//!     prompt, empty when there is nothing to say.
 //!   * `prelude watch` — a daemon that posts a notification the moment a
 //!     run goes quiet. Silence is what a question looks like from outside
 //!     the process; this is what makes the silence audible.
@@ -25,8 +25,8 @@ use std::time::Duration;
 /// re-found inline (~95ms) rather than read from however old a cache.
 ///
 /// `--json` is not a convenience — it is the form an *agent* reads. An agent
-/// asked to "check on the others and take over anything stuck" needs the pane
-/// address and the session file, not a table aligned for human eyes.
+/// asked to "check on the others and take over anything stuck" needs the pid,
+/// the project and the session file, not a table aligned for human eyes.
 pub fn list(json: bool) -> i32 {
     crate::cache::refresh_named("fleet");
     let items = crate::sources::running::live();
@@ -42,9 +42,10 @@ pub fn list(json: bool) -> i32 {
     0
 }
 
-/// `prelude fleet --status`: called every few seconds by tmux, so it must
-/// never pay for subprocesses itself — cached identities, live states, and
-/// a detached refresh when the cache has aged. Exactly the launcher's deal.
+/// `prelude fleet --status`: written to be called every few seconds by a
+/// status bar, so it must never pay for subprocesses itself — cached
+/// identities, live states, and a detached refresh when the cache has aged.
+/// Exactly the launcher's deal.
 pub fn status() -> i32 {
     if crate::cache::stale("fleet") {
         crate::cache::spawn_self(&["_refresh", "fleet"]);

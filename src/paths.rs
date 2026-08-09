@@ -40,6 +40,11 @@ pub fn cwd() -> Option<PathBuf> {
 /// happened to be `$HOME`. Everything here is either irreplaceable or
 /// system-owned, and none of it is something a person meant to select from
 /// a launcher.
+///
+/// `project::root` asks the same question for a different reason: these are
+/// the directories that *hold* projects rather than being one, and walking
+/// them as if they were is how a launcher opened in `$HOME` ends up reading
+/// every other application's data.
 pub fn is_protected(p: &std::path::Path) -> bool {
     let Ok(real) = p.canonicalize() else { return true };
     if real.parent().is_none() {

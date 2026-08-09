@@ -1,6 +1,17 @@
-//! Shell and tmux integration, printed for the user to eval/source.
+//! Shell integration, printed for the user to eval.
 
-pub const ZSH: &str = r#"# Prelude — zsh integration
+/// The zsh block, with the configured key substituted in.
+///
+/// The key has to be baked in rather than read at shell start: this text is
+/// what `eval` sees, and the shell has no way to ask Prelude anything before
+/// running it. Which is also why changing the key reaches the *next* shell —
+/// said on the row that changes it, so nobody waits for a binding that was
+/// never going to appear.
+pub fn zsh() -> String {
+    ZSH.replace("@KEY@", &crate::settings::launcher_key())
+}
+
+const ZSH: &str = r#"# Prelude — zsh integration
 # Added by: prelude init zsh
 
 _prelude_widget() {
@@ -31,73 +42,21 @@ _prelude_widget() {
 }
 zle -N _prelude_widget
 
-# A window opened for a command the launcher handed over. The command is not
-# on our argument list — a history entry can hold a token and `ps` is readable
-# by anything on the machine — so it waits in a private file, which this shell
-# reads once and removes. INSERT puts it on the prompt for you to agree to;
-# RUN was already agreed to in the launcher.
-if [[ -n ${PRELUDE_PRELOAD:-} ]]; then
-  unset PRELUDE_PRELOAD
-  _prelude_preload_once() {
-    add-zle-hook-widget -d line-init _prelude_preload_once
-    local file="${XDG_CACHE_HOME:-$HOME/.cache}/prelude/preload"
-    [[ -r "$file" ]] || return 0
-    local verb='' payload=''
-    { IFS= read -r verb; IFS= read -r -d '' payload } < "$file"
-    command rm -f -- "$file"
-    payload="${payload%$'\n'}"
-    [[ -n "$payload" ]] || return 0
-    if [[ "$verb" == RUN ]]; then
-      BUFFER="$payload"
-      zle accept-line
-    else
-      LBUFFER="$payload"
-      RBUFFER=""
-    fi
-  }
-  autoload -Uz add-zle-hook-widget
-  zle -N _prelude_preload_once
-  add-zle-hook-widget line-init _prelude_preload_once
-fi
-
 # Ctrl-R by default: prelude is a superset of incremental history search, and
 # that is already where your fingers go for "that command I ran before".
-# Override by setting PRELUDE_KEY before the `eval` line, e.g. PRELUDE_KEY='^T'.
+# Change it with `prelude settings set key '^T'`, or by exporting PRELUDE_KEY
+# before the `eval` line — the variable still wins. Either way this line was
+# written when the shell started, so a change reaches the next shell.
 #
 # Not Ctrl-Space: macOS binds it to "Select the previous input source",
 # so the OS eats it before the terminal ever sees it.
-: ${PRELUDE_KEY:='^R'}
+: ${PRELUDE_KEY:='@KEY@'}
 bindkey "$PRELUDE_KEY" _prelude_widget
 
 # Keep the old Ctrl-R behaviour on Ctrl-S. Ctrl-S is XOFF (freezes terminal
 # output) under legacy flow control, so turn that off to free the key.
 stty -ixon 2>/dev/null
 bindkey '^S' history-incremental-search-backward
-"#;
-
-pub const TMUX: &str = r#"# Prelude — tmux integration
-# Added by: prelude init tmux
-#
-# The zsh widget only works at a zsh prompt. This binding works *anywhere*,
-# because tmux owns the terminal above whatever is running in the pane —
-# an agent conversation, vim, a REPL, an ssh session.
-#
-# It opens the launcher in a floating popup, then types the chosen command
-# into the pane underneath. It never presses Enter for you.
-
-# prefix + r  (i.e. Ctrl-b then r)
-bind r display-popup -E -w 92% -h 92% -d '#{pane_current_path}' \
-  "PRELUDE_IN_POPUP=1 prelude paste"
-
-# Optional: one-key access with no prefix. Uncomment if Alt-R is free for you.
-# bind -n M-r display-popup -E -w 92% -h 92% -d '#{pane_current_path}' \
-#   "PRELUDE_IN_POPUP=1 prelude paste"
-
-# Optional: agents and their questions in the status bar. "2 waiting · 3 working" when there is
-# a fleet, nothing at all when there is not. Costs no subprocesses per
-# refresh beyond prelude itself — identities come from its cache.
-# set -g status-interval 15
-# set -g status-right '#(prelude fleet --status) · %H:%M '
 "#;
 
 /// What an agent needs to know, in the form an agent actually reads.
@@ -174,25 +133,35 @@ for nothing teaches the person to ignore the next one.
 
 #[cfg(test)]
 mod tests {
-    use super::ZSH;
+    use super::{zsh, ZSH};
+
+    /// The key is baked in, because `eval` is all the shell sees and it has no
+    /// way to ask Prelude anything first. The placeholder must therefore never
+    /// survive into what a shell runs.
+    #[test]
+    fn the_configured_key_reaches_the_shell_block() {
+        let out = zsh();
+        assert!(!out.contains("@KEY@"), "the placeholder was not substituted");
+        assert!(out.contains(&format!(": ${{PRELUDE_KEY:='{}'}}", crate::settings::launcher_key())));
+        // …and the variable still overrides it, for a one-shell change.
+        assert!(out.contains("bindkey \"$PRELUDE_KEY\" _prelude_widget"));
+    }
 
     #[test]
-    fn a_handed_over_command_arrives_by_file_and_lands_on_a_prompt() {
-        // The launcher panel is not a shell, so a command it hands over needs
-        // a window — and the command itself must not travel on that window's
-        // command line, where `ps` would show it to everything on the machine.
-        assert!(ZSH.contains("${PRELUDE_PRELOAD:-}"));
-        assert!(ZSH.contains("prelude/preload"));
-        assert!(ZSH.contains("command rm -f -- \"$file\""));
-        assert!(ZSH.contains("add-zle-hook-widget -d line-init _prelude_preload_once"));
-        // INSERT still waits for a human to press Enter; RUN was agreed to in
-        // the launcher. Both branches live inside the preload block, not in
-        // the Ctrl+R widget above it.
-        let block = &ZSH[ZSH.find("${PRELUDE_PRELOAD:-}").unwrap()..];
-        let block = &block[..block.find("\nfi\n").unwrap()];
-        assert!(block.contains("if [[ \"$verb\" == RUN ]]"));
-        assert!(block.contains("zle accept-line"));
-        assert!(block.contains("LBUFFER=\"$payload\""));
+    fn the_widget_is_the_only_thing_this_shell_learns() {
+        // The three verbs, and nothing else. There used to be a second block
+        // here that bootstrapped a shell the panel had opened for a command,
+        // reading the command out of a private file so it would not show up in
+        // `ps`. The panel copies now: no window is opened, so no shell needs
+        // teaching how to receive one.
+        assert!(!ZSH.contains("PRELUDE_PRELOAD"));
+        assert!(!ZSH.contains("prelude/preload"));
+        assert!(!ZSH.contains("add-zle-hook-widget"));
+        // INSERT waits for a human to press Enter; RUN was agreed to in the
+        // launcher; MSG explains a refusal without touching the line.
+        assert!(ZSH.contains("LBUFFER=\"$payload\""));
+        assert!(ZSH.contains("zle accept-line"));
+        assert!(ZSH.contains("zle -M \"prelude: $payload\""));
         assert!(!ZSH.contains("sleep "));
         assert!(!ZSH.contains("osascript"));
     }

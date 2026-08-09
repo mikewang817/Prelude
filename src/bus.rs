@@ -28,10 +28,15 @@
 //! or by hand with `prelude answer <id>`.
 //!
 //! **Identity is discovered, never declared.** An agent should not have to be
-//! told who it is or configured with an address. `$TMUX_PANE` gives a reply
-//! address for free in any pane, `$PWD` gives the project, and walking the
-//! process tree finds which agent binary we are running under. So the whole
-//! interface really is just the four verbs above.
+//! told who it is or configured with an address. `$PWD` gives the project and
+//! walking the process tree finds which agent binary we are running under, so
+//! the whole interface really is just the four verbs above.
+//!
+//! There used to be a third signal, `$TMUX_PANE`, and it was the only one that
+//! could carry a message *to* an agent rather than merely label one it came
+//! from: a pane can be typed into. Nothing can now, so every message waits in
+//! an inbox to be collected. That is slower and it is the same speed for every
+//! agent, wherever it is running — which the pane never was.
 //!
 //! **Storage is one JSON file per message**, under the data directory rather
 //! than the cache: an unanswered question is not something to be dropped when
@@ -72,13 +77,8 @@ pub struct Msg {
     pub from_project: String,
     #[serde(default)]
     pub from_cwd: String,
-    /// Where to type a reply back, when the sender was in a pane.
-    #[serde(default)]
-    pub from_pane: String,
     /// `human`, or the label of the agent this was addressed to.
     pub to: String,
-    #[serde(default)]
-    pub to_pane: String,
     #[serde(default)]
     pub to_cwd: String,
     pub text: String,
@@ -185,19 +185,16 @@ fn sweep() {
 pub struct Who {
     /// The agent binary we are running underneath, or empty at a bare shell.
     pub agent: String,
-    pub pane: String,
     pub cwd: String,
     pub project: String,
 }
 
 /// Work out who is running this command, without being told.
 ///
-/// The three signals are all free. `$TMUX_PANE` is exported into every pane,
-/// so an agent calling us from one hands over a reply address without knowing
-/// it did. `$PWD` names the project. And the process tree says which agent we
-/// are underneath — an agent's tool call runs `sh -c "prelude …"`, so the
-/// agent is our grandparent rather than our parent, and the walk has to climb
-/// rather than look once.
+/// Both signals are free. `$PWD` names the project, and the process tree says
+/// which agent we are underneath — an agent's tool call runs `sh -c "prelude
+/// …"`, so the agent is our grandparent rather than our parent, and the walk
+/// has to climb rather than look once.
 pub fn whoami() -> Who {
     let cwd = crate::paths::cwd()
         .map(|p| p.to_string_lossy().into_owned())
@@ -205,7 +202,6 @@ pub fn whoami() -> Who {
     let project = cwd.rsplit('/').next().unwrap_or("").to_string();
     Who {
         agent: enclosing_agent().unwrap_or_default(),
-        pane: std::env::var("TMUX_PANE").unwrap_or_default(),
         cwd,
         project,
     }
@@ -288,7 +284,6 @@ pub fn ask(text: &str, wait: u64, no_wait: bool) -> i32 {
         from: if me.agent.is_empty() { "shell".into() } else { me.agent.clone() },
         from_project: me.project.clone(),
         from_cwd: me.cwd.clone(),
-        from_pane: me.pane.clone(),
         to: "human".into(),
         text: clean(text),
         ts: now(),
@@ -300,9 +295,6 @@ pub fn ask(text: &str, wait: u64, no_wait: bool) -> i32 {
     }
     sweep();
     post(&format!("{} asks", m.label()), text);
-    // Nudge every attached tmux client so a status bar showing the count
-    // updates now rather than at its next poll.
-    crate::exec::run(&["tmux", "refresh-client", "-S"], Duration::from_secs(1));
 
     if no_wait {
         eprintln!("prelude: asked — collect the answer with  prelude answer-of {}", m.id);
@@ -354,7 +346,6 @@ pub fn tell(text: &str) -> i32 {
         from: if me.agent.is_empty() { "shell".into() } else { me.agent.clone() },
         from_project: me.project.clone(),
         from_cwd: me.cwd,
-        from_pane: me.pane,
         to: "human".into(),
         text: clean(text),
         ts: now(),
@@ -371,11 +362,13 @@ pub fn tell(text: &str) -> i32 {
 
 /// `prelude say <target> <text>` — one agent to another.
 ///
-/// Delivery is direct when the target has a pane: the text is typed into it
-/// and submitted, because unlike a person at a keyboard the sender here is
-/// deliberately sending a message and there is nobody to press Enter for it.
-/// An agent with no pane cannot be typed into at all, so the message waits in
-/// its inbox for the next time it looks.
+/// The message waits in the target's inbox until it runs `prelude inbox`.
+/// There was a faster path once, for a target that had a tmux pane: the line
+/// was typed into it and submitted, which put it in front of the agent
+/// immediately. It was also the only delivery that worked for some of the
+/// fleet and not the rest, and an agent could not tell which kind of peer it
+/// was addressing. One route for everyone is worth more than a fast route for
+/// some.
 pub fn say(target: &str, text: &str) -> i32 {
     if target == "human" {
         return tell(text);
@@ -403,85 +396,58 @@ pub fn say(target: &str, text: &str) -> i32 {
         }
     };
 
+    match leave(&hit, text) {
+        Ok(to) => {
+            eprintln!("prelude: left in {to}'s inbox");
+            0
+        }
+        Err(e) => {
+            eprintln!("prelude: {e}");
+            2
+        }
+    }
+}
+
+/// Put a line in a running agent's inbox, and say whose it is.
+///
+/// Shared by `prelude say` and the launcher's own "Leave it a message…", so
+/// the two cannot disagree about what a message is or where it goes.
+///
+/// The attribution the reader eventually sees is not decoration: without it a
+/// peer's message reads as the owner's, and the agent answers a question
+/// nobody asked. It is applied where the inbox is rendered rather than baked
+/// into the stored text, so the message is kept as the sender wrote it.
+pub fn leave(target: &Item, text: &str) -> Result<String, String> {
     let me = whoami();
-    let from = if me.agent.is_empty() { "you".to_string() } else { me.label_of() };
-    let mut m = Msg {
+    let to = format!("{} · {}", target.get("agent"), target.get("project"));
+    let m = Msg {
         id: format!("{}-{}", now(), std::process::id()),
         kind: "say".into(),
         from: if me.agent.is_empty() { "shell".into() } else { me.agent.clone() },
         from_project: me.project.clone(),
         from_cwd: me.cwd.clone(),
-        from_pane: me.pane.clone(),
-        to: format!("{} · {}", hit.get("agent"), hit.get("project")),
-        to_pane: hit.get("pane").to_string(),
-        to_cwd: hit.get("cwd").to_string(),
+        to: to.clone(),
+        to_cwd: target.get("cwd").to_string(),
         text: clean(text),
         ts: now(),
         ..Default::default()
     };
-
-    let pane = hit.get("pane");
-    if pane.is_empty() {
-        let _ = save(&m);
-        eprintln!(
-            "prelude: {} is not in a tmux pane — left in its inbox instead",
-            m.to
-        );
-        return 0;
-    }
-    let line = delivered_line(&from, text);
-    let d = Duration::from_secs(5);
-    crate::exec::run(&["tmux", "send-keys", "-t", pane, "-l", &line], d);
-    crate::exec::run(&["tmux", "send-keys", "-t", pane, "Enter"], d);
-    m.answer = Some(String::new());
-    m.answered = Some(now());
-    let _ = save(&m);
-    eprintln!("prelude: delivered to {} ({})", m.to, hit.get("addr"));
-    0
-}
-
-/// The line typed into another agent's pane, and pressed Enter for.
-///
-/// The attribution is not decoration: without it the receiving agent reads a
-/// peer's message as its owner's, and answers a question nobody asked.
-///
-/// **One message is one line.** A line typed into a pane is submitted the
-/// moment it reaches a newline, so a two-line message arrived as *two*
-/// submitted inputs and only the first carried the attribution — the second
-/// read as the owner's own words, which is precisely what the attribution
-/// exists to prevent, and `say` reported the whole thing as delivered. So the
-/// delivered form is flattened, and the remaining control characters go with
-/// it: an escape sequence typed into a TUI is not text at all. The stored
-/// message keeps whatever the sender wrote; this is the wire format, and only
-/// this.
-fn delivered_line(from: &str, text: &str) -> String {
-    let line = format!("[via prelude, from {from}] {text}");
-    crate::width::flatten(&line).chars().filter(|c| !c.is_control()).collect()
-}
-
-impl Who {
-    fn label_of(&self) -> String {
-        match (self.agent.as_str(), self.project.as_str()) {
-            ("", p) => p.to_string(),
-            (a, "") => a.to_string(),
-            (a, p) => format!("{a} · {p}"),
-        }
-    }
+    save(&m).map_err(|e| format!("could not leave the message: {e}"))?;
+    Ok(to)
 }
 
 /// Match a free-text target against the running fleet.
 ///
 /// Deliberately several ways at once — an agent writing `prelude say
-/// api-gateway …` should not have to know whether that is a project, a pane
-/// or a session name. Exact matches win outright so that a project literally
-/// called `claude` cannot be shadowed by every claude on the machine.
+/// api-gateway …` should not have to know whether that is a project, a pid or
+/// an address. Exact matches win outright so that a project literally called
+/// `claude` cannot be shadowed by every claude on the machine.
 pub fn resolve(runs: &[Item], target: &str) -> Vec<Item> {
     let t = target.trim().to_lowercase();
     let exact: Vec<Item> = runs
         .iter()
         .filter(|r| {
             r.get("addr").eq_ignore_ascii_case(&t)
-                || r.get("pane").eq_ignore_ascii_case(&t)
                 || r.get("project").eq_ignore_ascii_case(&t)
                 || r.get("pid") == t
         })
@@ -516,7 +482,6 @@ pub fn answer(id: &str, text: &str) -> i32 {
         eprintln!("prelude: could not save the answer: {e}");
         return 2;
     }
-    crate::exec::run(&["tmux", "refresh-client", "-S"], Duration::from_secs(1));
     eprintln!("prelude: answered {} — {}", m.label(), m.id);
     0
 }
@@ -561,10 +526,12 @@ pub fn inbox(json: bool, all_of_them: bool, as_human: bool) -> i32 {
                 // A person: everything addressed to a human.
                 m.to == "human" && (all_of_them || m.pending())
             } else {
-                // An agent: what was left for this pane or this project, and
-                // not yet picked up.
-                let for_me = (!me.pane.is_empty() && m.to_pane == me.pane)
-                    || (!me.cwd.is_empty() && m.to_cwd == me.cwd);
+                // An agent: what was left for this project and not yet
+                // picked up. The working directory is the whole of the
+                // address now — two agents in one directory share an inbox,
+                // which `say` already refuses to create by refusing an
+                // ambiguous target.
+                let for_me = !me.cwd.is_empty() && m.to_cwd == me.cwd;
                 for_me && m.kind == "say" && (all_of_them || m.answer.is_none())
             }
         })
@@ -594,8 +561,7 @@ pub fn drain() -> i32 {
     let me = whoami();
     let mut n = 0;
     for mut m in all() {
-        let for_me = (!me.pane.is_empty() && m.to_pane == me.pane)
-            || (!me.cwd.is_empty() && m.to_cwd == me.cwd);
+        let for_me = !me.cwd.is_empty() && m.to_cwd == me.cwd;
         if for_me && m.kind == "say" && m.answer.is_none() {
             m.answer = Some(String::new());
             m.answered = Some(now());
@@ -656,7 +622,6 @@ pub fn items() -> Vec<Item> {
                 .put("agent", m.from.clone())
                 .put("text", m.text.clone())
                 .put("project", m.from_project.clone())
-                .put("pane", m.from_pane.clone())
                 .put("cwd", m.from_cwd.clone())
                 .put("path", m.from_cwd.clone())
         })
@@ -694,22 +659,30 @@ mod tests {
         assert!(clean(&"x".repeat(10_000)).chars().count() <= TEXT_MAX);
     }
 
-    /// A message with a newline in it used to arrive at the receiving agent as
-    /// several *separately submitted* inputs, only the first of which carried
-    /// the attribution — so the rest read as the human's own words in that
-    /// agent's own conversation, which is the one thing `say` must never do.
-    ///
-    /// Reproduced against a real pane before it was fixed. The stored message
-    /// is untouched; only what goes over the wire is flattened.
+    /// Every message is addressed by working directory now, and `say` is what
+    /// keeps two agents from sharing one: it refuses a target that matches
+    /// more than one run rather than picking. This pins the refusal, because
+    /// a message delivered to the wrong conversation reads as the human's own
+    /// words and is worse than one not sent.
     #[test]
-    fn a_delivered_message_is_exactly_one_attributed_line() {
-        let line = delivered_line("claude · api", "first\nsecond\r\nthird\ttab");
-        assert!(line.starts_with("[via prelude, from claude · api] "), "{line}");
-        assert!(!line.contains('\n') && !line.contains('\r'), "{line}");
-        assert!(!line.chars().any(char::is_control), "an escape sequence is not text: {line}");
-        for word in ["first", "second", "third"] {
-            assert!(line.contains(word), "{word} was lost: {line}");
-        }
+    fn an_ambiguous_target_is_refused_rather_than_guessed_at() {
+        let runs = vec![
+            Item::new("kill 1", Kind::Run).put("agent", "claude").put("project", "api"),
+            Item::new("kill 2", Kind::Run).put("agent", "codex").put("project", "api"),
+        ];
+        assert_eq!(resolve(&runs, "api").len(), 2, "both must be returned, so say can refuse");
+        assert_eq!(resolve(&runs, "nothing-here").len(), 0);
+    }
+
+    /// The stored message keeps exactly what the sender wrote, minus the
+    /// unbounded and the un-printable. It used to be flattened to one line on
+    /// the way out, because a newline typed into a pane submitted the input
+    /// early and everything after it arrived unattributed. Nothing is typed
+    /// into anything now, so the text survives whole.
+    #[test]
+    fn a_stored_message_keeps_what_was_written() {
+        let m = clean("first\nsecond");
+        assert!(m.contains("first") && m.contains("second"));
     }
 
     /// An id arrives on a command line and becomes a file name. `prelude

@@ -19,9 +19,6 @@ fn a(id: &'static str, label: &str, sub: impl Into<String>) -> Act {
     (id, label.to_string(), sub.into())
 }
 
-pub fn actions_for(it: &Item) -> Vec<Act> {
-    actions_for_host(it, crate::defaults::Host::Shell)
-}
 
 /// The agents a per-agent verb can be pointed at, as the ids `apply` takes.
 ///
@@ -164,7 +161,7 @@ fn with_options(v: &mut Vec<Act>, it: &Item, verb: &'static str, one: &str, many
     }
 }
 
-pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
+pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let mut acts = match it.kind {
         Kind::Session => {
@@ -221,21 +218,6 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             }
             v
         }
-        // In an agent conversation Enter starts this one beside the current
-        // pane and the secondary hands over its name. Resume commands and
-        // one-off shell runners do not belong in another agent's chat box.
-        Kind::Agent if host == crate::defaults::Host::Agent => {
-            let n = it.get("agent");
-            let mut v = Vec::new();
-            if let Some(p) = crate::sources::agents::config_for(n) {
-                v.push((
-                    leak(format!("agentcfg:{n}")),
-                    "Open settings locally".to_string(),
-                    crate::paths::tilde(&p),
-                ));
-            }
-            v
-        }
         // An agent CLI. Enter puts its name on the prompt, because that is
         // where you add `--resume`, a model, or an opening question.
         Kind::Agent => {
@@ -269,42 +251,74 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             v.push(a("agent-doctor", "Diagnose Agents", "versions, login, config and relationships"));
             v
         }
-        // A running agent. At eighty of them the panel is the difference
-        // between a fleet and a mess: go to it, answer it without leaving
-        // here, or end it.
+        // A running agent. Nothing here reaches into its terminal — Prelude
+        // cannot put your cursor in somebody else's window, and typing into
+        // one behind your back was worse than not offering it. What is left
+        // is what a pid and a conversation file can honestly answer: what it
+        // last said, where it is working, and ending it.
         Kind::Run => {
             let mut v = Vec::new();
-            let addr = it.get("addr");
-            // No "go to it" row: Enter already is that, and the panel
-            // states Enter's action at the top.
-            if !it.get("pane").is_empty() {
-                v.push(a("say", "Send a message…", "without switching panes"));
-            }
             v.push(a("details", "Show last response", it.get("subject")));
-            if !it.get("pane").is_empty() {
-                v.push(a("zoom", "Go to pane full-screen", addr));
-            }
+            // A message goes to its inbox, for it to collect. That is slower
+            // than typing into a pane and it is the only delivery that does
+            // not depend on where the agent happens to be running.
+            v.push(a("say", "Leave it a message…", "waits in its inbox"));
             if !it.get("cwd").is_empty() {
                 v.push(a("cdrun", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
             }
-            if !addr.is_empty() {
-                v.push(a("copy", "Copy pane address", addr));
+            if !it.get("pid").is_empty() {
+                v.push(a("copy", "Copy PID", it.get("pid")));
             }
             v.push(a("killrun", "End agent…", format!("{} · pid {}", it.get("agent"), it.get("pid"))));
             v
         }
         // A question an agent is blocked on. Enter already answers it, so
-        // this is everything else you might want first: see the conversation
-        // it came out of, go there, or decline so it stops waiting.
-        Kind::Msg => {
+        // this is everything else you might want first: answer it in one
+        // keystroke either way, or read what it came out of.
+        Kind::Msg => vec![
+            a("msg:go", "Answer “go ahead”", "unblocks it immediately"),
+            a("msg:no", "Answer “no”", "unblocks it immediately"),
+            a("details", "Show conversation context", ""),
+            a("copy", "Copy question", ""),
+        ],
+        // One of Prelude's own preferences. Enter changes it, and this is
+        // everything else — never Enter again under the same words, which is
+        // the one thing this panel is not for.
+        Kind::Setting => {
             let mut v = Vec::new();
-            v.push(a("msg:go", "Answer “go ahead”", "unblocks it immediately"));
-            v.push(a("msg:no", "Answer “no”", "unblocks it immediately"));
-            v.push(a("details", "Show conversation context", ""));
-            if !it.get("pane").is_empty() {
-                v.push(a("zoom", "Go to agent full-screen", it.get("pane")));
+            let enter = it.get("edit");
+            match it.get("setting") {
+                "roots" => {
+                    // Enter is "Add a folder…", so it is absent here.
+                    v.push(a("set-root-remove", "Remove a folder…", "leaves the folder alone"));
+                    // Named rather than done on the way out of some other
+                    // action: it walks every root and can take a minute, and
+                    // a launcher that disappears for a minute has hung.
+                    v.push(a("set-index", "Rebuild the index now", "runs prelude index here"));
+                    v.push(a("details", "Show every root", ""));
+                }
+                "hotkey" => {
+                    v.push(a("set-panel-open", "Start the panel", "if it is not running"));
+                    v.push(a("set-panel-restart", "Restart the panel", "picks up a rebuilt binary"));
+                }
+                "paneldir" => v.push(a("set-paneldir-default", "Reset to $HOME", "")),
+                "preview" | "enter" | "key" | "height" => {
+                    v.push(a("details", "What this changes", ""));
+                }
+                _ => {}
             }
-            v.push(a("copy", "Copy question", ""));
+            let path = it.get("path");
+            if !path.is_empty() {
+                let short = crate::paths::tilde(path);
+                // `openit` *is* Enter for the list-shaped settings, so it
+                // appears only for the ones whose Enter is something else.
+                if enter != crate::settings::EDIT_OPEN {
+                    v.push(a("openit", "Open the file", short.clone()));
+                }
+                v.push(a("open", "Open it in your editor", format!("{editor} …")));
+                v.push(a("reveal-finder", "Reveal in Finder", short.clone()));
+                v.push(a("copyabs", "Copy the file path", short));
+            }
             v
         }
         Kind::Config => open_actions(it.kind, it.get("path"), &editor),
@@ -322,30 +336,21 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             a("copy", "Copy container name", it.get("name")),
             a("stop", "Insert stop command", format!("docker stop {}", it.get("name"))),
         ],
-        Kind::Skill if host == crate::defaults::Host::Agent => {
-            let target = first_nonempty(it, &["file", "dir"]);
-            let mut v = Vec::new();
-            if !it.get("desc").is_empty() {
-                v.push(a("desc", "Read instructions", ""));
-            }
-            if !target.is_empty() {
-                v.push(a("open", "Open SKILL.md locally", &target));
-            }
-            with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
-            if it.get("integrity") == "divergent" {
-                with_options(&mut v, it, "diff", "Compare {}", "Compare copies…",
-                             "before replacing either copy");
-                with_options(&mut v, it, "sync", "Replace {}", "Replace a divergent copy…",
-                             "shows diff · old copy goes to Trash");
-            }
-            with_options(&mut v, it, "rm", "Delete {} copy…", "Delete a copy…",
-                         "moves it to the Trash");
-            v
-        }
         Kind::Skill => {
             let target = first_nonempty(it, &["file", "dir"]);
             let mut v = Vec::new();
             with_options(&mut v, it, "run", "Run with {}", "Run with…", "");
+            // The two bare forms of the same skill, for a conversation that
+            // is already open somewhere else. `/name` works only for an agent
+            // that has it — to any other it is a line of prose that means
+            // nothing, silently — so the file pointer sits beside it rather
+            // than behind a guess about who you are talking to. Prelude used
+            // to make that guess by asking tmux what the pane underneath was
+            // running; with no pane underneath, the choice is yours.
+            if !target.is_empty() {
+                v.push(a("skillcmd", "Insert the slash command", &it.cmd));
+                v.push(a("skillfile", "Point an agent at its file", &target));
+            }
             // Borrowing comes before copying: it is the lighter of the two,
             // and the one that is nearly always what was meant. Copying puts
             // a second copy of the skill on disk, to be maintained forever;
@@ -379,32 +384,6 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             // on a number the row only hints at.
             with_options(&mut v, it, "rm", "Delete {} copy…", "Delete a copy…",
                          "moves it to the Trash");
-            v
-        }
-        Kind::Mcp if host == crate::defaults::Host::Agent => {
-            let target = first_nonempty(it, &["file", "dir", "config"]);
-            let mut v = Vec::new();
-            if !it.get("tools").is_empty() && it.get("tools") != "[]" {
-                let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(it.get("tools"))
-                    .map(|tools| tools.len()).unwrap_or(0);
-                v.push(a("mcp-tools", "Show cached tools", format!("{count} tools")));
-            }
-            v.push(a("mcprefresh", if it.get("agent") == "claude" {
-                "Test connection now"
-            } else {
-                "Refresh status now"
-            }, it.get("agent")));
-            if it.get("transport") == "stdio" && it.get("health") != "disabled" {
-                v.push(a("mcp-tools-refresh", "Refresh tool inventory", "background protocol handshake"));
-            }
-            v.push(a("mcptools", "Show owner-reported details", format!("{} mcp get", it.get("agent"))));
-            v.push(a("copy", "Copy server name", ""));
-            if crate::capability::mcp_variants(it).len() > 1 {
-                v.push(a("mcpcompare", "Compare Agent definitions", "redacted capability matrix"));
-            }
-            if !target.is_empty() {
-                v.push(a("open", "Open owner configuration locally", &target));
-            }
             v
         }
         Kind::Mcp => {
@@ -505,12 +484,6 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
             a("insert", "Insert open command", &it.cmd),
             a("trash", "Move to Trash…", "uninstalls it, recoverably"),
         ],
-        Kind::Dir if host == crate::defaults::Host::Agent => vec![
-            a("openit", "Open locally in Finder", it.get("path")),
-            a("copy-file", "Copy folder", it.get("path")),
-            a("insert", "Insert cd command", &it.cmd),
-            a("copy", "Copy path", it.get("path")),
-        ],
         Kind::Dir => vec![
             a("copy-file", "Copy folder", it.get("path")),
             a("insert", "Insert cd command", &it.cmd),
@@ -569,10 +542,12 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     //
     // Some rich agent kinds already expose that same behaviour under a more
     // useful, specific label, so they do not get a generic secondary row.
-    let specific_alternative = matches!(it.kind, Kind::Run | Kind::Msg | Kind::Session | Kind::App)
-        || (host == crate::defaults::Host::Shell && matches!(it.kind, Kind::Skill | Kind::Mcp));
+    let specific_alternative = matches!(
+        it.kind,
+        Kind::Run | Kind::Msg | Kind::Session | Kind::App | Kind::Skill | Kind::Mcp | Kind::Setting
+    );
     if !specific_alternative {
-        if let Some(label) = crate::defaults::describe_secondary(it, host) {
+        if let Some(label) = crate::defaults::describe_secondary(it, surface) {
             acts.insert(0, a("secondary", label, ""));
         }
     }
@@ -591,8 +566,8 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     // in the behaviour, not the name.
     use crate::defaults::{Default_, Verb};
     let already = |v: Verb| {
-        crate::defaults::on_enter(it, host) == Default_::Act(v)
-            || crate::defaults::on_secondary(it, host) == Some(Default_::Act(v))
+        crate::defaults::on_enter(it) == Default_::Act(v)
+            || crate::defaults::on_secondary(it, surface) == Some(Default_::Act(v))
     };
     // Three verbs all end in `emit("RUN", cmd)`, so any of them above means
     // the generic runner is the same keystroke with a duller label.
@@ -608,11 +583,18 @@ pub fn actions_for_host(it: &Item, host: crate::defaults::Host) -> Vec<Act> {
     {
         acts.push(a("runhere", "Run and show output", "inside Prelude"));
     }
-    let runnable = matches!(
-        it.kind,
-        Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Ssh
-            | Kind::Container | Kind::Git | Kind::Sys | Kind::Agent
-    ) || (it.kind == Kind::Session && it.get("active_run").is_empty());
+    // "Run now" means "we hand it over already submitted", which needs a
+    // shell on the other end of the handover. From the panel there is only
+    // the clipboard, where a submitted command and an unsubmitted one are the
+    // same bytes — so the row would be Enter again under a bolder name.
+    // `runhere` above is the honest way to run something from that surface,
+    // and it stays.
+    let runnable = surface != crate::defaults::Surface::Clipboard
+        && (matches!(
+            it.kind,
+            Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Ssh
+                | Kind::Container | Kind::Git | Kind::Sys | Kind::Agent
+        ) || (it.kind == Kind::Session && it.get("active_run").is_empty()));
     if runnable && !runs_it && !acts.iter().any(|(id, ..)| *id == "run") {
         acts.push(a("run", "Run now", ""));
     }
@@ -798,7 +780,7 @@ fn owned_by(owners: &str, agent: &str) -> bool {
     !agent.is_empty() && owners.split(',').map(str::trim).any(|owner| owner == agent)
 }
 
-fn pick_one(title: &str, choices: &[(String, String, String)]) -> Option<String> {
+pub fn pick_one(title: &str, choices: &[(String, String, String)]) -> Option<String> {
     if choices.is_empty() {
         return None;
     }
@@ -834,13 +816,9 @@ fn parent_of(p: impl AsRef<str>) -> String {
 /// "close Prelude"; the caller uses this distinct code to reopen the list.
 pub const PANEL_BACK: i32 = 131;
 
-pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
-    let host = if paste_target.is_some() {
-        crate::defaults::Host::Agent
-    } else {
-        crate::defaults::Host::Shell
-    };
-    let acts = actions_for_host(it, host);
+pub fn panel(it: &Item) -> i32 {
+    let surface = crate::defaults::surface();
+    let acts = actions_for(it, surface);
     let feed: String = acts
         .iter()
         .map(|(id, label, sub)| {
@@ -859,7 +837,7 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
 
     let title = crate::width::dtrunc(&crate::width::flatten(&it.title), 48);
     let kind = it.kind.style().1;
-    let default = crate::defaults::describe(it, host);
+    let default = crate::defaults::describe(it, surface);
     let header = format!("{DIM}Default: {default} · Enter{RESET}");
 
     loop {
@@ -901,7 +879,7 @@ pub fn panel(it: &Item, paste_target: Option<String>) -> i32 {
             id = chosen;
         }
 
-        let code = apply(&id, it, &paste_target);
+        let code = apply(&id, it);
         if code == 130 {
             // A canceled confirmation returns to the actions too.
             continue;
@@ -920,7 +898,7 @@ fn stays_in_panel(id: &str) -> bool {
     ) || id.starts_with("diff:")
 }
 
-pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
+pub fn apply(id: &str, it: &Item) -> i32 {
     // Anything with no way back says so before it happens, naming what is
     // lost. Cancel is the default, so a stray Enter cancels.
     if let Some((verb, loss)) = needs_confirming(it.kind, id) {
@@ -935,11 +913,11 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "insert" => {
             crate::frecency::bump(&it.cmd);
             let cmd = if it.kind == Kind::Snippet { ui::fill_placeholders(&it.cmd) } else { it.cmd.clone() };
-            ui::emit("INSERT", &cmd, paste);
+            ui::emit("INSERT", &cmd);
         }
         "run" => {
             crate::frecency::bump(&it.cmd);
-            ui::emit("RUN", &it.cmd, paste);
+            ui::emit("RUN", &it.cmd);
         }
         "runhere" => return crate::runhere::run_item(it),
         "details" => show_details(it),
@@ -948,31 +926,68 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "copy-file" => {
             let path = first_nonempty(it, &["path", "file", "dir"]);
             match crate::clipd::copy_files(&[path]) {
-                Ok(()) => ui::note("copied as a Finder object", paste),
+                Ok(()) => ui::note("copied as a Finder object"),
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             }
         }
-        "cd" => ui::emit("INSERT", &format!("cd {}", shq(it.cwd.as_deref().unwrap_or(""))), paste),
-        "here" => ui::emit("INSERT", it.cmd.split_once(' ').map(|(_, r)| r).unwrap_or(&it.cmd), paste),
+        "cd" => ui::emit("INSERT", &format!("cd {}", shq(it.cwd.as_deref().unwrap_or("")))),
+        "here" => ui::emit("INSERT", it.cmd.split_once(' ').map(|(_, r)| r).unwrap_or(&it.cmd)),
         "inspect" => {
             let c = if it.kind == Kind::Proc {
                 format!("ps -p {} -o command=", it.get("pid"))
             } else {
                 format!("lsof -nP -iTCP:{} -sTCP:LISTEN", it.get("port"))
             };
-            ui::emit("INSERT", &c, paste);
+            ui::emit("INSERT", &c);
         }
-        "logs" => ui::emit("INSERT", &format!("docker logs -f {}", shq(it.get("name"))), paste),
-        "stop" => ui::emit("INSERT", &format!("docker stop {}", shq(it.get("name"))), paste),
-        "restart" => ui::emit("INSERT", &format!("docker restart {}", shq(it.get("name"))), paste),
-        "open" if !target.is_empty() => run_or_emit(&format!("{editor} {}", shq(&target)), paste),
-        "reveal" if !target.is_empty() => ui::emit("INSERT", &format!("cd {}", shq(&parent_of(&target))), paste),
+        "logs" => ui::emit("INSERT", &format!("docker logs -f {}", shq(it.get("name")))),
+        "stop" => ui::emit("INSERT", &format!("docker stop {}", shq(it.get("name")))),
+        "restart" => ui::emit("INSERT", &format!("docker restart {}", shq(it.get("name")))),
+        "open" if !target.is_empty() => run_or_emit(&format!("{editor} {}", shq(&target))),
+        "reveal" if !target.is_empty() => ui::emit("INSERT", &format!("cd {}", shq(&parent_of(&target)))),
         "desc" => show_description(it),
-        "editsnips" => ui::emit("INSERT", &format!("{editor} {}", shq(&crate::paths::config().join("snippets.toml").to_string_lossy())), paste),
-        "editssh" => ui::emit("INSERT", &format!("{editor} ~/.ssh/config"), paste),
+        // Prelude's own preferences. Each one is written by the code that
+        // owns its file, so a chord goes through the same validation and the
+        // same panel restart the CLI performs.
+        "set-root-add" => return crate::settings::add_root_interactively(),
+        "set-root-remove" => return crate::settings::remove_root_interactively(),
+        "set-index" => return crate::runhere::run_cmd("prelude index"),
+        "set-value" => return crate::settings::edit(it),
+        "set-paneldir-default" => match crate::global::set_directory_default() {
+            Ok(message) => ui::note(&message),
+            Err(e) => {
+                ui::note(&e);
+                return 2;
+            }
+        },
+        "set-panel-open" => match crate::global::open_panel() {
+            Ok(()) => return 0,
+            Err(e) => {
+                ui::note(&e);
+                return 2;
+            }
+        },
+        "set-panel-restart" => match crate::global::restart_panel() {
+            Ok(message) => ui::note(&message),
+            Err(e) => {
+                ui::note(&e);
+                return 2;
+            }
+        },
+        // The two bare forms of a skill, for a conversation open somewhere
+        // else. `/name` works only for an agent that already has it; the file
+        // pointer works for every agent, including the ones whose CLI cannot
+        // load a borrowed skill at all.
+        "skillcmd" => ui::emit("INSERT", &it.cmd),
+        "skillfile" => ui::emit(
+            "INSERT",
+            &crate::defaults::text_for(it, crate::defaults::Text::SkillFile),
+        ),
+        "editsnips" => ui::emit("INSERT", &format!("{editor} {}", shq(&crate::paths::config().join("snippets.toml").to_string_lossy()))),
+        "editssh" => ui::emit("INSERT", &format!("{editor} ~/.ssh/config")),
         "quicklink-create" => {
             let suggestion = crate::compute::quicklink_suggestion(it);
             let Some(raw_key) = ui::prompt_line_initial(" quicklink keyword ", &suggestion) else {
@@ -981,22 +996,22 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let key = match crate::compute::normalize_quicklink_key(&raw_key) {
                 Ok(key) => key,
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             };
             if crate::compute::quicklinks().contains_key(&key) {
-                ui::note(&format!("a quicklink called {key} already exists"), paste);
+                ui::note(&format!("a quicklink called {key} already exists"));
                 return 2;
             }
             let draft = match crate::compute::quicklink_draft(it) {
                 Ok(Some(d)) => d,
                 Ok(None) => {
-                    ui::note("that kind cannot be a quicklink", paste);
+                    ui::note("that kind cannot be a quicklink");
                     return 2;
                 }
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             };
@@ -1008,9 +1023,9 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 130;
             }
             match crate::compute::create_quicklink(&key, it) {
-                Ok(_) => ui::note(&format!("created quicklink {key}"), paste),
+                Ok(_) => ui::note(&format!("created quicklink {key}")),
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             }
@@ -1020,7 +1035,6 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let _ = crate::compute::quicklinks();
             run_or_emit(
                 &format!("{editor} {}", shq(&crate::compute::quicklinks_file().to_string_lossy())),
-                paste,
             );
         }
         "quicklink-remove" => {
@@ -1036,9 +1050,9 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 130;
             }
             match crate::compute::remove_quicklink(key) {
-                Ok(()) => ui::note(&format!("removed quicklink {key}"), paste),
+                Ok(()) => ui::note(&format!("removed quicklink {key}")),
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             }
@@ -1049,21 +1063,19 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             match crate::compute::translate(&text, lang) {
                 Ok(v) => {
                     ui::copy(&v);
-                    ui::emit("INSERT", &v, paste);
+                    ui::emit("INSERT", &v);
                 }
                 Err(e) => {
-                    ui::note(&e.to_string(), paste);
+                    ui::note(&e.to_string());
                     return 2;
                 }
             }
         }
         "tr_src" => ui::copy(it.get("source")),
-        "default" => return ui::apply_default(it, paste),
+        "default" => return ui::apply_default(it),
         "secondary" => {
-            let host = if paste.is_some() { crate::defaults::Host::Agent }
-                       else { crate::defaults::Host::Shell };
-            if let Some(d) = crate::defaults::on_secondary(it, host) {
-                return ui::perform(it, d, paste);
+            if let Some(d) = crate::defaults::on_secondary(it, crate::defaults::surface()) {
+                return ui::perform(it, d);
             }
         }
         // The two answers worth a keystroke of their own. Everything an agent
@@ -1073,16 +1085,16 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let text = if &id[4..] == "no" { "no" } else { "go ahead" };
             return crate::bus::answer(it.get("id"), text);
         }
-        "cdsession" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd"))), paste),
+        "cdsession" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd")))),
         "session-fork" => match crate::sources::sessions::fork_cmd(it.get("agent"), it.get("id")) {
-            Some(command) => ui::emit("RUN", &command, paste),
-            None => { ui::note("that agent has no known fork command", paste); return 2; }
+            Some(command) => ui::emit("RUN", &command),
+            None => { ui::note("that agent has no known fork command"); return 2; }
         },
         "session-pin" | "session-unpin" => {
             let pinned = id == "session-pin";
             match crate::sources::sessions::set_pinned(it.get("session_id"), pinned) {
-                Ok(()) => ui::note(if pinned { "pinned conversation" } else { "unpinned conversation" }, paste),
-                Err(e) => { ui::note(&e, paste); return 2; }
+                Ok(()) => ui::note(if pinned { "pinned conversation" } else { "unpinned conversation" }),
+                Err(e) => { ui::note(&e); return 2; }
             }
         }
         "session-rename" => {
@@ -1090,22 +1102,21 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 130;
             };
             match crate::sources::sessions::rename(it.get("session_id"), &title) {
-                Ok(()) => ui::note("renamed conversation", paste),
-                Err(e) => { ui::note(&e, paste); return 2; }
+                Ok(()) => ui::note("renamed conversation"),
+                Err(e) => { ui::note(&e); return 2; }
             }
         }
         "session-reset-name" => match crate::sources::sessions::rename(it.get("session_id"), "") {
-            Ok(()) => ui::note("restored native conversation name", paste),
-            Err(e) => { ui::note(&e, paste); return 2; }
+            Ok(()) => ui::note("restored native conversation name"),
+            Err(e) => { ui::note(&e); return 2; }
         },
         "session-archive" | "session-unarchive" => {
             let archived = id == "session-archive";
             match crate::sources::sessions::set_archived(it.get("session_id"), archived) {
                 Ok(()) => ui::note(
                     if archived { "archived · find it with s:is:archived" } else { "restored conversation" },
-                    paste,
                 ),
-                Err(e) => { ui::note(&e, paste); return 2; }
+                Err(e) => { ui::note(&e); return 2; }
             }
         }
         // One-run borrowing, applied to a conversation instead of a fresh
@@ -1116,7 +1127,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let skills = crate::sources::agents::skills();
             let choices = borrowable_skills(&skills, it.get("agent"));
             if choices.is_empty() {
-                ui::note(&format!("{} already has every skill on this machine", it.get("agent")), paste);
+                ui::note(&format!("{} already has every skill on this machine", it.get("agent")));
                 return 0;
             }
             let Some(dir) = pick_one(" resume with which skill ", &choices) else { return 130 };
@@ -1124,8 +1135,8 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             match crate::sources::sessions::resume_with_skill_cmd(
                 it.get("agent"), it.get("id"), std::path::Path::new(&dir), name,
             ) {
-                Ok(command) => ui::emit("RUN", &command, paste),
-                Err(e) => { ui::note(&e, paste); return 2; }
+                Ok(command) => ui::emit("RUN", &command),
+                Err(e) => { ui::note(&e); return 2; }
             }
         }
         "session-mcp" => {
@@ -1134,7 +1145,6 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             if choices.is_empty() {
                 ui::note(
                     &format!("{} already owns every portable MCP server here", it.get("agent")),
-                    paste,
                 );
                 return 0;
             }
@@ -1145,8 +1155,8 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 2;
             };
             match crate::sources::sessions::resume_with_mcp_cmd(it.get("agent"), it.get("id"), server) {
-                Ok(command) => ui::emit("RUN", &command, paste),
-                Err(e) => { ui::note(&e, paste); return 2; }
+                Ok(command) => ui::emit("RUN", &command),
+                Err(e) => { ui::note(&e); return 2; }
             }
         }
         // The readable half of the export pair. The raw JSONL beside it is
@@ -1156,21 +1166,21 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             Ok(path) => {
                 let shown = crate::paths::tilde(&path.to_string_lossy());
                 match crate::openwith::reveal_now(&path.to_string_lossy()) {
-                    Ok(()) => ui::note(&format!("exported to {shown}"), paste),
-                    Err(e) => ui::note(&format!("exported to {shown} ({e})"), paste),
+                    Ok(()) => ui::note(&format!("exported to {shown}")),
+                    Err(e) => ui::note(&format!("exported to {shown} ({e})")),
                 }
             }
-            Err(e) => { ui::note(&e, paste); return 2; }
+            Err(e) => { ui::note(&e); return 2; }
         },
         "session-export" => match crate::sources::sessions::export_raw(it) {
             Ok(path) => {
                 if let Err(e) = crate::openwith::reveal_now(&path.to_string_lossy()) {
-                    ui::note(&format!("exported to {} ({e})", crate::paths::tilde(&path.to_string_lossy())), paste);
+                    ui::note(&format!("exported to {} ({e})", crate::paths::tilde(&path.to_string_lossy())));
                 } else {
-                    ui::note(&format!("exported to {}", crate::paths::tilde(&path.to_string_lossy())), paste);
+                    ui::note(&format!("exported to {}", crate::paths::tilde(&path.to_string_lossy())));
                 }
             }
-            Err(e) => { ui::note(&e, paste); return 2; }
+            Err(e) => { ui::note(&e); return 2; }
         },
         "session-trash" => {
             if !ui::confirm(
@@ -1181,17 +1191,17 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 130;
             }
             match crate::sources::sessions::trash_session(it) {
-                Ok(path) => ui::note(&format!("moved to {}", crate::paths::tilde(&path.to_string_lossy())), paste),
-                Err(e) => { ui::note(&e, paste); return 2; }
+                Ok(path) => ui::note(&format!("moved to {}", crate::paths::tilde(&path.to_string_lossy()))),
+                Err(e) => { ui::note(&e); return 2; }
             }
         }
         "newsession" => ui::emit("RUN",
             &crate::sources::sessions::start_cmd(it.get("agent"),
-                Some(it.get("cwd")).filter(|s| !s.is_empty()), None), paste),
+                Some(it.get("cwd")).filter(|s| !s.is_empty()), None)),
         "ask" => {
             // Whatever is selected becomes the subject of a question.
             let subject = if it.get("path").is_empty() { it.cmd.clone() } else { it.get("path").into() };
-            ui::emit("INSERT", &format!("claude {}", shq(&format!("about this: {subject}"))), paste);
+            ui::emit("INSERT", &format!("claude {}", shq(&format!("about this: {subject}"))));
         }
         "agent-runs" => {
             let runs: Vec<Item> = crate::sources::running::live()
@@ -1205,14 +1215,11 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             )).collect();
             let Some(id) = pick_one(" running instances ", &choices) else { return 130 };
             let Some(run) = runs.iter().find(|run| run.get("run_id") == id) else { return 2 };
-            if !run.get("pane").is_empty() {
-                ui::emit("RUN", &run.cmd, paste);
-            } else if !run.get("cwd").is_empty() {
-                ui::emit("INSERT", &format!("cd {}", shq(run.get("cwd"))), paste);
-            } else {
-                ui::note("that run has neither a pane nor a readable project", paste);
+            if run.get("cwd").is_empty() {
+                ui::note("that run has no readable project directory");
                 return 2;
             }
+            ui::emit("INSERT", &format!("cd {}", shq(run.get("cwd"))));
         }
         "agent-sessions" => {
             let mut sessions = crate::cache::read_cached("sessions-linked");
@@ -1231,7 +1238,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 session.fields.get(2).cloned().unwrap_or_default(),
             )).collect();
             let Some(command) = pick_one(" conversations ", &choices) else { return 130 };
-            ui::emit("INSERT", &command, paste);
+            ui::emit("INSERT", &command);
         }
         "agent-doctor" => {
             let exe = std::env::current_exe().unwrap_or_else(|_| "prelude".into());
@@ -1240,8 +1247,8 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "favorite" | "unfavorite" => {
             let wanted = id == "favorite";
             match crate::favorites::set(it, wanted) {
-                Ok(()) => ui::note(if wanted { "added to Favorites" } else { "removed from Favorites" }, paste),
-                Err(error) => { ui::note(&error, paste); return 2; }
+                Ok(()) => ui::note(if wanted { "added to Favorites" } else { "removed from Favorites" }),
+                Err(error) => { ui::note(&error); return 2; }
             }
         }
         _ if id.starts_with("askagent:") => {
@@ -1250,7 +1257,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 return 130;
             };
             let Some(args) = crate::sources::sessions::ask_cmd(agent, &prompt) else {
-                ui::note(&format!("don't know how to ask {agent}"), paste);
+                ui::note(&format!("don't know how to ask {agent}"));
                 return 2;
             };
             let cmd = args.iter().map(|s| shq(s)).collect::<Vec<_>>().join(" ");
@@ -1258,24 +1265,24 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         }
         _ if id.starts_with("resume:") => {
             match crate::sources::sessions::latest_for(&id[7..]) {
-                Some(s) => ui::emit("RUN", &s.cmd, paste),
-                None => ui::note("no sessions recorded for that agent yet", paste),
+                Some(s) => ui::emit("RUN", &s.cmd),
+                None => ui::note("no sessions recorded for that agent yet"),
             }
         }
         _ if id.starts_with("agentcfg:") => {
             match crate::sources::agents::config_for(&id[9..]) {
                 Some(p) => {
                     if let Err(e) = crate::openwith::open_default_now(&p) {
-                        ui::note(&e, paste);
+                        ui::note(&e);
                         return 2;
                     }
                 }
-                None => ui::note("that agent has no settings file here", paste),
+                None => ui::note("that agent has no settings file here"),
             }
         }
         _ if id.starts_with("run:") => {
             let agent = &id[4..];
-            ui::emit("RUN", &format!("{agent} {}", shq(&it.cmd)), paste);
+            ui::emit("RUN", &format!("{agent} {}", shq(&it.cmd)));
         }
         // A skill merged across four agents is four directories, and an
         // "open all" that quietly opened the first would look like a failure.
@@ -1288,54 +1295,51 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 }
             }
             if !failed.is_empty() {
-                ui::note(&failed.join(" · "), paste);
+                ui::note(&failed.join(" · "));
                 return 2;
             }
-            ui::note(&format!("opened {} copies", copies.len()), paste);
+            ui::note(&format!("opened {} copies", copies.len()));
         }
-        "jump" => return ui::act_jump(it, paste, false),
-        "zoom" => return ui::act_jump(it, paste, true),
-        "cdrun" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd"))), paste),
-        // Kill the pane rather than the pid when there is one: killing the
-        // process leaves a dead pane behind, which is the mess this is
-        // meant to clear up.
+        "cdrun" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd")))),
+        // The pid, and only the pid. This used to kill the run's pane instead
+        // when it had one, on the reasoning that killing the process leaves a
+        // dead pane behind — which was true, and was also this launcher
+        // reaching into a terminal it does not own.
         "killrun" => {
-            let d = std::time::Duration::from_secs(2);
-            let pane = it.get("pane");
-            if pane.is_empty() {
-                crate::exec::run(&["kill", it.get("pid")], d);
-            } else {
-                crate::exec::run(&["tmux", "kill-pane", "-t", pane], d);
-            }
-        }
-        // Answering a stuck agent is the single most common thing you want
-        // at scale, and switching to it to type one line is most of the
-        // cost. `-l` sends the text literally; the separate Enter submits.
-        "say" => {
-            let pane = it.get("pane");
-            if pane.is_empty() {
-                ui::note("nothing to type into — that one is not in tmux", paste);
+            let pid = it.get("pid");
+            if pid.is_empty() {
+                ui::note("that run has no pid to end");
                 return 2;
             }
-            let Some(line) = ui::prompt_line(&format!(" say to {} ", it.get("agent"))) else {
+            crate::exec::run(&["kill", pid], std::time::Duration::from_secs(2));
+        }
+        // Leave a line in its inbox, for `prelude inbox` to collect. Typing
+        // straight into the agent's terminal was faster and is gone with the
+        // pane that made it addressable; what remains works wherever the run
+        // happens to be, including nowhere in particular.
+        "say" => {
+            let Some(line) = ui::prompt_line(&format!(" message {} ", it.get("agent"))) else {
                 return 130;
             };
-            let d = std::time::Duration::from_secs(2);
-            crate::exec::run(&["tmux", "send-keys", "-t", pane, "-l", &line], d);
-            crate::exec::run(&["tmux", "send-keys", "-t", pane, "Enter"], d);
-            ui::note(&format!("sent to {}", it.get("addr")), paste);
+            match crate::bus::leave(it, &line) {
+                Ok(to) => ui::note(&format!("left in {to}'s inbox")),
+                Err(e) => {
+                    ui::note(&e);
+                    return 2;
+                }
+            }
         }
         // The application half. `openit` is what Enter does, repeated here so
         // the panel states it; the other two are how you change it.
         "openit" => {
             if let Err(e) = crate::openwith::open_now(&target, None) {
-                ui::note(&e, paste);
+                ui::note(&e);
                 return 2;
             }
         }
         "reveal-finder" => {
             if let Err(e) = crate::openwith::reveal_now(&target) {
-                ui::note(&e, paste);
+                ui::note(&e);
                 return 2;
             }
         }
@@ -1344,14 +1348,14 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             if id == "openalways" {
                 let ext = crate::openwith::ext_of(&target);
                 if let Err(e) = crate::openwith::remember(&ext, &app) {
-                    ui::note(&format!("could not remember that: {e}"), paste);
+                    ui::note(&format!("could not remember that: {e}"));
                     return 2;
                 }
                 let scope = if ext.is_empty() { "files like that".into() } else { format!(".{ext} files") };
-                ui::note(&format!("{scope} now open in {app}"), paste);
+                ui::note(&format!("{scope} now open in {app}"));
             }
             if let Err(e) = crate::openwith::open_now(&target, Some(&app)) {
-                ui::note(&e, paste);
+                ui::note(&e);
                 return 2;
             }
         }
@@ -1374,14 +1378,14 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             }
             let definition = match crate::lend::resolve(it) {
                 Ok(definition) => definition,
-                Err(error) => { ui::note(&error, paste); return 2; }
+                Err(error) => { ui::note(&error); return 2; }
             };
             let install = match crate::lend::install_cmd(target_agent, &definition) {
                 Ok(command) => command,
-                Err(error) => { ui::note(&error, paste); return 2; }
+                Err(error) => { ui::note(&error); return 2; }
             };
             let remove = format!("{target_agent} mcp remove {}", shq(it.get("name")));
-            ui::emit("INSERT", &format!("{remove} && {install}"), paste);
+            ui::emit("INSERT", &format!("{remove} && {install}"));
         }
         _ if id.starts_with("diff:") || id.starts_with("sync:") => {
             let mut parts = id.split(':');
@@ -1392,18 +1396,18 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let source = copies.iter().find(|copy| copy.agent == from);
             let target = copies.iter().find(|copy| copy.agent == to);
             let (Some(source), Some(target)) = (source, target) else {
-                ui::note("those Skill copies are no longer present", paste);
+                ui::note("those Skill copies are no longer present");
                 return 2;
             };
             let expected = if verb == "sync" {
                 let source_now = crate::capability::hash_skill(&source.agent, std::path::Path::new(&source.dir));
                 let target_now = crate::capability::hash_skill(&target.agent, std::path::Path::new(&target.dir));
                 if source_now.fingerprint.is_empty() || target_now.fingerprint.is_empty() {
-                    ui::note("one of those Skill copies cannot be read completely", paste);
+                    ui::note("one of those Skill copies cannot be read completely");
                     return 2;
                 }
                 if source_now.sensitive_files > 0 {
-                    ui::note("the source contains credential-like material; refusing to copy it", paste);
+                    ui::note("the source contains credential-like material; refusing to copy it");
                     return 2;
                 }
                 Some((source_now.fingerprint, target_now.fingerprint))
@@ -1430,10 +1434,9 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                     let _ = crate::cache::refresh_named("skill-hashes");
                     ui::note(
                         &format!("replaced {to}; old copy at {}", crate::paths::tilde(&trashed.to_string_lossy())),
-                        paste,
                     );
                 }
-                Err(error) => { ui::note(&error, paste); return 2; }
+                Err(error) => { ui::note(&error); return 2; }
             }
         }
         // Borrow: build the one command that starts `agent` with someone
@@ -1447,7 +1450,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                     let dir = it.get("dir");
                     let name = it.get("name");
                     if dir.is_empty() || name.is_empty() {
-                        ui::note("that skill has no directory to lend", paste);
+                        ui::note("that skill has no directory to lend");
                         return 2;
                     }
                     match crate::lend::skill_flags(agent, std::path::Path::new(dir), name) {
@@ -1459,7 +1462,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                         // both safer and one keystroke away.
                         Ok(f) => crate::lend::borrow_cmd(agent, &f, None, None),
                         Err(e) => {
-                            ui::note(&e, paste);
+                            ui::note(&e);
                             return 2;
                         }
                     }
@@ -1468,21 +1471,21 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                     let def = match crate::lend::resolve(it) {
                         Ok(d) => d,
                         Err(e) => {
-                            ui::note(&e, paste);
+                            ui::note(&e);
                             return 2;
                         }
                     };
                     match crate::lend::mcp_flags(agent, &def) {
                         Ok(f) => crate::lend::borrow_cmd(agent, &f, None, None),
                         Err(e) => {
-                            ui::note(&e, paste);
+                            ui::note(&e);
                             return 2;
                         }
                     }
                 }
                 _ => return 2,
             };
-            ui::emit("INSERT", &cmd, paste);
+            ui::emit("INSERT", &cmd);
         }
         // Slot 9 for anything on disk. The path is named in the
         // confirmation, it goes to the Trash rather than being unlinked, and
@@ -1491,7 +1494,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "trash" => {
             let p = first_nonempty(it, &["path", "file", "dir"]);
             if p.is_empty() {
-                ui::note("nothing to delete on that row", paste);
+                ui::note("nothing to delete on that row");
                 return 2;
             }
             if !ui::confirm(
@@ -1504,10 +1507,9 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             match crate::paths::trash(std::path::Path::new(&p)) {
                 Ok(d) => ui::note(
                     &format!("moved to {}", crate::paths::tilde(&d.to_string_lossy())),
-                    paste,
                 ),
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             }
@@ -1521,7 +1523,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         ),
         "mcprefresh" => {
             if !crate::cache::refresh_named("mcp") {
-                ui::note("could not refresh MCP status", paste);
+                ui::note("could not refresh MCP status");
                 return 2;
             }
             let refreshed = crate::cache::read_cached("mcp");
@@ -1530,14 +1532,14 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             });
             match current {
                 Some(server) => ui::note(
-                    &format!("{} status: {}", server.get("agent"), server.get("health")), paste,
+                    &format!("{} status: {}", server.get("agent"), server.get("health")),
                 ),
-                None => ui::note("the owner no longer reports that MCP server", paste),
+                None => ui::note("the owner no longer reports that MCP server"),
             }
         }
         "mcp-tools-refresh" => {
             if !crate::cache::refresh_named("mcp-tools") {
-                ui::note("could not refresh MCP tools", paste);
+                ui::note("could not refresh MCP tools");
                 return 2;
             }
             let refreshed = crate::cache::read_cached("mcp-tools");
@@ -1548,9 +1550,9 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                 Some(server) => {
                     let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(server.get("tools"))
                         .map(|tools| tools.len()).unwrap_or(0);
-                    ui::note(&format!("tool inventory: {} · {count} tools", server.get("status")), paste);
+                    ui::note(&format!("tool inventory: {} · {count} tools", server.get("status")));
                 }
-                None => ui::note("no tool inventory was produced for that server", paste),
+                None => ui::note("no tool inventory was produced for that server"),
             }
         }
         "mcptools" => {
@@ -1560,19 +1562,17 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
         "mcplogin" => ui::emit(
             "INSERT",
             &format!("{} mcp login {}", it.get("agent"), shq(it.get("name"))),
-            paste,
         ),
         "mcpremove" => ui::emit(
             "INSERT",
             &format!("{} mcp remove {}", it.get("agent"), shq(it.get("name"))),
-            paste,
         ),
         _ if id.starts_with("install:") => {
             let target = &id[8..];
             match crate::lend::resolve(it).and_then(|d| crate::lend::install_cmd(target, &d)) {
-                Ok(c) => ui::emit("INSERT", c.as_str(), paste),
+                Ok(c) => ui::emit("INSERT", c.as_str()),
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             }
@@ -1585,7 +1585,7 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let agent = &id[3..];
             let copies = crate::sources::agents::copies_of(it);
             let Some((_, dir)) = copies.iter().find(|(a, _)| a == agent) else {
-                ui::note(&format!("{agent} has no copy of that"), paste);
+                ui::note(&format!("{agent} has no copy of that"));
                 return 2;
             };
             if !ui::confirm(
@@ -1600,11 +1600,10 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
                     let _ = crate::cache::refresh_named("skill-hashes");
                     ui::note(
                         &format!("{} deleted — now in {}", it.get("name"), crate::paths::tilde(&p.to_string_lossy())),
-                        paste,
                     )
                 },
                 Err(e) => {
-                    ui::note(&e, paste);
+                    ui::note(&e);
                     return 2;
                 }
             }
@@ -1619,14 +1618,14 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
             let name = it.get("name");
             let dir = it.get("dir");
             if dir.is_empty() || name.is_empty() {
-                ui::note("nothing to copy from", paste);
+                ui::note("nothing to copy from");
                 return 2;
             }
             let mut changed = false;
             for agent in targets {
                 match crate::sources::agents::copy_skill(dir, &agent, name) {
                     Ok(p) => { changed = true; eprintln!("copied {name} -> {p}"); }
-                    Err(e) => ui::note(&e.to_string(), paste),
+                    Err(e) => ui::note(&e.to_string()),
                 }
             }
             if changed {
@@ -1638,15 +1637,12 @@ pub fn apply(id: &str, it: &Item, paste: &Option<String>) -> i32 {
     0
 }
 
-/// RUN normally travels back to the shell widget. In a popup over an agent,
-/// that route would type the command into the conversation and press Enter;
-/// local file-management actions must instead run inside the popup process.
-fn run_or_emit(cmd: &str, paste: &Option<String>) {
-    if paste.is_some() {
-        let _ = std::process::Command::new("sh").arg("-c").arg(cmd).status();
-    } else {
-        ui::emit("RUN", cmd, paste);
-    }
+/// A RUN travels back to whatever started us, which is the only route there
+/// has ever needed to be. It used to fork here instead when the launcher was
+/// a popup over somebody else's conversation, because emitting would have
+/// typed the command into the chat; there is no such surface now.
+fn run_or_emit(cmd: &str) {
+    ui::emit("RUN", cmd);
 }
 
 fn copy_text(it: &Item) -> String {

@@ -164,38 +164,22 @@ pub fn text(it: &Item) -> String {
         Kind::Msg => {
             kv(&mut out, "from", it.get("agent"));
             kv(&mut out, "project", &tilde(it.get("cwd")));
-            kv(&mut out, "at", it.get("pane"));
             out.push(String::new());
             out.extend(it.get("text").lines().map(str::to_string));
-            let pane = it.get("pane");
-            if !pane.is_empty() {
-                let screen = crate::exec::run(
-                    &["tmux", "capture-pane", "-p", "-t", pane, "-S", "-30"],
-                    std::time::Duration::from_secs(2),
-                );
-                let screen = screen.trim_end();
-                if !screen.is_empty() {
-                    out.push(String::new());
-                    out.push(format!("{DIM}what it was doing{RESET}"));
-                    out.extend(screen.lines().map(str::to_string));
-                }
-            }
         }
         // The one preview that answers the question you actually had. A row
-        // saying "waiting 12m" tells you something is stuck; only its screen
-        // tells you what it asked. One capture for the selected pane, not
-        // for all eighty of them.
+        // saying "waiting 12m" tells you something is stuck; only the last
+        // thing it said tells you what it stopped for.
         Kind::Run => {
             // One source for the effective context, shared with `prelude
             // fleet` and the control table. This view used to build its own
             // key/value block, which is how two readings of one run start
             // disagreeing about which session it is in.
             let mut pairs = crate::sources::running::effective_context(it);
-            // The three identifiers the shared context leaves out, because
-            // they are addresses rather than facts about the work — and this
-            // is the view somebody reaches for in order to go there. They sit
-            // before the last thing the run said, which is always the final
-            // pair and reads as the end of the block.
+            // The identifiers the shared context leaves out, because they
+            // name the process rather than the work. They sit before the last
+            // thing the run said, which is always the final pair and reads as
+            // the end of the block.
             let before_last = pairs.len().saturating_sub(1);
             for (n, pair) in [
                 ("at", it.get("addr").to_string()),
@@ -209,24 +193,12 @@ pub fn text(it: &Item) -> String {
             }
             kv_block(&mut out, &pairs);
             // What it last said, from its conversation file — which exists
-            // whether or not it is in a terminal Prelude can see into. The
-            // pane's screen is better when there is one, since it shows the
-            // half-finished line too.
-            let pane = it.get("pane");
-            let screen = if pane.is_empty() {
-                String::new()
-            } else {
-                crate::exec::run(
-                    &["tmux", "capture-pane", "-p", "-t", pane, "-S", "-40"],
-                    std::time::Duration::from_secs(2),
-                )
-            };
-            let screen = screen.trim_end();
-            if !screen.is_empty() {
-                out.push(String::new());
-                out.push(format!("{DIM}its screen{RESET}"));
-                out.extend(screen.lines().map(str::to_string));
-            } else {
+            // whether or not the run is in a terminal at all. This used to
+            // prefer a capture of its tmux pane where there was one, because a
+            // screen shows the half-finished line too; it also meant the same
+            // row answered in two different registers depending on how the
+            // agent happened to have been started.
+            {
                 let tail = crate::sources::running::transcript_tail(it.get("session"), 8);
                 if !tail.is_empty() {
                     out.push(String::new());
@@ -234,6 +206,17 @@ pub fn text(it: &Item) -> String {
                     out.extend(tail);
                 }
             }
+        }
+        // A setting's row states its value; this states the whole of it —
+        // every root and whether it is still there, every rule in a file.
+        Kind::Setting => {
+            kv(&mut out, "setting", it.get("setting"));
+            kv(&mut out, "now", it.fields.first().map(String::as_str).unwrap_or(""));
+            if !it.get("path").is_empty() {
+                kv(&mut out, "file", &tilde(it.get("path")));
+            }
+            out.push(String::new());
+            out.extend(crate::settings::detail(it));
         }
         Kind::Skill => {
             kv(&mut out, "agents", it.get("agent"));

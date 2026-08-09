@@ -248,6 +248,10 @@ pub fn gather() -> Vec<Item> {
     items.extend(crate::sources::machine::system());
     items.extend(crate::sources::agents::configs());
     items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions, &runs));
+    // Prelude's own preferences. A handful of files under two kilobytes and
+    // two `stat`s; `root_items` does not admit the kind, so they are reachable
+    // through `set:` and nowhere else.
+    items.extend(crate::settings::items());
 
     // Collected by index rather than in arrival order: `finish` keeps the
     // first of any duplicate pair, so which source got there first must not

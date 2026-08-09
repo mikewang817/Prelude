@@ -22,7 +22,7 @@ pub fn footer_for(primary: &str) -> String {
         format!("{primary}{DIM}  Enter{RESET}"),
         format!("Actions{DIM}  Ctrl+K{RESET}"),
     ];
-    if !env_flag("PRELUDE_NO_PREVIEW") {
+    if crate::settings::preview_enabled() {
         parts.push(format!("Preview{DIM}  Ctrl+P{RESET}"));
     }
     parts.join(&sep)
@@ -92,24 +92,19 @@ fn env_flag(name: &str) -> bool {
 }
 
 pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
-    // Three surfaces, in order of preference:
-    //   PRELUDE_IN_POPUP  we ARE the popup, so fill it completely — passing
-    //                     --height would use a fraction of an already-small
-    //                     window and waste the rest.
-    //   tmux popup        nicest, but needs tmux >= 3.2 AND an attached
-    //                     client; try it and fall back rather than predicting.
-    //   inline            N lines under the prompt, fzf-style.
+    // Two surfaces:
+    //   PRELUDE_FULL_SURFACE  the window is already ours — the global panel,
+    //                         which exists to hold this and nothing else — so
+    //                         fill it. `--height` would use a fraction of an
+    //                         already-small window and waste the rest.
+    //   inline                N lines under the prompt, fzf-style.
     let mut modes: Vec<Vec<String>> = Vec::new();
-    if env_flag("PRELUDE_IN_POPUP") {
+    if env_flag("PRELUDE_FULL_SURFACE") {
         modes.push(vec![]);
     } else {
-        if std::env::var_os("TMUX").is_some() && !env_flag("PRELUDE_NO_POPUP") {
-            modes.push(vec!["--tmux".into(), "center,92%,92%".into()]);
-        }
         // Most of the terminal, not half of it: a launcher that shows twelve
         // rows out of two thousand is making you scroll for no reason.
-        let h = std::env::var("PRELUDE_HEIGHT").unwrap_or_else(|_| "90%".into());
-        modes.push(vec![format!("--height={h}")]);
+        modes.push(vec![format!("--height={}", crate::settings::height())]);
     }
     let _ = cols;
 
@@ -130,9 +125,9 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
 
         // Exit codes alone can't distinguish failure from a normal empty
-        // result: `--tmux` with no attached client exits 1 ("no current
-        // client"), and so does an honest no-match. stderr is what separates
-        // them — anything written there means fzf refused to run.
+        // result: a refusal to start and an honest no-match both exit 1.
+        // stderr is what separates them — anything written there means fzf
+        // never ran.
         let failed = !out.status.success() && stdout.trim().is_empty() && !stderr.trim().is_empty();
         if failed {
             if env_flag("PRELUDE_DEBUG") {
@@ -149,10 +144,7 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
     last
 }
 
-pub fn search(paste_target: Option<String>) -> i32 {
-    // Before anything else, because it changes what Enter means on a skill.
-    let host_agent = paste_target.as_deref().and_then(agent_in_pane);
-    crate::defaults::set_host_agent(host_agent.map(str::to_string));
+pub fn search() -> i32 {
     crate::clipd::ensure_running();
     let items = crate::cache::gather();
     if items.is_empty() {
@@ -160,7 +152,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
         return 2;
     }
     let term = crate::term_width();
-    let preview = !env_flag("PRELUDE_NO_PREVIEW");
+    let preview = crate::settings::preview_enabled();
     // Quick Look is hidden until requested and replaces the result area
     // rather than taking a permanent right-hand column. The list therefore
     // owns the full width at all times; laying it out for a pane that is not
@@ -207,20 +199,11 @@ pub fn search(paste_target: Option<String>) -> i32 {
     args.push("--bind".into());
     args.push(format!("enter:transform:{} _enter {{2}}", shq(&me)));
     // Say what Enter will do to *this* row, since the answer depends on what
-    // kind of thing it is and on where the launcher was opened from.
+    // kind of thing it is. Where the answer *lands* — a prompt or the
+    // clipboard — the helper inherits from our environment, so nothing about
+    // the surface has to travel on its argv.
     args.push("--bind".into());
-    args.push(format!(
-        "focus:transform-footer:{} _footer {{2}}{}",
-        shq(&me),
-        match (&paste_target, host_agent) {
-            // The helper is a separate process, so who we are typing into
-            // travels on its argv rather than being asked for again on every
-            // keystroke. The name is one of a fixed set, never user text.
-            (Some(_), Some(a)) => format!(" --agent {a}"),
-            (Some(_), None) => " --agent".to_string(),
-            (None, _) => String::new(),
-        }
-    ));
+    args.push(format!("focus:transform-footer:{} _footer {{2}}", shq(&me)));
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
@@ -245,7 +228,7 @@ pub fn search(paste_target: Option<String>) -> i32 {
 
         match out.key.as_str() {
             "ctrl-k" => {
-                let code = crate::actions::panel(&item, paste_target.clone());
+                let code = crate::actions::panel(&item);
                 if code == crate::actions::PANEL_BACK {
                     // ^K is a modal over the list. Esc backs out one level
                     // instead of closing the launcher entirely.
@@ -257,26 +240,24 @@ pub fn search(paste_target: Option<String>) -> i32 {
                 // The legacy force-run key must not turn a URL back into a
                 // shell command. Links always go straight to Launch Services.
                 if item.kind == Kind::Link {
-                    return apply_default(&item, &paste_target);
+                    return apply_default(&item);
                 }
                 crate::frecency::bump(&item.cmd);
-                emit("RUN", &item.cmd, &paste_target);
+                emit("RUN", &item.cmd);
                 return 0;
             }
-            _ => return apply_default(&item, &paste_target),
+            _ => return apply_default(&item),
         }
     }
 }
 
-/// Carry out whatever Enter means for this item in this host.
-pub fn apply_default(item: &Item, paste: &Option<String>) -> i32 {
-    use crate::defaults::{on_enter, Host};
-    let host = if paste.is_some() { Host::Agent } else { Host::Shell };
+/// Carry out whatever Enter means for this item.
+pub fn apply_default(item: &Item) -> i32 {
     crate::frecency::bump(&item.cmd);
-    perform(item, on_enter(item, host), paste)
+    perform(item, crate::defaults::on_enter(item))
 }
 
-pub fn perform(item: &Item, what: crate::defaults::Default_, paste: &Option<String>) -> i32 {
+pub fn perform(item: &Item, what: crate::defaults::Default_) -> i32 {
     use crate::defaults::{text_for, Default_};
     match what {
         Default_::Insert => {
@@ -285,15 +266,15 @@ pub fn perform(item: &Item, what: crate::defaults::Default_, paste: &Option<Stri
             } else {
                 item.cmd.clone()
             };
-            emit("INSERT", &cmd, paste);
+            emit("INSERT", &cmd);
         }
-        Default_::InsertText(what) => emit("INSERT", &text_for(item, what), paste),
-        Default_::Act(verb) => return act(item, verb, paste),
+        Default_::InsertText(what) => emit("INSERT", &text_for(item, what)),
+        Default_::Act(verb) => return act(item, verb),
     }
     0
 }
 
-fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 {
+fn act(item: &Item, verb: crate::defaults::Verb) -> i32 {
     use crate::defaults::Verb::*;
     match verb {
         // External objects go straight to macOS Launch Services. No `open`
@@ -308,24 +289,10 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
                 crate::openwith::open_default_now(&p)
             };
             if let Err(e) = result {
-                note(&e, paste);
+                note(&e);
                 return 2;
             }
         }
-        // Beside the conversation, not on top of it and not off in another
-        // window: the reason to start a second agent while talking to the
-        // first is to watch both. It opens in the directory the pane
-        // underneath is in, since that is the project you were discussing.
-        //
-        // tmux is guaranteed here — `Host::Agent` is only ever reached
-        // through the popup, which is a tmux binding — so the fallback is
-        // for the impossible case rather than a supported one.
-        // Move the cursor to a pane somewhere in the tmux server. Inside
-        // tmux the client is simply pointed at it; from a terminal with no
-        // tmux client of its own, the only way to "go there" is to attach,
-        // which takes over this terminal — so that one goes on the prompt to
-        // be agreed to rather than happening under you.
-        JumpTo => return act_jump(item, paste, false),
         // An agent is blocked on this. Ask for the line here, in the surface
         // already in front of you, and the answer unblocks it where it stands
         // — no going to its window, no finding the question again.
@@ -339,47 +306,23 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             };
             return crate::bus::answer(id, &line);
         }
-        SplitPane => {
-            let Some(pane) = paste else {
-                emit("INSERT", &item.cmd, paste);
-                return 0;
-            };
-            let d = std::time::Duration::from_secs(2);
-            let info = crate::exec::run(
-                &["tmux", "display", "-p", "-t", pane, "#{pane_current_path}\t#{window_width}"],
-                d,
-            );
-            let (cwd, width) = info.trim().split_once('\t').unwrap_or((info.trim(), ""));
-            let (cwd, width) = (cwd.to_string(), width.parse::<usize>().unwrap_or(0));
-            // Side by side while there is room for two — an agent TUI below
-            // about eighty columns starts wrapping its own output, so two of
-            // them in a narrow window is worse than one above the other.
-            let how = if width >= 170 { "-h" } else { "-v" };
-            let mut argv: Vec<&str> = vec!["tmux", "split-window", how, "-t", pane];
-            if !cwd.is_empty() {
-                argv.push("-c");
-                argv.push(&cwd);
-            }
-            argv.push(&item.cmd);
-            crate::exec::run(&argv, d);
-        }
         Launch => {
             if let Err(e) = crate::openwith::open_now(item.get("path"), None) {
-                note(&e, paste);
+                note(&e);
                 return 2;
             }
         }
         OpenUrl => {
             let url = if item.get("url").is_empty() { &item.cmd } else { item.get("url") };
             if let Err(e) = crate::openwith::open_now(url, None) {
-                note(&e, paste);
+                note(&e);
                 return 2;
             }
         }
         CopyResult => {
             if item.kind == Kind::Clip && item.get("clip_kind") != "text" {
                 if let Err(e) = crate::clipd::restore(item) {
-                    note(&e, paste);
+                    note(&e);
                     return 2;
                 }
                 eprintln!("restored to clipboard: {}", item.title);
@@ -388,7 +331,7 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
                 eprintln!("copied: {}", item.title);
             }
         }
-        ResumeSession => emit("INSERT", &item.cmd, paste),
+        ResumeSession => emit("INSERT", &item.cmd),
         RunHere => return crate::runhere::run_item(item),
         RunInShell => {
             let cmd = if item.kind == Kind::Snippet {
@@ -396,7 +339,7 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             } else {
                 item.cmd.clone()
             };
-            emit("RUN", &cmd, paste);
+            emit("RUN", &cmd);
         }
         Inspect => {
             let c = if item.kind == Kind::Proc {
@@ -404,18 +347,19 @@ fn act(item: &Item, verb: crate::defaults::Verb, paste: &Option<String>) -> i32 
             } else {
                 format!("lsof -nP -iTCP:{} -sTCP:LISTEN", item.get("port"))
             };
-            emit("INSERT", &c, paste);
+            emit("INSERT", &c);
         }
         CdThere => {
             let d = if item.get("cwd").is_empty() { item.get("path") } else { item.get("cwd") };
-            emit("INSERT", &format!("cd {}", shq(d)), paste);
+            emit("INSERT", &format!("cd {}", shq(d)));
         }
+        EditSetting => return crate::settings::edit(item),
         RunSkill => {
             // A skill name means nothing to a shell, so pick an agent that
             // actually has it and hand the invocation over.
             let agent = item.get("agent").split(',').next().unwrap_or("claude").trim().to_string();
             let agent = if agent == "shared" { "claude".to_string() } else { agent };
-            emit("INSERT", &format!("{agent} {}", shq(&item.cmd)), paste);
+            emit("INSERT", &format!("{agent} {}", shq(&item.cmd)));
         }
     }
     0
@@ -449,12 +393,13 @@ pub fn fill_placeholders(cmd: &str) -> String {
     out
 }
 
-/// The contract with the shell widget: one line, VERB<TAB>payload.
-pub fn emit(verb: &str, cmd: &str, paste_target: &Option<String>) {
-    if let Some(pane) = paste_target {
-        paste_into_pane(pane, cmd, verb == "RUN");
-        return;
-    }
+/// The contract with whatever started us: one line, VERB<TAB>payload.
+///
+/// Deliberately the same line for both callers. The zsh widget puts an INSERT
+/// on the prompt and submits a RUN; the panel has no prompt and copies either.
+/// Deciding that here would mean this process needing to know which surface it
+/// is, and it does not: it reports, and the caller delivers.
+pub fn emit(verb: &str, cmd: &str) {
     println!("{verb}\t{cmd}");
 }
 
@@ -469,77 +414,14 @@ pub fn emit(verb: &str, cmd: &str, paste_target: &Option<String>) {
 ///
 /// So refusals travel the same road as results: a third verb the widget
 /// knows, rendered with `zle -M`, which prints below the prompt without
-/// touching what is on it and clears itself at the next keystroke. In a pane
-/// there is no widget, so tmux's own message line does the same job.
+/// touching what is on it and clears itself at the next keystroke. The panel
+/// reads the same verb and shows it before standing down.
 ///
 /// `MSG` is terminal — an action either did something or explains why it did
-/// not, never both — which keeps the widget's one-line contract intact.
-pub fn note(text: &str, paste_target: &Option<String>) {
-    if paste_target.is_some() {
-        crate::exec::run(
-            &["tmux", "display-message", &format!("prelude: {text}")],
-            std::time::Duration::from_secs(1),
-        );
-        return;
-    }
+/// not, never both — which keeps the one-line contract intact.
+pub fn note(text: &str) {
     // Newlines would break the widget's one-line contract.
     println!("MSG\t{}", crate::width::flatten(text));
-}
-
-/// Type text into another pane, exactly as if the user had typed it.
-///
-/// `send-keys -l` sends the string literally, so whatever is reading that
-/// pane's input — a shell, an agent's prompt box, vim — receives it as
-/// keystrokes. Nothing is submitted unless `run` is set: the
-/// insert-don't-execute rule matters even more here, because in an agent
-/// conversation Enter sends a message rather than running a command.
-pub fn paste_into_pane(pane: &str, text: &str, run: bool) {
-    let d = std::time::Duration::from_secs(5);
-    crate::exec::run(&["tmux", "send-keys", "-t", pane, "-l", text], d);
-    if run {
-        crate::exec::run(&["tmux", "send-keys", "-t", pane, "Enter"], d);
-    }
-}
-
-/// Work out which pane to type into.
-///
-/// `display-popup` does NOT expand #{...} formats in its shell-command
-/// argument, so an explicitly-passed id can arrive as the literal string
-/// "#{pane_id}". Happily a popup doesn't need to be told: tmux commands run
-/// inside one still resolve to the underlying active pane, so we just ask.
-/// Which agent is running in the pane we are about to type into.
-///
-/// tmux knows, and says so plainly — a pane running Claude Code reports
-/// `claude`, not `node`. Worth asking, because it decides whether a skill
-/// row hands over `/name` or the path to the skill's own file: the slash
-/// command means nothing to an agent that does not have it, and means
-/// nothing *silently*.
-///
-/// Asked once, in `search`, never per keystroke.
-pub fn agent_in_pane(pane: &str) -> Option<&'static str> {
-    let out = crate::exec::run(
-        &["tmux", "display", "-p", "-t", pane, "#{pane_current_command}"],
-        std::time::Duration::from_secs(1),
-    );
-    let cmd = out.trim().to_string();
-    crate::agent::SPECS
-        .iter()
-        .map(|spec| spec.name)
-        .find(|name| *name == cmd)
-}
-
-pub fn resolve_pane(arg: Option<&str>) -> Option<String> {
-    if let Some(a) = arg {
-        if !a.starts_with("#{") && !a.is_empty() {
-            return Some(a.to_string());
-        }
-    }
-    let out = crate::exec::run(
-        &["tmux", "display-message", "-p", "#{pane_id}"],
-        std::time::Duration::from_secs(1),
-    );
-    let p = out.trim();
-    if p.is_empty() { None } else { Some(p.to_string()) }
 }
 
 pub fn copy(text: &str) {
@@ -607,38 +489,6 @@ pub fn confirm(question: &str, go_ahead: &str, detail: &str) -> bool {
         == Some("yes")
 }
 
-/// Put the cursor in a running agent's pane, optionally zoomed.
-///
-/// Inside tmux the client is simply pointed at it. From a terminal with no
-/// tmux client of its own, the only way to "go there" is to attach, which
-/// takes over this terminal — so that goes onto the prompt to be agreed to
-/// rather than happening under you.
-pub fn act_jump(item: &Item, paste: &Option<String>, zoom: bool) -> i32 {
-    let pane = item.get("pane");
-    if pane.is_empty() {
-        emit("INSERT", &item.cmd, paste);
-        return 0;
-    }
-    let d = std::time::Duration::from_secs(2);
-    if std::env::var_os("TMUX").is_some() {
-        crate::exec::run(&["tmux", "select-window", "-t", pane], d);
-        crate::exec::run(&["tmux", "select-pane", "-t", pane], d);
-        if zoom {
-            crate::exec::run(&["tmux", "resize-pane", "-Z", "-t", pane], d);
-        }
-        crate::exec::run(&["tmux", "switch-client", "-t", pane], d);
-        0
-    } else {
-        let z = if zoom { format!(" \\; resize-pane -Z -t {pane}") } else { String::new() };
-        emit(
-            "RUN",
-            &format!("tmux select-window -t {pane} \\; select-pane -t {pane}{z} \\; attach -t {pane}"),
-            paste,
-        );
-        0
-    }
-}
-
 /// `footer` names the keys; `header` is a line above the list that cannot be
 /// selected — which is what makes it the right home for a statement rather
 /// than an action.
@@ -654,12 +504,9 @@ pub fn pick_raw(
         args.push(format!("--header={header}"));
     }
     let mut modes: Vec<Vec<String>> = Vec::new();
-    if env_flag("PRELUDE_IN_POPUP") {
+    if env_flag("PRELUDE_FULL_SURFACE") {
         modes.push(vec![]);
     } else {
-        if std::env::var_os("TMUX").is_some() && !env_flag("PRELUDE_NO_POPUP") {
-            modes.push(vec!["--tmux".into(), "center,92%,92%".into()]);
-        }
         modes.push(vec!["--height=90%".into()]);
     }
     for mode in modes {

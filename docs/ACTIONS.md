@@ -78,19 +78,27 @@ The order written for a kind is the product decision. It is stable and is not
 re-ranked by frecency. The only global reorder is moving destructive actions
 to the end.
 
-### 5. The host matters
+### 5. The surface matters, but only to the wording
 
-A shell prompt and an agent input box are different destinations. Default and
-secondary actions are computed for the host, and rich kinds expose separate
-menus. A path selected at a shell opens locally; the same path selected over
-an agent is text to hand into that conversation.
+`Ctrl+R` hands text to the prompt you are standing at; the global panel has no
+prompt and copies. Enter does the same thing in both — what changes is what may
+honestly be said about it, so `Insert into prompt` becomes `Copy the command`
+and `Insert the full path` becomes `Copy the full path`. Everything that acts —
+opening a file, launching an application, running something inside Prelude —
+reads identically, because it is identical.
 
-Agent-host menus omit resume, lend and one-off shell commands that would
-otherwise be pasted into chat as prose. Explicitly local actions such as Open
-Settings, Open in Editor and Reveal in Finder execute in the popup process
-rather than being typed into the conversation. URLs are the deliberate
-exception to path handoff: Enter always opens the browser, while `Insert URL`
-is the conversation alternative.
+One class of row disappears rather than being reworded. `Run it in the shell`
+and the generic `Run now` mean "hand it over already submitted", which needs a
+shell on the receiving end; on a clipboard a submitted command and an
+unsubmitted one are the same bytes, so the row would be Enter under a bolder
+name. `Run and show output` stays in both surfaces, because it runs inside
+Prelude and shows you the result.
+
+There used to be a second *host* rather than a second surface: a tmux popup
+over an agent's input box, where Enter's answers inverted because the
+destination was a conversation. That surface is gone, and with it the menus
+that omitted resume and lend commands so they would not be pasted into a chat
+as prose.
 
 ## Current menus
 
@@ -118,14 +126,17 @@ being hard-coded in a second list.
 
 ### Running agent
 
-- Send a message without switching panes
 - Show its last response
-- Go to its pane full-screen
+- Leave it a message, which waits in its inbox
 - Insert a command to change to its project
-- Copy its pane address
+- Copy its PID
 - End the agent
 
-Rows without a tmux address omit pane-only actions.
+Every Run answers all of these, whatever started it. Two more were offered to
+the subset with a tmux pane — Enter putting the cursor in it, and a message
+typed straight into it — and both are gone: Prelude does not reach into a
+terminal it does not own, and a menu that is richer for some rows than others
+is harder to read than one that treats them alike.
 
 Quick Look for a Run is `running::effective_context` and nothing of its own:
 Agent, project, branch, Session, state, start time, model, the capabilities
@@ -151,9 +162,22 @@ not in a second reading of the row.
 
 A custom answer remains Enter's default.
 
+### Prelude setting
+
+- Enter changes the setting, named for what that means: `Add a folder…`,
+  `Change the chord…`, `Turn Quick Look off`, `Open the file`
+- Search roots additionally: remove a folder, rebuild the index, show every
+  root and whether it still exists
+- The global chord additionally: start the panel, restart it after a rebuild
+- Anything file-backed: open it, open it in `$EDITOR`, reveal it, copy its path
+
+The row states the current value, so the panel does not have to. Nothing here
+repeats Enter — the settings are the rows most likely to break that rule,
+because each one has an obvious primary, so a test walks all of them.
+
 ### Session
 
-- Enter resumes an idle Session; an active Session goes to its tmux pane, or inserts its project when no pane address exists, rather than starting a competing resume
+- Enter resumes an idle Session; a Session a live Run owns hands over that Run's project rather than starting a competing resume
 - Resume now, only when no active Run owns it
 - Fork it through the native Claude, Codex or pi CLI; offer nothing where the Agent has no known fork verb
 - Resume it with a Skill, or with an MCP server, that its Agent does not own — for one run only, and absent where that Agent has no one-run flag

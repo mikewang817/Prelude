@@ -15,23 +15,21 @@ dedicated Ghostty instance that is hidden from the Dock and the app switcher,
 owns no window at rest, and never touches the Ghostty the person works in.
 Escape dismisses and resets. Any action that moves focus dismisses it too.
 
-The launcher is not the destination. A command goes to the terminal that was in
-front when the chord was pressed, when tmux can address its pane, and otherwise
-to one window created deliberately for it. Objects — files, folders, URLs and
-applications — go straight to Launch Services and cost no terminal at all. No
-selected payload ever reaches a command line, an Apple Event, configuration or
-a log.
+The launcher is not the destination, and it never creates one. A command goes
+to the **clipboard** and the panel stands down. Objects — files, folders, URLs
+and applications — go straight to Launch Services and cost no terminal at all.
+No selected payload ever reaches a command line, an Apple Event, configuration
+or a log.
 
 ## Architecture
 
 ```text
 login -> LaunchAgent -> hidden Ghostty instance (no window)
 chord -> Ghostty's own global: keybind -> quick terminal panel
-                                       -> prelude _panel, forever
+                                       -> prelude _panel
                                           -> prelude -> fzf
-                                          -> deliver: tmux pane
-                                                    | one new window
-                                                    | Launch Services
+                                          -> INSERT|RUN -> clipboard, close
+                                          -> object     -> Launch Services
 escape -> panel hidden, fzf aborted, loop starts a fresh launcher
 ```
 
@@ -39,8 +37,8 @@ escape -> panel hidden, fzf aborted, loop starts a fresh launcher
 `prelude global install` and validated with `ghostty +validate-config` before
 it is installed. The LaunchAgent exists only to start the instance at login;
 `open` exits as soon as Launch Services has the request, so the job is not the
-thing that runs. Prelude links no GUI framework: the frontmost application is
-read with `lsappinfo`.
+thing that runs. Prelude links no GUI framework, and no longer asks macOS what
+is in front: it does not need to know.
 
 ## Superseded — production global launcher `[x]`
 
@@ -304,11 +302,12 @@ The replacement is a Ghostty quick terminal: a hidden instance hosting one
       of the terminal that was in front — but only when exactly one tmux client
       is attached, which is the only unambiguous case — and otherwise to one
       window created on purpose. Objects go to Launch Services and cost no
-      terminal.
+      terminal. *(Superseded below: the panel copies.)*
 - [x] The panel decides delivery itself rather than letting the child do it,
       so it can tell a delivery from a dismissal and stand down when nothing
       else took focus.
 - [x] A handed-over command travels in a 0600 file, never on a command line.
+      *(Superseded below: nothing is handed to a new shell.)*
 - [x] The Carbon helper, the lease, the grace window, the pid check, the
       autostart ZLE hook, the Launch Services verification, `global clear` and
       `macos/PreludeHotkey/main.swift` are deleted.
@@ -348,5 +347,83 @@ Validation, measured rather than assumed:
 
 ### Recorded limitation
 
-The global launcher is now Ghostty-only, because no other macOS terminal offers
-a quick terminal. `backend` chooses only where a handed-over command opens.
+The global launcher is Ghostty-only, because no other macOS terminal offers a
+quick terminal.
+
+## The panel copies, and Prelude no longer knows what tmux is `[x]`
+
+The delivery decision above — pane when tmux could address one, a new window
+otherwise — was two answers to a question a launcher cannot answer: *which
+prompt did you mean?* Each was wrong in its own direction. The window opened in
+the configured directory rather than the one being worked in, so a `cd` was the
+first thing typed into it. The pane required exactly one attached client, which
+is the narrow case, and the entry above records what the wide case cost.
+
+A command now goes on the clipboard. Where it lands is asked of the only thing
+that knows, at the moment it knows: the person, with `⌘V`, in the window they
+were already in.
+
+- [x] `INSERT` and `RUN` both copy. The difference between them is whether a
+      shell presses Enter for you, and there is no shell in this surface; the
+      distinction survives at the `Ctrl+R` widget, where it can mean something.
+- [x] The panel prints `copied: …`, holds it for 1.2 s, and closes. Nothing
+      else took focus, so autohide has nothing to react to and the panel would
+      otherwise cover the paste target.
+- [x] `destination`, `attached_pane`, `TERMINALS`, `stage_preload`,
+      `open_working_window`, the `PRELUDE_PRELOAD` zle hook, `Backend` and
+      `prelude global backend` are deleted. `backend` in an existing
+      `global.toml` is ignored rather than rejected; the subcommand says why it
+      is gone rather than silently doing nothing.
+- [x] `defaults::Surface` keeps the labels honest: `Insert into prompt` at a
+      prompt, `Copy the command` in the panel. It is read from
+      `PRELUDE_TO_CLIPBOARD` at each entry point — fzf's footer and preview
+      helpers are separate processes and inherit it — and passed as a parameter
+      to every rule below that, so nothing races an env var in a test.
+- [x] Rows whose only meaning was "and submit it for you" are suppressed when
+      copying: the `Run it in the shell` secondary and the generic `Run now`
+      tail. `Run and show output` stays, because it runs inside Prelude.
+
+Prelude is now tmux-independent. The removals, and what each cost:
+
+- [x] `prelude paste [pane]`, `prelude init tmux` and the `prefix + r` popup.
+      With them goes `Host::Agent` — the entire second host, where Enter's
+      answers inverted because the destination was a conversation rather than a
+      prompt.
+- [x] `Verb::JumpTo` and `Verb::SplitPane`. A running agent's Enter is now its
+      directory; a Session a live run owns hands over that run's project.
+- [x] `running.rs` no longer runs `tmux list-panes`. Run rows lost their pane
+      and their `session:window.pane` address; `addr` is `pid N` and `cmd` is
+      `kill <pid>`, which is what keeps `finish`'s `(kind, cmd)` dedupe from
+      collapsing two agents in one project. State is decided by the session
+      file's mtime alone — the pane's `#{window_activity}` was the second clock
+      and only ever existed for some rows.
+- [x] `bus.rs` no longer types into panes. `say` leaves every message in an
+      inbox, through `bus::leave`, which the launcher's "Leave it a message…"
+      also calls. `$TMUX_PANE` is gone from `whoami`, so `$PWD` is the whole of
+      an inbox address — which makes `say`'s refusal of an ambiguous target
+      load-bearing rather than merely careful. `delivered_line` went with the
+      pane it was flattened for; the sender is named where the inbox is
+      rendered, so the stored text keeps what was written.
+- [x] A skill row carries both handover forms in `^K`, named. Prelude used to
+      pick between them from `pane_current_command`; the guess is unavailable
+      and the failure it avoided — `/name` at an agent that lacks the skill is
+      silent prose — is not, so the person picks.
+- [x] `preview.rs` no longer captures a pane. Quick Look on a run reads the
+      conversation file, which every run has.
+- [x] `doctor` drops the tmux check and the pane half of `undeliverable`.
+      `PRELUDE_NO_POPUP` is gone; `PRELUDE_IN_POPUP` is now
+      `PRELUDE_FULL_SURFACE`, which is what it always meant.
+
+Validation:
+
+- 141 Rust tests, release Clippy with `-D warnings`.
+- `gather` fell from a 23.7 ms to a 20.4 ms median, and `doctor` reports 15 ms:
+  `tmux list-panes` was a subprocess on every gather, paid whether or not tmux
+  was running.
+- `_footer` and `_actions` were compared with and without
+  `PRELUDE_TO_CLIPBOARD` on a real agent row: the label changes, and the
+  clipboard surface has no `secondary`/`Start now` row and no `run`/`Run now`
+  row. The first attempt suppressed only the secondary, and the generic tail
+  put `Run now` back — both paths are now pinned by one test.
+- `grep -rn tmux src/` returns only prose that records why something was
+  removed.
