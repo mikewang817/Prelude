@@ -82,7 +82,8 @@ fn main() -> ExitCode {
         // own, and `--json` is there so an agent reads fields rather than a
         // rendered table.
         ["doctor", rest @ ..] => doctor::dispatch(rest),
-        ["bench"] => bench(),
+        ["bench"] => bench(false),
+        ["bench", "--json"] => bench(true),
         // Where the money goes, phase by phase. The rule this serves: the
         // floor is the slowest FAST source and the local work under it is
         // free — so the profile has to be re-read after every win, because
@@ -609,19 +610,71 @@ fn copy_line(line: &str) -> i32 {
     0
 }
 
-fn bench() -> i32 {
-    let mut times = Vec::new();
-    let mut n = 0;
-    for _ in 0..5 {
+/// The launch budget, and what it is measured against.
+///
+/// The median was the gate, and a median cannot see the thing this budget
+/// exists to prevent. A launch that is usually 6ms and occasionally 59ms is
+/// experienced as a launcher that hitches, and it passed — the middle sample
+/// of five said `OK` while a run three times over budget sat in the same set,
+/// printed, unremarked. Tail latency *is* the user-visible number here.
+const GATHER_BUDGET_MS: f64 = 40.0;
+
+/// Enough samples for a 95th percentile to mean something. Five could not
+/// have one: the 95th of five samples is the maximum, so the two statistics
+/// were the same number and neither was reliable.
+const BENCH_RUNS: usize = 40;
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+fn bench(json: bool) -> i32 {
+    // One warm-up outside the measurement. The first gather of a process pays
+    // for page faults and cold caches that no later launch pays, and including
+    // it made every distribution here bimodal.
+    let mut n = cache::gather().len();
+    let mut times = Vec::with_capacity(BENCH_RUNS);
+    for _ in 0..BENCH_RUNS {
         let t = std::time::Instant::now();
         n = cache::gather().len();
         times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!("gather: {n} items  min {:.1}ms  median {:.1}ms  max {:.1}ms",
-             times[0], times[times.len() / 2], times[times.len() - 1]);
-    println!("budget: 40ms  ->  {}", if times[times.len() / 2] < 40.0 { "OK" } else { "OVER" });
-    0
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let (p50, p95, p99) = (
+        percentile(&times, 50.0),
+        percentile(&times, 95.0),
+        percentile(&times, 99.0),
+    );
+    let max = times[times.len() - 1];
+    // p95 is the gate. The median hides exactly the regression that matters
+    // and the maximum is one sample of noise; the 95th is the slowest launch
+    // a person meets often enough to notice.
+    let over = p95 >= GATHER_BUDGET_MS;
+    if json {
+        println!(
+            "{{\"items\":{n},\"runs\":{},\"min\":{:.3},\"p50\":{p50:.3},\"p95\":{p95:.3},\
+             \"p99\":{p99:.3},\"max\":{max:.3},\"budget_ms\":{GATHER_BUDGET_MS:.1},\"over\":{over}}}",
+            times.len(),
+            times[0],
+        );
+    } else {
+        println!(
+            "gather: {n} items over {} runs  min {:.1}ms  p50 {p50:.1}ms  p95 {p95:.1}ms  p99 {p99:.1}ms  max {max:.1}ms",
+            times.len(),
+            times[0],
+        );
+        println!(
+            "budget: {GATHER_BUDGET_MS:.0}ms at p95  ->  {}",
+            if over { "OVER" } else { "OK" }
+        );
+    }
+    // A gate that always exits zero is a report, not a gate: CI cannot fail
+    // on it and nobody notices a regression that only shows in the tail.
+    i32::from(over)
 }
 
 /// Columns of the terminal we are drawing on.

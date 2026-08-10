@@ -10,7 +10,8 @@ avoid repeating mistakes already made.
 cargo build --release
 cargo test                 # 170 tests
 cargo clippy --release     # expected warning-free
-./target/release/prelude bench     # gather must stay under 40ms
+./target/release/prelude bench     # p95 gather must stay under 40ms; non-zero when it does not
+./target/release/prelude bench --json   # the same distribution, for a gate to record
 ./target/release/prelude _dump       # empty-query agent home
 ./target/release/prelude _dump-root  # searchable root commands
 ./target/release/prelude _dump-all   # complete catalogue behind scopes
@@ -274,7 +275,7 @@ through a transform binding, so startup cost is paid hundreds of times per
 session. Be sceptical of new dependencies — the rule is about what a
 *keystroke* pays, which is why the `ignore` crate (a library walk inside
 gather, zero startup cost) was admitted while a URL crate for `web_url` was
-not. `bench` must stay under 40ms; it sits around 8 on a quiet machine.
+not. `bench` must stay under 40ms at p95; it sits around 4 on a quiet machine.
 Per keystroke the binary costs about 2ms, of which 1.8 is the kernel's fork
 and exec — there is nothing left to win there, so measure `gather` and leave
 the helpers alone. `bench --sources` is the instrument: it times every phase
@@ -414,6 +415,88 @@ fallback is deliberate and stays — a scratch folder of notes is its own
 project — but it goes through `paths::is_protected`, which already draws this
 line for the Trash and draws it in the same place. Anything that walks a
 directory the person did not choose belongs behind that check.
+
+**Finding nothing and learning nothing are different answers, and the type
+cannot tell them apart.** A source returns `Vec<Item>`, so a `claude mcp list`
+that timed out and an agent with no servers both arrive as an empty vector —
+and both used to be written, which meant a refresh that failed *erased* the
+inventory it was refreshing, then looked fresh enough that nothing retried
+until the TTL expired. `exec::lost_commands` is where the missing bit lives:
+`capture` counts every command that could not be started or had to be killed,
+and `cache::write_refreshed` takes the difference across one source's run. An
+empty result that coincides with a lost command keeps the last good answer; an
+empty result on its own is written, because a launcher that goes on showing
+containers which have stopped is the opposite failure. A non-zero exit is
+deliberately *not* counted — a CLI answering "none configured" with status 1
+has told us something true.
+
+`exec::require` is `which` for the same reason. **PATH is not the same
+everywhere Prelude runs**: the panel is a Ghostty started by launchd and does
+not inherit a login shell's PATH, so `claude` can be missing there and present
+in every terminal on the machine. Treated as an honest empty, that wiped the
+person's MCP servers out of the panel and left nothing to say why.
+
+**One refresh per source, and a rest after a failure.** Every stale source
+used to spawn `_refresh` on every gather with nothing coordinating them, so
+three shells meant three processes running the same network health check to
+write the same answer. A lease claimed with `create_new` makes the claim the
+filesystem's to arbitrate rather than a check followed by a race; a dead
+holder's lease is cleared rather than honoured, at most two run at once, and a
+failure records a rest that is always at least twice that source's own TTL —
+`backoff_delay` derives it per source, because a flat constant equal to
+`mcp`'s sixty-second TTL was not a backoff at all.
+
+**Do not write what has not changed — and then do not mistake that for
+staleness.** Writing these caches measured slower than gathering them (3.7ms
+and 2.7ms against a 0.9ms scan), and the bytes are usually identical, so
+everything goes through `write_if_changed`. That has a trap attached, and it
+was live for one commit: `stale()` read the cache file's mtime, so a source
+whose output is *stable* would have looked stale forever and spawned a process
+every launch — trading the 3ms write for something far more expensive. A
+successful refresh therefore stamps `refresh/<name>.stamp`, and staleness is
+the newer of the two. Unchanged bytes also stop moving the mtimes the panel's
+refresh thread watches, which had been telling it every launch that everything
+had changed.
+
+**A temporary file belongs to one writer.** `write_atomic` staged through
+`path.with_extension("tmp")` — one name per destination for the whole machine
+— so two Preludes wrote into the same file and each renamed it. The rename is
+atomic, so the result was never half a file; it was a whole file holding two
+answers spliced together, which is worse for being harder to see. Names now
+carry the pid, a counter and the clock, and are created with `create_new`.
+`write_state` is the variant for what a person cannot rebuild — 0600, flushed
+before the rename rather than after — and it owns the bus, favorites,
+frecency and the capability archive. An atomic rename still does nothing for
+read-change-write, where both writes land whole and one is simply gone, so
+those cycles hold `lock_for_write`; it gives up after 250ms rather than
+waiting, because a launcher may lose a use count but may never hang. The same
+lock answers "is the clipboard watcher running" — `lock_is_held` cannot be
+fooled by pid reuse the way a recorded pid can.
+
+**Ask fzf before spending a gather on it, not after.** The panel's refresh
+thread used to rebuild — a full gather, two renders and four hundred kilobytes
+of catalogue — and only then ask `_tick` whether the panel could be touched.
+While somebody was typing the answer was no, every three seconds, with all of
+the work already done. fzf's listen socket answers `GET /` with its live query
+and cursor, so the question is asked first for the price of one connection;
+`_tick` still makes the final call, because the person can start typing during
+the gather. A tick that finds the panel busy records nothing, so the change
+stays due rather than being consumed by a refresh that never happened. The
+interval is measured with `Instant`: `SystemTime::elapsed` is a wall clock, and
+a laptop waking to an NTP correction postpones the forced gather by exactly
+that correction.
+
+**A cache with no eviction is a leak with a good excuse.** Every version ever
+downloaded stayed in `update/` — five releases, twenty-one megabytes, nothing
+that would ever remove them — and a hundred clipboard images at the twenty-five
+megabytes each is individually allowed is 2.5GB of somebody's disk. Both are
+bounded now, by total bytes rather than by count.
+
+**Bound what another program's file size can make this program allocate.**
+`paths::read_bounded` is for anything on the launch path that reads a file it
+did not create: a generated `package.json`, a monorepo `Makefile`, a shell
+history nobody has ever rotated. These formats are line-oriented and their
+parsers are too, so a bounded read is a shorter list rather than a broken one.
 
 **Sources degrade to nothing.** A source that fails, or finds nothing,
 returns an empty list. Never blocks, never panics, never prints. Anything
@@ -777,6 +860,29 @@ flexible sixth column at the right edge.
 waiting on a process while its pipe fills deadlocks past 64KB; `ps -Ao`
 emits ~74KB. Keep stderr too: discarding it turned every agent failure into
 a permanent, silent "asking…".
+
+**The deadline goes on the process, and the kill goes to the group.** Draining
+stdout on a thread solved the deadlock and quietly replaced the timeout with
+the wrong question: waiting for stdout to reach EOF is not waiting for a
+process to exit, so a child that closed its output and kept working sailed
+past its deadline, and the `child.wait()` afterwards had no bound at all. The
+wait now happens on its own thread and the deadline applies to that. And
+killing the child is not killing what the child started — an agent CLI is
+routinely a script and an MCP server is `npx` starting `node`, each
+grandchild holding the same pipe — so every child gets its own process group
+(`own_process_group`) and the timeout kills the group. `mcp_tools` spawns
+servers itself and needs the identical treatment; without it a reader thread
+joins on a pipe that will never close and the refresh process hangs forever.
+Output is capped at `MAX_OUTPUT`: `read_to_end` on a pipe is an unbounded
+allocation controlled by another program.
+
+**`bench` gates on p95, and exits non-zero when it fails.** The median was the
+gate, and a median cannot see what the budget exists to prevent: a launch that
+is usually 6ms and occasionally 59ms is felt as a launcher that hitches, and it
+passed — the middle of five samples said `OK` while a run three times over
+budget sat in the same printed set. Five samples cannot have a 95th percentile
+either, so it takes forty after a warm-up, and `--json` exists for anything
+that wants to record the distribution rather than read it.
 
 **Asking `ps` for `comm=` doubles the cost of the process list**, because the
 kernel has to be asked for each process's argument block one at a time to
