@@ -1,6 +1,6 @@
 [package]
 name = "prelude"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2021"
 description = "A general launcher in the terminal, with an agent control plane"
 license = "Apache-2.0"
