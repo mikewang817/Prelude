@@ -2,7 +2,7 @@
 name = "prelude"
 version = "0.5.0"
 edition = "2021"
-description = "A Raycast-style launcher for the terminal"
+description = "A general launcher in the terminal, with an agent control plane"
 license = "Apache-2.0"
 repository = ""  # TODO: set before publishing
 readme = "README.md"

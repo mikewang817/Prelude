@@ -1,4 +1,4 @@
-//! Prelude — a Raycast-style launcher for the terminal.
+//! Prelude — a general launcher in the terminal.
 //!
 //! One hotkey, fuzzy search across everything you might want to run, and it
 //! *types the command for you* rather than running it.
@@ -238,7 +238,7 @@ fn main() -> ExitCode {
             let item = render::parse_line(line);
             if let Some(it) = item.as_ref().filter(|i| i.get("mode") == "complete-query") {
                 // Search commands are Prelude's one-input equivalent of
-                // Raycast's argument form. Stay open and put the provider or
+                // One-input argument form: stay open and put the provider or
                 // scope syntax in the box for the person to continue typing.
                 println!("change-query({})", it.get("completion"));
                 return ExitCode::SUCCESS;
@@ -310,7 +310,7 @@ fn json_dump(items: Vec<item::Item>, json: bool) -> i32 {
 }
 
 const HELP: &str = "\
-prelude — a launcher for terminals, and a message bus for the agents in them
+prelude — a general launcher in the terminal, and a message bus for agents
 
 HUMANS
   prelude                search · Ctrl-R puts the result on your prompt,
@@ -1654,7 +1654,7 @@ mod tests {
         }
     }
 
-    /// Raycast's two measures for actions that bite, and the line between
+    /// The UI's two measures for actions that bite, and the line between
     /// them: red for anything destructive, a confirmation only for what
     /// cannot be reverted. `docker stop` is red but not confirmed, because
     /// `docker start` exists; killing a process is both, because nothing

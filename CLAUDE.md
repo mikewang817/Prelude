@@ -1,6 +1,6 @@
 # Working on Prelude
 
-A Raycast-style launcher for the terminal. Rust, built on fzf, macOS only.
+A general launcher in the terminal. Rust, built on fzf, macOS only.
 `README.md` describes what it does; this file is what a new session needs to
 avoid repeating mistakes already made.
 
@@ -231,8 +231,8 @@ out of. Do not reintroduce an env read inside a rule; a test that has to set a
 variable is a test that races every other test in the binary.
 
 **Two general action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a
-mode.** Raycast has a third action — the secondary on its own key — and Prelude
-keeps that action but not the key: where useful, it is the first selectable row
+mode.** Graphical launchers often put a secondary action on its own key;
+Prelude keeps that action but not the key: where useful, it is the first selectable row
 below Enter's non-selectable header. Neither action is a fixed verb; both are
 per-item, and they are opposites — where one acts, the other hands you text. A
 test asserts they never coincide. The global panel has one narrower object
