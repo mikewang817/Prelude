@@ -113,7 +113,7 @@ fi
 
 export PATH="$INSTALL_DIR:$PATH"
 say "Starting the global panel…"
-if [[ -r /dev/tty ]]; then
+if (: </dev/tty) 2>/dev/null; then
   "$INSTALL_DIR/prelude" global install </dev/tty
 else
   "$INSTALL_DIR/prelude" global install
