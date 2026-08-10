@@ -72,7 +72,13 @@ pub fn keep_current(socket: PathBuf, widths: Vec<usize>, tw: usize, cols: usize)
     std::thread::spawn(move || {
         let me = std::env::current_exe().unwrap_or_default().to_string_lossy().into_owned();
         let mut last_seen = fingerprint();
-        let mut last_gather = SystemTime::now();
+        // `Instant`, not `SystemTime`. This is a *duration since*, and the
+        // wall clock is not one: NTP stepping the clock backwards — which
+        // happens on any laptop that has been asleep — makes `elapsed` return
+        // an error or a smaller number than it should, and the forced gather
+        // that exists precisely to catch what the mtime probe cannot see gets
+        // postponed for as long as the correction was large.
+        let mut last_gather = std::time::Instant::now();
         loop {
             std::thread::sleep(TICK);
             // `^K` is a modal: fzf exits, the action panel runs, and the list
@@ -86,17 +92,39 @@ pub fn keep_current(socket: PathBuf, widths: Vec<usize>, tw: usize, cols: usize)
                 continue;
             }
             let now = fingerprint();
-            let due = last_gather.elapsed().is_ok_and(|age| age >= FORCE_AFTER);
+            let due = last_gather.elapsed() >= FORCE_AFTER;
             if now == last_seen && !due {
                 continue;
             }
-            last_seen = now;
-            last_gather = SystemTime::now();
+            // Ask before spending anything. Somebody in the middle of typing
+            // is not going to accept a reload, and gathering for them anyway
+            // is the whole cost of this thread paid for a result that will be
+            // thrown away — every three seconds, for as long as they type.
+            //
+            // Nothing is recorded when the answer is no: `last_seen` keeps the
+            // old fingerprint, so this stays due and lands on the first tick
+            // after they stop. Marking it seen here was the bug this replaces
+            // — the change was consumed by a refresh that never happened.
+            if !panel_is_idle(&socket) {
+                continue;
+            }
             rebuild(&widths, tw, cols);
-            // `_tick` decides whether the panel may be touched; it is asked
-            // rather than assumed, because only fzf knows what the person has
-            // typed or where their cursor is.
-            let _ = post(&socket, &format!("transform:{} _tick {{q}} {{n}}", crate::exec::shq(&me)));
+            // `_tick` still makes the final call, and has to: the person can
+            // start typing during the gather, and only fzf can answer that
+            // question at the instant the reload would take effect.
+            let posted = post(
+                &socket,
+                &format!("transform:{} _tick {{q}} {{n}}", crate::exec::shq(&me)),
+            );
+            if posted.is_err() {
+                // The panel went away mid-refresh — `^K` is a modal that takes
+                // the socket with it. Leave the fingerprint unrecorded so the
+                // next tick tries again rather than treating a POST into the
+                // void as a delivered refresh.
+                continue;
+            }
+            last_seen = now;
+            last_gather = std::time::Instant::now();
         }
     });
 }
@@ -186,6 +214,60 @@ fn post(socket: &Path, action: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Ask fzf what it is showing, before deciding to spend a gather on it.
+///
+/// The order used to be the other way round: rebuild — the most expensive
+/// thing this thread does, a full gather plus two renders plus four hundred
+/// kilobytes of catalogue — and *then* ask `_tick` whether the panel could be
+/// touched. When somebody was typing, the answer was no, and all of that work
+/// had already happened. It happened every `TICK` for as long as they kept
+/// typing.
+///
+/// fzf's listen socket answers `GET /` with its live state, so the question
+/// can be asked first for the price of one connection on a Unix socket.
+///
+/// `None` means the question could not be asked — no socket, an older fzf, a
+/// reply in a shape this does not recognise — and the caller then behaves
+/// exactly as it did before rather than refusing to refresh. Everything here
+/// degrades to nothing.
+fn panel_state(socket: &Path) -> Option<(String, i64)> {
+    let mut stream = UnixStream::connect(socket).ok()?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .ok()?;
+    stream.flush().ok()?;
+    let mut answer = Vec::new();
+    let _ = stream.read_to_end(&mut answer);
+    parse_state(&String::from_utf8_lossy(&answer))
+}
+
+/// The query and cursor row out of fzf's state reply, or nothing if this is
+/// not a reply we understand.
+fn parse_state(reply: &str) -> Option<(String, i64)> {
+    let body = reply.split("\r\n\r\n").nth(1)?;
+    let state: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    Some((
+        state.get("query")?.as_str()?.to_string(),
+        state.get("position")?.as_i64()?,
+    ))
+}
+
+/// Is the panel sitting untouched, as a hidden one waiting to be revealed is?
+///
+/// Unknown is *busy*. A refresh skipped costs a person nothing they can see;
+/// a reload under their cursor moves their selection, which is worse than the
+/// staleness it was fixing.
+fn panel_is_idle(socket: &Path) -> bool {
+    match panel_state(socket) {
+        Some((query, position)) => query.is_empty() && position == 0,
+        // The question could not be asked. Fall through to the old order and
+        // let `_tick` make the call, which it still does either way.
+        None => true,
+    }
+}
+
 /// May the panel be redrawn under the person right now?
 ///
 /// Only when they have not begun using it: no query typed, and the cursor
@@ -210,4 +292,38 @@ pub fn tick(query: &str, index: &str) -> i32 {
     let home = crate::paths::cache().join("home.txt");
     println!("reload({me} _dynamic '' {})", crate::exec::shq(&home.to_string_lossy()));
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_state;
+
+    /// The panel is asked what it is showing *before* a gather is spent on
+    /// it. This is the reply fzf 0.74 actually sends, captured from a live
+    /// socket — the whole point of asking is lost if the answer is misread.
+    #[test]
+    fn fzfs_state_reply_is_read_for_the_query_and_the_cursor() {
+        let busy = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 223\r\n\r\n\
+            {\"reading\":false,\"progress\":100,\"query\":\"tw\",\"position\":0,\"sort\":true,\
+            \"totalCount\":3,\"matchCount\":1,\"current\":{\"index\":1,\"text\":\"two\"}}\n";
+        assert_eq!(parse_state(busy), Some(("tw".to_string(), 0)));
+
+        let idle = "HTTP/1.1 200 OK\r\n\r\n{\"query\":\"\",\"position\":0}";
+        assert_eq!(parse_state(idle), Some((String::new(), 0)));
+
+        let moved = "HTTP/1.1 200 OK\r\n\r\n{\"query\":\"\",\"position\":4}";
+        assert_eq!(parse_state(moved), Some((String::new(), 4)));
+
+        // Anything else is "could not ask", which falls back to the old
+        // order rather than refusing to refresh for the rest of the session.
+        for unknown in [
+            "",
+            "HTTP/1.1 404 Not Found\r\n\r\n",
+            "HTTP/1.1 200 OK\r\n\r\nnot json",
+            "HTTP/1.1 200 OK\r\n\r\n{\"query\":\"\"}",
+            "{\"query\":\"\",\"position\":0}",
+        ] {
+            assert_eq!(parse_state(unknown), None, "{unknown:?}");
+        }
+    }
 }
