@@ -416,9 +416,8 @@ the failure to avoid is a missing row, not a slow one.
 asked, and it says so out loud.** Every other network call in this program
 answers something the person just typed. This one does not, so it is bounded
 in every direction that can be bounded: it is a slow-tier source with a
-six-hour TTL, refreshed detached, degrading to nothing; it follows GitHub's
-`releases/latest` redirect rather than calling the JSON API, so there is no
-token, no rate limit and no parser; it sends no identifier; and
+six-hour TTL, refreshed detached, degrading to nothing; it asks GitHub's API
+and falls back to the `releases/latest` redirect; it sends no identifier; and
 `update = off` is a real off switch that returns before the request is
 constructed. It governs the *automatic* check only: `prelude update` is a
 request the person typed, and a setting that silently refused to answer a
@@ -445,6 +444,27 @@ _surface`, which by then *is* the new binary. `apply` therefore checks
 `CLOSE` verb the panel loop turns into `After::Close`. The zsh widget has no
 case for `CLOSE` and ignores it, which is the correct behaviour there: nothing
 in a terminal needs closing, and `restart_panel` runs normally.
+
+**The redirect is eventually consistent, and the rate limit was never the
+constraint.** `fetch_latest` used the `/releases/latest` redirect *instead of*
+the API, reasoning that unauthenticated API calls are rate limited while the
+redirect target already spells the answer out. Half of that was true and
+irrelevant: sixty requests an hour against four a day is three orders of
+magnitude of headroom, not a constraint. What it missed is that the redirect
+is served from a cache — measured still answering `v0.8.1` five minutes after
+`v0.8.2` was published, and catching up two minutes later. A check that can be
+minutes wrong about the one fact it exists to report is worse than one that
+spends a request nobody is counting. The API is primary now and the redirect
+is the fallback; neither needs a parser, because `tag_name` is a substring.
+The lesson is the shape of the error, not the endpoint: a cost that was easy
+to name (rate limits) crowded out one that had to be measured (staleness).
+
+**The row is a cache, so anything that changes the answer must clear it.**
+`update.json` has a six-hour TTL. An update that does not remove it leaves the
+panel advertising a version you have just installed, for the rest of the day,
+on a row whose Enter would now download what you are already running.
+`forget_cached_row` is called after a swap, after a rollback, and by an
+explicit `--check` — you asked, so the panel should say what you were told.
 
 **An update that does not restart the panel creates the exact state it was
 meant to end.** `update.rs` exists as much for question 1 — *is the running

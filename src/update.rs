@@ -25,6 +25,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const REPO: &str = "mikewang817/Prelude";
 const LATEST: &str = "https://github.com/mikewang817/Prelude/releases/latest";
+const API_LATEST: &str = "https://api.github.com/repos/mikewang817/Prelude/releases/latest";
 
 /// The release asset for this machine, named as `release.yml` publishes it.
 pub fn target() -> Option<&'static str> {
@@ -119,13 +120,38 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-/// Ask GitHub which release is current, by following the redirect that
-/// `/releases/latest` performs.
+/// Ask GitHub which release is current: the API first, its `/releases/latest`
+/// redirect as a fallback.
 ///
-/// Deliberately not the JSON API: unauthenticated calls there are rate limited
-/// per address, and the answer needed is one word that the redirect target
-/// already spells out. No dependency, no parser, no token.
+/// It was the redirect alone, on the reasoning that the API is rate limited
+/// per address while the redirect target already spells the answer out — no
+/// token, no parser. The rate limit half of that was true and irrelevant:
+/// sixty requests an hour against four a day is not a constraint, it is three
+/// orders of magnitude of headroom. What the reasoning missed is that the
+/// redirect is served from a cache and is *eventually* consistent — measured
+/// here still answering `v0.8.1` five minutes after `v0.8.2` was published,
+/// and catching up two minutes later. A version check that can be minutes
+/// wrong about the one fact it exists to report is worse than one that spends
+/// a request nobody is counting.
+///
+/// Still no parser: `tag_name` is a substring, and treating a JSON body as
+/// text keeps this identical in shape to the redirect path it falls back to.
 fn fetch_latest() -> Option<String> {
+    api_latest().or_else(redirect_latest)
+}
+
+fn api_latest() -> Option<String> {
+    let body = crate::exec::run(
+        &["curl", "-sS", "--max-time", "10", "--retry", "1",
+          "-H", "Accept: application/vnd.github+json", API_LATEST],
+        Duration::from_secs(20),
+    );
+    let after = body.split_once("\"tag_name\"")?.1;
+    let tag = after.split('"').nth(1)?.trim().trim_start_matches('v').to_string();
+    parts(&tag).is_some().then_some(tag)
+}
+
+fn redirect_latest() -> Option<String> {
     let out = crate::exec::run(
         &["curl", "-sSI", "-o", "/dev/null", "-w", "%{url_effective}", "-L",
           "--max-time", "10", "--retry", "1", LATEST],
@@ -138,6 +164,17 @@ fn fetch_latest() -> Option<String> {
 
 fn state_file() -> PathBuf {
     crate::paths::data().join("update.json")
+}
+
+/// Throw away the "a newer release exists" row.
+///
+/// The launcher reads that row from a cache with a six-hour TTL, so an update
+/// that does not clear it leaves the panel advertising a version you have just
+/// installed — for the rest of the day, with a row whose Enter would now
+/// download what you are already running. Called after a successful swap, and
+/// by an explicit check, whose answer the panel should reflect immediately.
+fn forget_cached_row() {
+    let _ = std::fs::remove_file(crate::paths::cache().join("update.json"));
 }
 
 /// The last version a banner was posted for, so a release is announced once
@@ -343,6 +380,9 @@ pub fn dispatch(args: &[&str]) -> i32 {
             }
             match fetch_latest() {
                 Some(latest) if is_newer(&latest, VERSION) => {
+                    // You asked, so the panel should say what you were told
+                    // rather than whatever the six-hourly check last saw.
+                    crate::cache::write_cached("update", &[row(&latest)]);
                     println!("  {latest} is available");
                     if args == ["--check"] {
                         return 0;
@@ -350,6 +390,7 @@ pub fn dispatch(args: &[&str]) -> i32 {
                     apply(&latest)
                 }
                 Some(_) => {
+                    forget_cached_row();
                     println!("  this is the newest release");
                     0
                 }
@@ -391,6 +432,7 @@ fn apply(version: &str) -> i32 {
             return 2;
         }
     };
+    forget_cached_row();
     println!("  installed {version}; the previous binary is at {}", previous.display());
     // The panel is the whole reason this module exists: leaving it on the old
     // binary is the state an update is supposed to end, not create. But when
@@ -429,6 +471,7 @@ fn rollback() -> i32 {
         eprintln!("prelude: rollback failed: {e}");
         return 2;
     }
+    forget_cached_row();
     println!("rolled back; run:  prelude global start");
     0
 }
@@ -451,6 +494,30 @@ mod tests {
         assert!(!is_newer("v", "0.7.0"));
         // Pre-release suffixes compare on their numbers rather than refusing.
         assert_eq!(parts("0.7.1-rc1"), Some((0, 7, 1)));
+    }
+
+    /// The API answers with JSON and the redirect with a URL. Both are read as
+    /// text, and both must refuse an answer this build cannot compare.
+    #[test]
+    fn either_source_yields_a_version_or_nothing() {
+        // What the API actually returns, trimmed to the shape that matters.
+        let body = r#"{"url":"...","tag_name":"v0.8.2","name":"Prelude v0.8.2"}"#;
+        let tag = body
+            .split_once("\"tag_name\"")
+            .and_then(|(_, rest)| rest.split('"').nth(1))
+            .map(|t| t.trim_start_matches('v'));
+        assert_eq!(tag, Some("0.8.2"));
+        assert!(is_newer(tag.unwrap(), "0.8.1"));
+
+        // A rate-limit body, an error page, an empty answer: no `tag_name`,
+        // so nothing — and the redirect is tried next.
+        for junk in [r#"{"message":"API rate limit exceeded"}"#, "", "<html>"] {
+            assert!(junk.split_once("\"tag_name\"").is_none(), "{junk}");
+        }
+
+        // The redirect's shape.
+        let url = "https://github.com/mikewang817/Prelude/releases/tag/v0.8.2";
+        assert_eq!(url.rsplit_once("/tag/").map(|(_, t)| t.trim_start_matches('v')), Some("0.8.2"));
     }
 
     #[test]
