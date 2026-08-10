@@ -1477,14 +1477,24 @@ pub fn run() -> i32 {
             "ghostty quick terminal",
         );
         check(
+            "launcher panel supervision".into(),
+            global.helper_supervised,
+            "launchd keeps the panel available after a crash · prelude global start",
+        );
+        check(
             "launcher panel instance".into(),
             global.helper_running,
             "prelude global start",
         );
         check(
+            "Ghostty Accessibility".into(),
+            global.accessibility_granted == Some(true),
+            "enable Ghostty in System Settings → Privacy & Security → Accessibility, then run: prelude global start",
+        );
+        check(
             "launcher zsh widget".into(),
             global.zsh_widget_available,
-            "eval \"$(prelude init zsh)\" must be in ~/.zshrc",
+            "Ctrl+R only · add eval \"$(prelude init zsh)\" to ~/.zshrc",
         );
         let owner = global
             .hotkey_owner

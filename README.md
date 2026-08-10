@@ -88,52 +88,35 @@ its native agent, and a process can expose its PID and a confirmed kill action.
 
 ## Install
 
-### Requirements
-
-- macOS
-- zsh
-- [fzf](https://github.com/junegunn/fzf)
-- Rust toolchain
-- [Ghostty](https://ghostty.org/) only for the optional global panel
-
-### 1. Build Prelude
+One command. No Rust toolchain, Homebrew setup, cloned repository, or manual
+shell editing:
 
 ```sh
-brew install fzf rust
-git clone https://github.com/mikewang817/Prelude.git
-cd Prelude
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/mikewang817/Prelude/main/install.sh | bash
 ```
 
-### 2. Add it to zsh
+The installer downloads the native binary for your Mac, provides a compatible
+`fzf`, installs the official signed Ghostty app when needed, adds the zsh
+widget, and starts a login-persistent global panel.
+
+On the first install, macOS opens **Privacy & Security → Accessibility**. Turn
+on Ghostty and press Enter once. Prelude verifies Ghostty's actual global event
+tap before reporting success—it does not mistake “the process started” for
+“the shortcut works.”
+
+After that:
+
+- **`Cmd+Shift+Space`** opens Prelude immediately from anywhere.
+- **`Ctrl+R`** opens Prelude in every new zsh prompt.
 
 ```sh
-echo 'eval "$(prelude init zsh)"' >> ~/.zshrc
-exec zsh
+prelude global status   # every global-launch requirement, verified
+prelude doctor          # complete optional-feature diagnostics
 ```
 
-Press **`Ctrl+R`** at any prompt. Prelude moves zsh's incremental history search
-to `Ctrl+S`; your complete history remains available through `h:`.
-
-### 3. Optional: launch from anywhere
-
-```sh
-prelude global install
-```
-
-The global panel is a hidden Ghostty quick terminal. Its default shortcut is
-**`Cmd+Space`**, and you can change it without editing configuration files:
-
-```sh
-prelude global hotkey cmd+shift+space
-prelude global status
-```
-
-Finish by checking the complete setup:
-
-```sh
-prelude doctor
-```
+The installer is idempotent; run the same command again to upgrade or repair
+the integration. Building from source is documented in
+[Contributing](CONTRIBUTING.md).
 
 ## Designed for trust
 

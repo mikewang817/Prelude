@@ -10,13 +10,14 @@
 //! terminal in this module is the one the panel itself is.
 
 use serde::Serialize;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const GHOSTTY_BUNDLE: &str = "com.mitchellh.ghostty";
-const GHOSTTY_APP: &str = "/Applications/Ghostty.app";
 const LABEL: &str = "app.prelude.hotkey";
+const DEFAULT_HOTKEY: &str = "cmd+shift+space";
+const LEGACY_DEFAULT_HOTKEY: &str = "cmd+space";
 /// The launcher panel is a Ghostty quick terminal: a real macOS panel, hidden
 /// from the Dock and the app switcher, hosting one long-lived `prelude _panel`
 /// loop. Ghostty registers the chord itself, so nothing of Prelude's runs at
@@ -195,7 +196,11 @@ struct GlobalConfig {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            hotkey: Hotkey::parse("cmd+space").expect("default hotkey"),
+            // Cmd+Space belongs to Spotlight on a stock Mac. Requiring a
+            // second configuration command made the advertised default an
+            // installation that could never work, so fresh installs start on
+            // the intentionally free Cmd+Shift+Space chord.
+            hotkey: Hotkey::parse(DEFAULT_HOTKEY).expect("default hotkey"),
             directory: None,
         }
     }
@@ -237,7 +242,11 @@ pub struct GlobalStatus {
     pub schema: u8,
     pub app_installed: bool,
     pub launch_agent_installed: bool,
+    pub helper_supervised: bool,
     pub helper_running: bool,
+    /// `Some(true)` means Ghostty's global event tap reported ready. `None`
+    /// means there is no running panel or its startup result is not available.
+    pub accessibility_granted: Option<bool>,
     pub hotkey_registered: bool,
     pub selected_hotkey: String,
     /// The macOS shortcut or application known to hold the chord.
@@ -253,6 +262,19 @@ pub struct GlobalStatus {
     pub zsh_widget_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event: Option<serde_json::Value>,
+}
+
+fn ghostty_app() -> Option<PathBuf> {
+    [
+        PathBuf::from("/Applications/Ghostty.app"),
+        crate::paths::home().join("Applications/Ghostty.app"),
+    ]
+    .into_iter()
+    .find(|path| path.is_dir())
+}
+
+fn ghostty_executable() -> Option<PathBuf> {
+    ghostty_app().map(|app| app.join("Contents/MacOS/ghostty"))
 }
 
 fn quick_config_path() -> PathBuf {
@@ -279,6 +301,10 @@ fn stderr_path() -> PathBuf {
     crate::paths::cache().join("global-hotkey-error.log")
 }
 
+fn event_tap_path() -> PathBuf {
+    crate::paths::cache().join("global-event-tap")
+}
+
 fn config_from(path: &Path) -> Result<GlobalConfig, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -292,7 +318,7 @@ fn config_from(path: &Path) -> Result<GlobalConfig, String> {
     let hotkey = Hotkey::parse(
         root.and_then(|table| table.get("hotkey"))
             .map(String::as_str)
-            .unwrap_or("cmd+space"),
+            .unwrap_or(DEFAULT_HOTKEY),
     )?;
     let directory = root
         .and_then(|table| table.get("directory"))
@@ -416,8 +442,10 @@ pub fn restart_panel() -> Result<String, String> {
     // A rebuild can change both the parent loop and Prelude-owned Ghostty
     // bindings. Refresh while the old panel is still healthy, then replace it.
     write_quick_config(&quick_config_path())?;
+    refresh_launch_agent()?;
     stop_helper();
     start_helper()?;
+    ensure_global_key_ready()?;
     Ok("panel restarted; it now runs the binary and panel configuration on disk".into())
 }
 
@@ -456,7 +484,10 @@ fn write_hotkey(hotkey: Hotkey) -> Result<String, String> {
         restore(old.as_deref());
         return Err(format!("{e}; the previous hotkey was restored"));
     }
-    if let Err(e) = start_helper() {
+    if let Err(e) = refresh_launch_agent()
+        .and_then(|_| start_helper())
+        .and_then(|_| ensure_global_key_ready())
+    {
         restore(old.as_deref());
         return Err(format!("{e}; the previous hotkey was restored"));
     }
@@ -485,29 +516,57 @@ fn xml(value: &str) -> String {
 }
 
 
-/// Start the panel's instance at login. `open` returns as soon as Launch
-/// Services has the request, so this job is expected to exit cleanly; there is
-/// nothing here to keep alive.
-fn launch_agent(config: &Path, stdout: &Path, stderr: &Path) -> String {
+/// Start and supervise the hidden panel instance at login.
+///
+/// The old job launched `/usr/bin/open` and then exited successfully. launchd
+/// therefore had nothing left to watch: if Ghostty quit once, the global
+/// shortcut stayed dead until the user knew to run `prelude global start`.
+/// Running the app executable as the job keeps ownership honest and lets
+/// launchd replace it after a crash.
+fn launch_agent(ghostty: &Path, config: &Path, stdout: &Path, stderr: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>{LABEL}</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-nb</string><string>{GHOSTTY_BUNDLE}</string><string>--args</string><string>--config-file={config}</string></array>
+  <key>ProgramArguments</key><array><string>{ghostty}</string><string>--config-file={config}</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
+  <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
-  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ThrottleInterval</key><integer>3</integer>
   <key>StandardOutPath</key><string>{stdout}</string>
   <key>StandardErrorPath</key><string>{stderr}</string>
 </dict></plist>
 "#,
+        ghostty = xml(&ghostty.to_string_lossy()),
         config = xml(&config.to_string_lossy()),
         stdout = xml(&stdout.to_string_lossy()),
         stderr = xml(&stderr.to_string_lossy()),
     )
+}
+
+/// Upgrade an installed login agent in place. This lets `prelude global start`
+/// repair integrations from the old `/usr/bin/open` design instead of making
+/// an upgrader know that `install` has to be repeated.
+fn refresh_launch_agent() -> Result<(), String> {
+    let path = launch_agent_path();
+    if !path.is_file() {
+        return Err("the launcher login agent is missing; run `prelude global install`".into());
+    }
+    let ghostty = ghostty_executable().ok_or_else(|| {
+        "the launcher panel needs Ghostty in /Applications or ~/Applications".to_string()
+    })?;
+    let body = launch_agent(&ghostty, &quick_config_path(), &stdout_path(), &stderr_path());
+    if std::fs::read(&path).is_ok_and(|old| old == body.as_bytes()) {
+        return Ok(());
+    }
+    stop_helper();
+    crate::cache::write_atomic(&path, body.as_bytes())
+        .map_err(|e| format!("could not update {}: {e}", path.display()))?;
+    private_file(&path)?;
+    let path_s = path.to_string_lossy().into_owned();
+    run_visible("/usr/bin/plutil", &["-lint", &path_s])
 }
 
 fn run_visible(program: &str, args: &[&str]) -> Result<(), String> {
@@ -536,6 +595,13 @@ fn run_visible(program: &str, args: &[&str]) -> Result<(), String> {
 /// key through, so fzf aborts, the loop starts a fresh launcher behind the
 /// hidden panel, and the next press is a reveal rather than a rebuild.
 fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
+    // Ghostty starts its command through a non-interactive login shell. That
+    // shell does not read ~/.zshrc, so it otherwise loses Homebrew's fzf path.
+    // Preserve the installer's PATH for the long-lived panel and retain a
+    // useful macOS fallback if Prelude is launched from a minimal environment.
+    let path = std::env::var("PATH")
+        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into())
+        .replace(['\n', '\r'], "");
     format!(
         "# Prelude launcher panel. Written by `prelude global install`.\n\
          # This configures a dedicated, hidden Ghostty instance; it does not\n\
@@ -549,6 +615,7 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          quick-terminal-space-behavior = move\n\
          quick-terminal-animation-duration = 0.08\n\
          confirm-close-surface = false\n\
+         env = PATH={path}\n\
          working-directory = {directory}\n\
          keybind = global:{chord}=toggle_quick_terminal\n\
          keybind = unconsumed:escape=toggle_quick_terminal\n\
@@ -559,6 +626,7 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
         chord = hotkey.canonical(),
         exe = exe.display(),
         directory = directory.display(),
+        path = path,
     )
 }
 
@@ -570,8 +638,10 @@ fn write_quick_config(destination: &Path) -> Result<(), String> {
     crate::cache::write_atomic(destination, body.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", destination.display()))?;
     let path = destination.to_string_lossy().into_owned();
+    let ghostty = ghostty_executable()
+        .ok_or_else(|| "Ghostty is not installed in /Applications or ~/Applications".to_string())?;
     run_visible(
-        "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+        &ghostty.to_string_lossy(),
         &["+validate-config", &format!("--config-file={path}")],
     )
     .map_err(|e| format!("Ghostty rejected the generated launcher configuration: {e}"))?;
@@ -626,23 +696,42 @@ fn launchctl(args: &[&str]) -> bool {
 
 
 
-/// How many launcher instances are up. launchd only starts one at login —
-/// `open` exits immediately, so the job is never the thing to ask — but two
-/// can appear if something else starts one at the same moment, and two
-/// instances mean two panels fighting over one chord.
-fn instances() -> usize {
+/// The dedicated Ghostty pids. One is healthy; two means two event taps
+/// fighting over the same chord.
+fn instance_pids() -> Vec<u32> {
     let marker = format!("config-file={}", quick_config_path().display());
     crate::exec::run(&["/usr/bin/pgrep", "-f", &marker], Duration::from_secs(2))
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+fn instances() -> usize {
+    instance_pids().len()
 }
 
 fn running() -> bool {
     instances() > 0
 }
 
+fn service_target() -> String {
+    format!("{}/{}", domain(), LABEL)
+}
+
+fn service_loaded() -> bool {
+    launchctl(&["print", &service_target()])
+}
+
+/// Stop both launchd supervision and any process left from an older installer.
+/// Booting the job out first is load-bearing now that KeepAlive is true: a
+/// plain kill would immediately create the process we were trying to remove.
 fn stop_helper() {
+    let target = service_target();
+    let agent = launch_agent_path().to_string_lossy().into_owned();
+    let domain = domain();
+    let _ = launchctl(&["bootout", &target]);
+    let _ = launchctl(&["bootout", &domain, &agent]);
+
     let marker = format!("config-file={}", quick_config_path().display());
     let _ = crate::exec::run(&["/usr/bin/pkill", "-f", &marker], Duration::from_secs(2));
     for _ in 0..20 {
@@ -653,9 +742,9 @@ fn stop_helper() {
     }
 }
 
-/// One panel, or none. Anything else is a chord with two owners.
+/// One supervised panel, or none. Anything else is a chord with two owners.
 fn enforce_single_instance() -> Result<(), String> {
-    if instances() <= 1 {
+    if instances() <= 1 && service_loaded() {
         return Ok(());
     }
     stop_helper();
@@ -664,7 +753,7 @@ fn enforce_single_instance() -> Result<(), String> {
 
 fn wait_until_running() -> bool {
     for _ in 0..40 {
-        if running() {
+        if instances() == 1 {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -672,16 +761,146 @@ fn wait_until_running() -> bool {
     false
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventTapState {
+    Ready,
+    PermissionDenied,
+    Pending,
+}
+
+fn event_tap_state_from_log(log: &str) -> EventTapState {
+    let ready = log.rfind("global event tap enabled for global keybinds");
+    let denied = log
+        .rfind("creating global event tap failed, missing permissions?")
+        .into_iter()
+        .chain(log.rfind("invalidating event tap mach port"))
+        .max();
+    match (ready, denied) {
+        (Some(ready), Some(denied)) if ready > denied => EventTapState::Ready,
+        (Some(_), Some(_)) | (None, Some(_)) => EventTapState::PermissionDenied,
+        (Some(_), None) => EventTapState::Ready,
+        (None, None) => EventTapState::Pending,
+    }
+}
+
+/// Ghostty's process existing is not proof that a global key works. Global
+/// keybinds use an accessibility event tap, and Ghostty reports the actual
+/// registration result to the unified log. This is explicit setup/status work,
+/// never part of gather.
+fn event_tap_state() -> EventTapState {
+    let Some(pid) = instance_pids().into_iter().next() else {
+        return EventTapState::Pending;
+    };
+    let cached = std::fs::read_to_string(event_tap_path())
+        .ok()
+        .and_then(|line| {
+            let (saved_pid, state) = line.trim().split_once(' ')?;
+            (saved_pid.parse::<u32>().ok()? == pid).then_some(match state {
+                "ready" => EventTapState::Ready,
+                "denied" => EventTapState::PermissionDenied,
+                _ => EventTapState::Pending,
+            })
+        });
+    let predicate = format!(
+        "processID == {pid} AND subsystem == \"com.mitchellh.ghostty\" AND category == \"GlobalEventTap\""
+    );
+    let log = crate::exec::run(
+        &[
+            "/usr/bin/log",
+            "show",
+            "--info",
+            "--last",
+            "7d",
+            "--style",
+            "compact",
+            "--predicate",
+            &predicate,
+        ],
+        Duration::from_secs(4),
+    );
+    let state = event_tap_state_from_log(&log);
+    if state == EventTapState::Pending {
+        // Unified logs eventually age out. A record is valid only for this
+        // exact live pid; a launchd restart forces a fresh observation.
+        return cached.unwrap_or(EventTapState::Pending);
+    }
+    let word = if state == EventTapState::Ready {
+        "ready"
+    } else {
+        "denied"
+    };
+    let path = event_tap_path();
+    if crate::cache::write_atomic(&path, format!("{pid} {word}\n").as_bytes()).is_ok() {
+        let _ = private_file(&path);
+    }
+    state
+}
+
+fn wait_for_event_tap() -> EventTapState {
+    let started = Instant::now();
+    loop {
+        let state = event_tap_state();
+        if state != EventTapState::Pending || started.elapsed() >= Duration::from_secs(8) {
+            return state;
+        }
+        std::thread::sleep(Duration::from_millis(750));
+    }
+}
+
+/// macOS does not let an installer grant Accessibility on a person's behalf.
+/// Make the one unavoidable click part of setup, then restart and verify the
+/// *actual* event tap instead of printing success because a process exists.
+fn ensure_global_key_ready() -> Result<(), String> {
+    if wait_for_event_tap() == EventTapState::Ready {
+        return Ok(());
+    }
+    let instruction = "enable Ghostty in System Settings → Privacy & Security → Accessibility";
+    if !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "the panel is installed, but macOS has not enabled its global shortcut; {instruction}, then run `prelude global start`"
+        ));
+    }
+
+    let _ = run_visible(
+        "/usr/bin/open",
+        &["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+    );
+    eprintln!("\nOne macOS permission is needed for the global shortcut.");
+    eprintln!("  1. Turn on Ghostty in Accessibility.");
+    eprintln!("  2. Return here and press Enter.\n");
+    eprint!("Press Enter after Ghostty is enabled… ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("could not read the permission confirmation: {e}"))?;
+
+    stop_helper();
+    start_helper()?;
+    if wait_for_event_tap() == EventTapState::Ready {
+        Ok(())
+    } else {
+        Err(format!(
+            "Ghostty still cannot register the global shortcut; {instruction}, then run `prelude global start`"
+        ))
+    }
+}
+
 fn start_current() -> Result<(), String> {
     if quick_config_path().is_file() {
         write_quick_config(&quick_config_path())?;
     }
-    start_helper()
+    refresh_launch_agent()?;
+    start_helper()?;
+    ensure_global_key_ready()
 }
 
 fn start_helper() -> Result<(), String> {
     if !quick_config_path().is_file() {
         return Err("the launcher panel is not installed; run `prelude global install`".into());
+    }
+    if !launch_agent_path().is_file() {
+        return Err("the launcher login agent is missing; run `prelude global install`".into());
     }
     let config = configured()?;
     if let Some(owner) = known_conflict(&config.hotkey) {
@@ -690,29 +909,35 @@ fn start_helper() -> Result<(), String> {
             config.hotkey.canonical()
         ));
     }
-    match instances() {
-        1 => return Ok(()),
-        // Two panels both claim the chord, and the one that loses registration
-        // still answers a toggle, so the panel appears to open every other
-        // press. Reduce to one rather than adding a third.
-        n if n > 1 => stop_helper(),
-        _ => {}
+
+    match (instances(), service_loaded()) {
+        (1, true) => return Ok(()),
+        // A manually launched or duplicated panel is not supervised. Replace
+        // it once rather than leaving the shortcut dead after its next exit.
+        (0, true) => {
+            let target = service_target();
+            let _ = launchctl(&["kickstart", "-k", &target]);
+        }
+        _ => {
+            stop_helper();
+            let domain = domain();
+            let agent = launch_agent_path().to_string_lossy().into_owned();
+            if !launchctl(&["bootstrap", &domain, &agent]) && !service_loaded() {
+                return Err(format!(
+                    "could not load the launcher login agent; inspect {}",
+                    stderr_path().display()
+                ));
+            }
+        }
     }
-    let path = format!("--config-file={}", quick_config_path().display());
-    let started = Command::new("/usr/bin/open")
-        .args(["-nb", GHOSTTY_BUNDLE, "--args", &path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !started {
-        return Err("could not start the launcher panel's Ghostty instance".into());
-    }
+
     if wait_until_running() {
         Ok(())
     } else {
-        Err("the launcher panel's Ghostty instance did not stay up; run `prelude global status`".into())
+        Err(format!(
+            "the launcher panel did not stay up; inspect {}",
+            stderr_path().display()
+        ))
     }
 }
 
@@ -720,18 +945,26 @@ fn install() -> Result<String, String> {
     if !cfg!(target_os = "macos") {
         return Err("the launcher panel is available on macOS only".into());
     }
-    if !Path::new(GHOSTTY_APP).is_dir() {
-        return Err(
-            "the launcher panel is a Ghostty quick terminal, and Ghostty is not installed"
-                .into(),
-        );
-    }
-    let config = configured()?;
+    let ghostty = ghostty_executable().ok_or_else(|| {
+        "the launcher panel needs Ghostty in /Applications or ~/Applications".to_string()
+    })?;
+
+    let mut config = configured()?;
     if let Some(owner) = known_conflict(&config.hotkey) {
-        return Err(format!(
-            "{} is already configured for {}; change it there or choose another chord with `prelude global hotkey HOTKEY`",
-            config.hotkey.canonical(), owner
-        ));
+        // Builds before 0.6 wrote Cmd+Space as their default even though a
+        // stock Mac gives it to Spotlight. Migrate only that known-broken
+        // default; an explicitly chosen chord is the user's to resolve.
+        let fallback = Hotkey::parse(DEFAULT_HOTKEY).expect("default hotkey");
+        if config.hotkey.canonical() == LEGACY_DEFAULT_HOTKEY
+            && known_conflict(&fallback).is_none()
+        {
+            config.hotkey = fallback;
+        } else {
+            return Err(format!(
+                "{} is already configured for {}; change it there or choose another chord with `prelude global hotkey HOTKEY`",
+                config.hotkey.canonical(), owner
+            ));
+        }
     }
     write_config(&config)?;
     std::fs::create_dir_all(crate::paths::cache())
@@ -772,7 +1005,7 @@ fn install() -> Result<String, String> {
         ));
     }
 
-    let new_agent = launch_agent(&destination, &stdout_path(), &stderr_path());
+    let new_agent = launch_agent(&ghostty, &destination, &stdout_path(), &stderr_path());
     if let Err(e) = crate::cache::write_atomic(&agent, new_agent.as_bytes()) {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
         return Err(format!("could not write {}: {e}", agent.display()));
@@ -786,21 +1019,22 @@ fn install() -> Result<String, String> {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
         return Err(e);
     }
-    let _ = launchctl(&["bootout", &domain(), &agent_s]);
-    // RunAtLoad starts the instance, so bootstrapping *is* the start. Racing
-    // it with an explicit launch is how two panels end up sharing one chord.
-    let _ = launchctl(&["bootstrap", &domain(), &agent_s]);
-    if !wait_until_running() {
-        if let Err(e) = start_helper() {
-            rollback_install(&destination, &backup, &agent, old_agent.as_deref());
-            return Err(format!("{e}; the previous launcher was restored"));
-        }
+    // The supervised Ghostty process is the LaunchAgent now. Bootstrapping is
+    // both the initial start and the guarantee that a later crash is repaired.
+    if let Err(e) = start_helper() {
+        rollback_install(&destination, &backup, &agent, old_agent.as_deref());
+        return Err(format!("{e}; the previous launcher was restored"));
     }
     if let Err(e) = enforce_single_instance() {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
         return Err(format!("{e}; the previous launcher was restored"));
     }
     let _ = std::fs::remove_file(&backup);
+
+    // A running process without its accessibility event tap is the main cause
+    // of an installation that looks successful while Cmd+Shift+Space does
+    // nothing. Resolve the permission now and verify Ghostty's own result.
+    ensure_global_key_ready()?;
 
     let mut result = format!(
         "installed {}\nhotkey: {}\npanel stands in: {}\n",
@@ -813,7 +1047,7 @@ fn install() -> Result<String, String> {
     );
     if !zsh_widget_available() {
         result.push_str(
-            "The login zsh does not load _prelude_widget yet. Add `eval \"$(prelude init zsh)\"` to ~/.zshrc so handed-over commands land on a prompt.",
+            "Optional Ctrl+R integration: add `eval \"$(prelude init zsh)\"` to ~/.zshrc. The global panel is already ready.",
         );
     }
     Ok(result)
@@ -833,7 +1067,7 @@ fn uninstall(reset: bool) -> Result<String, String> {
             .map_err(|e| format!("could not remove {}: {e}", quick.display()))?;
     }
     if reset {
-        for path in [config_path(), stdout_path(), stderr_path()] {
+        for path in [config_path(), stdout_path(), stderr_path(), event_tap_path()] {
             if path.exists() {
                 std::fs::remove_file(&path)
                     .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
@@ -1008,20 +1242,32 @@ pub fn status() -> GlobalStatus {
     let owner = hotkey_owner(&hotkey);
     let panel_running = running();
     let installed = quick_config_path().is_file();
+    let tap = if panel_running {
+        event_tap_state()
+    } else {
+        EventTapState::Pending
+    };
+    let accessibility_granted = match tap {
+        EventTapState::Ready => Some(true),
+        EventTapState::PermissionDenied => Some(false),
+        EventTapState::Pending => None,
+    };
     GlobalStatus {
-        schema: 5,
+        schema: 6,
         app_installed: installed,
         launch_agent_installed: launch_agent_path().is_file(),
+        helper_supervised: service_loaded(),
         helper_running: panel_running,
-        // Ghostty registers the chord from the panel's configuration, so the
-        // panel being up with no known owner is the whole of the claim.
-        hotkey_registered: panel_running && owner.owner.is_none(),
+        accessibility_granted,
+        // A process is not enough: Ghostty must report that the event tap
+        // which receives global keys is active.
+        hotkey_registered: panel_running && tap == EventTapState::Ready && owner.owner.is_none(),
         selected_hotkey,
         hotkey_owner: owner.owner,
         owner_checks_complete: owner.complete,
         launch_directory: directory.to_string_lossy().into_owned(),
         launch_directory_exists: directory.is_dir(),
-        ghostty_available: Some(Path::new(GHOSTTY_APP).is_dir()),
+        ghostty_available: Some(ghostty_app().is_some()),
         zsh_widget_available: zsh_widget_available(),
         last_event: None,
     }
@@ -1043,8 +1289,12 @@ fn print_status(json: bool) -> i32 {
         );
         line(
             "login agent",
-            s.launch_agent_installed,
-            &launch_agent_path().to_string_lossy(),
+            s.launch_agent_installed && s.helper_supervised,
+            if s.helper_supervised {
+                "loaded; launchd keeps the panel alive"
+            } else {
+                "not loaded; run: prelude global start"
+            },
         );
         line(
             "panel running",
@@ -1056,21 +1306,33 @@ fn print_status(json: bool) -> i32 {
             },
         );
         line(
+            "Ghostty Accessibility",
+            s.accessibility_granted == Some(true),
+            match s.accessibility_granted {
+                Some(true) => "global event tap active",
+                Some(false) => "enable Ghostty in System Settings → Privacy & Security → Accessibility",
+                None if s.helper_running => "registration result not available yet; run: prelude global start",
+                None => "starts with the panel",
+            },
+        );
+        line(
             &format!("{} registered", s.selected_hotkey),
             s.hotkey_registered,
             if s.hotkey_registered {
-                "Ghostty owns the chord"
+                "verified ready"
+            } else if s.hotkey_owner.is_some() {
+                "another shortcut owns this chord"
             } else {
-                "free the shortcut or choose another, then run: prelude global install"
+                "run: prelude global start"
             },
         );
         line(
             "zsh widget",
             s.zsh_widget_available,
             if s.zsh_widget_available {
-                "_prelude_widget is loaded; handed-over commands land on a prompt"
+                "Ctrl+R integration loaded"
             } else {
-                "add eval \"$(prelude init zsh)\" to ~/.zshrc"
+                "optional for Ctrl+R; the global panel does not need it"
             },
         );
         println!(
@@ -1105,9 +1367,10 @@ fn print_status(json: bool) -> i32 {
     }
     if s.app_installed
         && s.launch_agent_installed
+        && s.helper_supervised
         && s.helper_running
+        && s.accessibility_granted == Some(true)
         && s.hotkey_registered
-        && s.zsh_widget_available
         && s.ghostty_available == Some(true)
         && s.hotkey_owner.is_none()
     {
@@ -1126,11 +1389,12 @@ fn line(label: &str, good: bool, detail: &str) {
 /// of Prelude's runs when the key is pressed.
 fn open_once() -> Result<(), String> {
     if running() {
-        println!("the launcher panel is already running; press the chord to reveal it");
+        ensure_global_key_ready()?;
+        println!("the launcher panel is ready; press the chord to reveal it");
         return Ok(());
     }
     start_current()?;
-    println!("launcher panel started; press the chord to reveal it");
+    println!("launcher panel started and verified; press the chord to reveal it");
     Ok(())
 }
 
@@ -1186,6 +1450,14 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    #[test]
+    fn a_fresh_install_uses_a_chord_a_stock_mac_does_not_own() {
+        assert_eq!(GlobalConfig::default().hotkey.canonical(), "cmd+shift+space");
+        let path = temp("fresh-default");
+        let config = config_from(&path).unwrap();
+        assert_eq!(config.hotkey.canonical(), "cmd+shift+space");
     }
 
     #[test]
@@ -1302,31 +1574,52 @@ mod tests {
             crate::paths::home().join("Library/LaunchAgents/app.prelude.hotkey.plist")
         );
         assert!(config_path().starts_with(crate::paths::config()));
-        for path in [stdout_path(), stderr_path()] {
+        for path in [stdout_path(), stderr_path(), event_tap_path()] {
             assert!(path.starts_with(crate::paths::cache()));
         }
     }
 
     #[test]
-    fn generated_metadata_escapes_paths_and_contains_no_selected_payload() {
+    fn generated_metadata_escapes_paths_and_supervises_the_real_process() {
         let agent = launch_agent(
+            Path::new("/Users/me/Applications/Ghostty.app/Contents/MacOS/ghostty"),
             Path::new("/tmp/a&b/panel.ghostty"),
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
         );
         assert!(agent.contains("/tmp/a&amp;b/panel.ghostty"));
+        assert!(agent.contains("/Users/me/Applications/Ghostty.app/Contents/MacOS/ghostty"));
         assert!(agent.contains("<key>RunAtLoad</key><true/>"));
-        // `open` hands the request to Launch Services and exits, so there is
-        // nothing here for launchd to keep alive. The panel's own Ghostty
-        // instance is the long-lived thing, and it is not a launchd job.
-        assert!(agent.contains("/usr/bin/open"));
-        assert!(agent.contains("<key>KeepAlive</key><false/>"));
+        // launchd owns the long-lived Ghostty process itself. An `open` job
+        // exits immediately and cannot repair a panel that later dies.
+        assert!(!agent.contains("/usr/bin/open"));
+        assert!(agent.contains("<key>KeepAlive</key><true/>"));
     }
 
-
-
-
-
+    #[test]
+    fn event_tap_logs_are_the_registration_authority() {
+        assert_eq!(
+            event_tap_state_from_log("global event tap enabled for global keybinds"),
+            EventTapState::Ready
+        );
+        assert_eq!(
+            event_tap_state_from_log("creating global event tap failed, missing permissions?"),
+            EventTapState::PermissionDenied
+        );
+        assert_eq!(
+            event_tap_state_from_log(
+                "global event tap enabled for global keybinds\ninvalidating event tap mach port"
+            ),
+            EventTapState::PermissionDenied
+        );
+        assert_eq!(
+            event_tap_state_from_log(
+                "invalidating event tap mach port\nglobal event tap enabled for global keybinds"
+            ),
+            EventTapState::Ready
+        );
+        assert_eq!(event_tap_state_from_log("Ghostty started"), EventTapState::Pending);
+    }
 
 
     #[test]
@@ -1353,6 +1646,7 @@ mod tests {
         assert!(config.contains("keybind = unconsumed:escape=toggle_quick_terminal"));
         assert!(config.contains(r"keybind = cmd+enter=text:\x07"));
         assert!(config.contains("command = /opt/homebrew/bin/prelude _panel"));
+        assert!(config.contains("env = PATH="));
         assert!(config.contains("quick-terminal-position = center"));
         assert!(config.contains("quick-terminal-autohide = true"));
     }

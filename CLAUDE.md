@@ -55,7 +55,10 @@ they are sitting in.
 **Ghostty quick terminal**: a hidden, dedicated Ghostty instance configured by
 `~/.config/prelude/quick-terminal.ghostty`, hosting one long-lived
 `prelude _panel` loop. Ghostty registers the chord itself with a `global:`
-keybind, so nothing of Prelude's runs when the key is pressed.
+keybind, so nothing of Prelude's runs when the key is pressed. On macOS that
+binding is an Accessibility event tap: installation opens the exact permission
+pane and `global status` trusts Ghostty's registration log, never mere process
+existence.
 
 **A press reveals; it never creates.** The old design built a terminal on every
 press — a new application instance, a window, a login shell — 373ms of
@@ -74,9 +77,10 @@ dismissal: it hides the panel *and* passes Escape to fzf, so the launcher
 resets behind a hidden panel and the next press is a reveal, not a rebuild.
 
 One instance or none. Two panels both claim the chord and the loser still
-answers a toggle, so the panel appears to open every other press;
-`RunAtLoad` starting the instance *is* the start, and racing it with an
-explicit launch is how that happens.
+answers a toggle, so the panel appears to open every other press. The
+LaunchAgent runs Ghostty itself as a `KeepAlive` job: this is both the one
+start and the supervision. Never return it to an `/usr/bin/open` job — that
+process exits immediately, so launchd cannot repair a panel that later dies.
 
 **`cargo build` does not change the running panel.** The loop was started at
 login and executes whatever the binary held then. Each press *does* spawn the
@@ -84,9 +88,9 @@ new binary as its child — so fzf, the rows and the footer all update, and it
 looks like the build took — but the delivery decision is made by the parent,
 which is still old. That failure mode reads as "the change did nothing", and
 it lies in the most convincing possible way. Run `prelude global stop && prelude
-global start` after any build you intend to press the key against. There is no
-process to see afterwards: `initial-window = false` means the instance sits
-there with no surface until the first press creates one.
+global start` after any build you intend to press the key against. The Ghostty
+process remains visible to launchd; `initial-window = false` means it owns no
+surface and starts no `prelude _panel` child until the first press.
 
 **The launcher is not the destination, and it never builds one.** A command
 picked from the panel goes on the **clipboard**, and the panel stands down.

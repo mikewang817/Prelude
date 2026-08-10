@@ -24,7 +24,7 @@ or a log.
 ## Architecture
 
 ```text
-login -> LaunchAgent -> hidden Ghostty instance (no window)
+login -> LaunchAgent -> supervised hidden Ghostty instance (no window)
 chord -> Ghostty's own global: keybind -> quick terminal panel
                                        -> prelude _panel
                                           -> prelude -> fzf
@@ -35,10 +35,16 @@ escape -> panel hidden, fzf aborted, loop starts a fresh launcher
 
 `~/.config/prelude/quick-terminal.ghostty` is written by
 `prelude global install` and validated with `ghostty +validate-config` before
-it is installed. The LaunchAgent exists only to start the instance at login;
-`open` exits as soon as Launch Services has the request, so the job is not the
-thing that runs. Prelude links no GUI framework, and no longer asks macOS what
-is in front: it does not need to know.
+it is installed. The LaunchAgent runs the dedicated Ghostty executable as its
+actual `KeepAlive` job, so launchd restarts a panel that exits instead of merely
+remembering that `/usr/bin/open` once succeeded. Prelude links no GUI framework
+and does not ask macOS what is in front: it does not need to know.
+
+Ghostty implements `global:` keybinds with a macOS Accessibility event tap.
+That permission cannot be granted by an installer. Installation opens the
+exact System Settings pane for the one required click, restarts Ghostty, and
+reads Ghostty's unified-log registration result before claiming the shortcut
+works. Process existence alone is never reported as hotkey readiness.
 
 ## Superseded — production global launcher `[x]`
 
@@ -430,3 +436,46 @@ Validation:
   put `Run now` back — both paths are now pinned by one test.
 - `grep -rn tmux src/` returns only prose that records why something was
   removed.
+
+## Milestone — one command ends in a working shortcut `[x]`
+
+The previous installer verified a config file and a process. Neither answered
+the question the user asked: *does the shortcut work?* A stock Mac also owned
+the default `Cmd+Space`, the LaunchAgent supervised a short-lived `open`
+command rather than Ghostty, and Ghostty's undocumented-to-Prelude
+Accessibility requirement was left for the user to discover after a successful
+installation message.
+
+- [x] Fresh installs use `Cmd+Shift+Space`; an old saved `Cmd+Space` default is
+      migrated when Spotlight still owns it, while an intentional free
+      `Cmd+Space` remains untouched.
+- [x] `install.sh` downloads verified native Prelude and fzf binaries, installs
+      the official Ghostty app into `~/Applications` when absent, adds the zsh
+      integration, and installs the global panel. Rust, Homebrew, cloning and
+      hand-editing dotfiles are not prerequisites.
+- [x] Tagged releases build ad-hoc-signed arm64 and x86_64 binaries and publish
+      them with SHA-256 checksums for the one-line installer.
+- [x] Ghostty's actual Accessibility event-tap result is the hotkey authority.
+      Installation opens the correct System Settings pane for the unavoidable
+      click, waits, restarts, and refuses to print success until Ghostty reports
+      `global event tap enabled for global keybinds`.
+- [x] The LaunchAgent runs Ghostty itself with `KeepAlive`; killing the panel is
+      repaired by launchd without a command the user has to know.
+- [x] The generated Ghostty config carries a useful PATH, including the
+      installer's private binary directory, so a login-launched panel can find
+      fzf without relying on `.zshrc`.
+- [x] `global status` separately reports configuration, launchd supervision,
+      process state, Accessibility and verified chord readiness. Ctrl+R's zsh
+      widget is accurately optional for the clipboard-based global panel.
+
+Validation:
+
+- 164 tests pass and release Clippy is warning-free. Both arm64 and x86_64
+  release binaries build from the same checkout; `install.sh` passes shell
+  syntax and checksum-path checks.
+- A real installation reported schema 6 with supervision, Accessibility and
+  chord readiness all true. `SIGKILL` changed Ghostty pid 85687 to 86566 under
+  launchd, after which status remained healthy.
+- A generated Cmd+Shift+Space event opened the replacement process's quick
+  terminal and produced one `prelude _panel` and one fzf child. Escape reset it.
+- Three release gathers remained below the 40 ms median budget (27.0–35.8 ms).

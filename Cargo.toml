@@ -1,10 +1,10 @@
 [package]
 name = "prelude"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "A general launcher in the terminal, with an agent control plane"
 license = "Apache-2.0"
-repository = ""  # TODO: set before publishing
+repository = "https://github.com/mikewang817/Prelude"
 readme = "README.md"
 keywords = ["launcher", "fzf", "cli", "tui"]
 categories = ["command-line-utilities"]

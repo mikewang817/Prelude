@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos-binaries:
+    name: Build macOS release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build both Mac architectures
+        run: |
+          set -euo pipefail
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release --target "$target"
+            codesign --force --sign - "target/$target/release/prelude"
+            mkdir -p "dist/$target"
+            cp "target/$target/release/prelude" "dist/$target/prelude"
+            tar -C "dist/$target" -czf "dist/prelude-$target.tar.gz" prelude
+          done
+          rm -rf dist/aarch64-apple-darwin dist/x86_64-apple-darwin
+          (cd dist && shasum -a 256 prelude-*.tar.gz > checksums.txt)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/prelude-aarch64-apple-darwin.tar.gz \
+            dist/prelude-x86_64-apple-darwin.tar.gz \
+            dist/checksums.txt \
+            --verify-tag \
+            --generate-notes \
+            --title "Prelude ${GITHUB_REF_NAME}"

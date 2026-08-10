@@ -1367,8 +1367,9 @@ mod tests {
               "network sandbox": "restricted",
               "execve wrapper helper": "/Users/mike/.codex/tmp/arg0/codex-arg0i24IeM/codex-execve-wrapper"
             }}
-          }}"#;
-        let evidence = read_effective(Effective::CodexDoctorJson, "codex", codex);
+          }}"#
+            .replace("/Users/mike", &crate::paths::home().to_string_lossy());
+        let evidence = read_effective(Effective::CodexDoctorJson, "codex", &codex);
         assert_eq!(evidence.scope, "directory");
         assert_eq!(evidence.status.as_deref(), Some("ok"));
         assert_eq!(evidence.trouble, None);

@@ -690,7 +690,7 @@ pub fn items() -> Vec<Item> {
             EDIT_PROMPT,
         )
         .put("source", global.hotkey_source)
-        .put("default", "cmd+space")
+        .put("default", "cmd+shift+space")
         .put("path", crate::global::config_file().to_string_lossy().into_owned()),
     );
     v.push(
@@ -1083,7 +1083,7 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
                 format!("{message} — {} still override them", variables.join(", "))
             })
         }
-        "hotkey" => crate::global::set_hotkey("cmd+space"),
+        "hotkey" => crate::global::set_hotkey("cmd+shift+space"),
         "paneldir" => crate::global::set_directory_default(),
         key @ ("key" | "height" | "preview" | "classic_enter") => {
             remove_pref(key)?;

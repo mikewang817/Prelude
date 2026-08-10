@@ -320,10 +320,11 @@ HUMANS
   prelude fleet --status one short line for a status bar
   prelude watch          notify the moment an agent stops and waits for you
   prelude control [--json]  Agent/Run/Session/Skill/MCP relationships
-  prelude global install|uninstall|start|stop|status|open|clear
+  prelude global install|uninstall|start|stop|status|open
   prelude global hotkey [CHORD]
-                         configurable global key; the panel is a hidden
-                         Ghostty quick terminal
+                         global key (default Cmd+Shift+Space); the panel is a
+                         supervised hidden Ghostty quick terminal
+  prelude global directory [PATH|--default]
   prelude settings [--json]
                          effective preferences, sources and files
   prelude settings get KEY | set KEY VALUE | reset KEY|all
