@@ -295,6 +295,24 @@ as a parameter, so the decisions stay testable without a process to read it
 out of. Do not reintroduce an env read inside a rule; a test that has to set a
 variable is a test that races every other test in the binary.
 
+**Escape means "back", one level at a time, and the arrows mean it only while
+there is nothing to type through.** The launcher is a stack — list, action
+panel, submenu, and a typed query is a level of its own — and one key had been
+doing the job of all of them: Ghostty's `unconsumed:escape` hid the whole panel
+at every level, so `PANEL_BACK` fired correctly and the person never saw it,
+because the panel was already gone. That binding is now absent (see
+`global::quick_config`) and Escape belongs to Prelude, which is the only party
+that knows which level you are on.
+
+`←`/`→` do the same walk, with one restriction: they are the query line's
+cursor keys first. `_bind` unbinds `→` the moment a query exists and rebinds it
+when the query empties, because taking the arrows away from a half-typed scope
+would be the launcher deciding it knows better than the person editing. `^K` is
+the unconditional door, so nothing is lost while they are away. `→` cannot be
+an `--expect` key for exactly this reason — those are not bindings and cannot
+be unbound — so it is a binding that `print`s `ui::OPEN_ACTIONS` onto fzf's
+output queue, and `run_fzf` scans for it rather than reading a fixed line.
+
 **Two general action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a
 mode.** Graphical launchers often put a secondary action on its own key;
 Prelude keeps that action but not the key: where useful, it is the first selectable row

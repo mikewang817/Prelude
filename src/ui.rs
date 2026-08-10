@@ -26,7 +26,7 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
     if command_enter && item.is_some_and(|item| matches!(item.kind, Kind::File | Kind::Find)) {
         parts.push(format!("Open folder{DIM}  Cmd+Enter{RESET}"));
     }
-    parts.push(format!("Actions{DIM}  Ctrl+K{RESET}"));
+    parts.push(format!("Actions{DIM}  Ctrl+K →{RESET}"));
     if crate::settings::preview_enabled() {
         parts.push(format!("Preview{DIM}  Ctrl+P{RESET}"));
     }
@@ -51,6 +51,30 @@ pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: cli
 /// Cmd+Enter into Ctrl+G, which fzf can receive reliably. It is contextual to
 /// files and is never advertised on an inline terminal surface.
 const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g";
+
+/// How `→` says "open the action panel" without being an `--expect` key.
+///
+/// It cannot be one: `--expect` keys are not bindings, so they cannot be
+/// unbound, and `→` has to give the query line its arrow back the moment
+/// there is any text to move through. A binding can, so `→` is one, and
+/// `print` puts this on fzf's output queue for `run_fzf` to recognise. The
+/// separator is deliberately absent from it — a line carrying `SEP` would be
+/// read as an item.
+pub const OPEN_ACTIONS: &str = "prelude:open-actions";
+
+/// Level navigation on the arrow keys, for a list with nothing typed into it.
+///
+/// The rule is *arrows move between levels while there is no text to move
+/// through*. Left and right are the query line's cursor first — taking them
+/// away from a half-typed scope would be a launcher deciding it knows better
+/// than the person editing — so `_bind` unbinds them the moment a query
+/// exists, and `^K` remains the unconditional way in. Escape is the key that
+/// means "back" at every level, typed query or not.
+///
+/// The main list binds only `→`: there is no level below the list to go back
+/// to, and `←` there would be a key that does nothing. The pickers bind both.
+pub const ARROW_INTO: &str = "right";
+pub const ARROW_BOTH: &str = "left,right";
 
 pub struct FzfOut {
     pub key: String,
@@ -139,6 +163,15 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
         let mut lines = stdout.split('\n');
         let key = lines.next().unwrap_or("").trim().to_string();
         let item = lines.find(|l| l.contains(SEP)).and_then(render::parse_line);
+        // `→` is a binding rather than an `--expect` key, so it announces
+        // itself on the output queue. Scanned for rather than read from a
+        // fixed line: `print` and the selection share one stream and their
+        // order is fzf's business, not ours.
+        let key = if stdout.lines().any(|l| l.trim() == OPEN_ACTIONS) {
+            "ctrl-k".to_string()
+        } else {
+            key
+        };
         return FzfOut { key, item, failed: false, stderr };
     }
     last
@@ -226,6 +259,16 @@ pub fn search() -> i32 {
     args.push(format!("focus:{on_focus}"));
     args.push("--bind".into());
     args.push(format!("load:{on_focus}"));
+    // `→` enters the action panel, the same door `^K` opens. `_bind` unbinds
+    // it whenever a query exists; see ARROW_KEYS.
+    args.push("--bind".into());
+    args.push(format!("right:print({OPEN_ACTIONS})+accept"));
+    // Escape is "back", one level at a time, and only closes at the outermost
+    // one. A typed query is a level: it is backed out of before the launcher
+    // is. Ghostty no longer binds Escape, so this is the whole of what it
+    // does — see `global::quick_config`.
+    args.push("--bind".into());
+    args.push("esc:transform:[ -n {q} ] && echo clear-query || echo abort".into());
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
@@ -530,7 +573,7 @@ pub fn confirm(question: &str, go_ahead: &str, detail: &str) -> bool {
         "{:<34}{SEP}no\n{:<34}{tail}{SEP}yes",
         "Cancel", go_ahead
     );
-    pick_raw(&feed, &format!(" {question} "), "? ", "Choose  Enter   ·   Cancel  Esc", "")
+    pick_raw(&feed, &format!(" {question} "), "? ", "Choose  Enter →   ·   Cancel  Esc ←", "")
         .as_deref()
         == Some("yes")
 }
@@ -549,6 +592,20 @@ pub fn pick_raw(
     if !header.is_empty() {
         args.push(format!("--header={header}"));
     }
+    // Every level of the panel answers to the same two keys. `←` and Escape
+    // both back out — abort returns `None`, which each caller already reads as
+    // "the person did not choose" and turns into its own kind of back — and
+    // `→` chooses, which for a row with a submenu behind it means entering it.
+    // Escape is not conditioned on the query: backing out is what it means
+    // everywhere, and a filter typed into a modal is part of the modal.
+    args.push("--bind".into());
+    args.push("left:abort".into());
+    args.push("--bind".into());
+    args.push("right:accept".into());
+    args.push("--bind".into());
+    args.push(format!(
+        "change:transform:[ -n {{q}} ] && echo 'unbind({ARROW_BOTH})' || echo 'rebind({ARROW_BOTH})'"
+    ));
     let mut modes: Vec<Vec<String>> = Vec::new();
     if env_flag("PRELUDE_FULL_SURFACE") {
         modes.push(vec![]);

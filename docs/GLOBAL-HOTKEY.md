@@ -18,7 +18,11 @@ The panel is not a destination terminal:
 - shell commands are copied to the system clipboard
 - after copying, Prelude shows a short confirmation for 1.2 seconds and closes
   the surface so it does not cover the place where the command will be pasted
-- `Escape` hides the panel and reaches fzf, so the search resets while hidden
+- `Escape` is not bound in the panel's Ghostty configuration. It reaches fzf
+  alone, so Prelude can spend it one level at a time and close the panel only
+  at the outermost one. Dismissal that does not depend on Prelude remains the
+  chord itself, which Ghostty toggles through an event tap without consulting
+  the launcher, plus `quick-terminal-autohide` when focus moves away.
 
 Prelude never chooses a terminal, tab, pane, or shell on the user's behalf.
 There is no terminal backend setting and no tmux integration.
@@ -73,8 +77,7 @@ The generated Ghostty configuration sets:
 - `window-save-state = never`
 - a centered `62% × 58%` Quick Terminal
 - autohide and move-to-current-Space behavior
-- `global:<chord>=toggle_quick_terminal`
-- `unconsumed:escape=toggle_quick_terminal`
+- `global:<chord>=toggle_quick_terminal`, and deliberately no Escape binding
 - `cmd+enter=text:\x07` for Prelude's private file-parent shortcut
 - `command = <installed-prelude> _surface`
 - `abnormal-command-exit-runtime = 0`

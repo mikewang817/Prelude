@@ -853,7 +853,7 @@ pub fn pick_one(title: &str, choices: &[(String, String, String)]) -> Option<Str
             format!("{name}{tail}{SEP}{key}\n")
         })
         .collect();
-    ui::pick_raw(feed.trim_end(), title, "Choose › ", "Choose  Enter   ·   Back  Esc", "")
+    ui::pick_raw(feed.trim_end(), title, "Choose › ", "Choose  Enter →   ·   Back  Esc ←", "")
 }
 
 fn first_nonempty(it: &Item, keys: &[&str]) -> String {
@@ -906,7 +906,7 @@ pub fn panel(it: &Item) -> i32 {
             feed.trim_end(),
             &format!(" {title} · {kind} "),
             "Action › ",
-            "Choose  Enter   ·   Back  Esc",
+            "Choose  Enter →   ·   Back  Esc ←",
             &header,
         ) else {
             return PANEL_BACK;
@@ -932,7 +932,7 @@ pub fn panel(it: &Item) -> i32 {
                 choices.trim_end(),
                 &format!(" {title} "),
                 "Choose › ",
-                "Choose  Enter   ·   Back  Esc",
+                "Choose  Enter →   ·   Back  Esc ←",
                 "",
             ) else {
                 continue;

@@ -61,8 +61,14 @@ Ctrl+Enter. It appears as the first relevant row in `Ctrl+K` instead.
 
 ## Panel behavior
 
-- `Escape` from a submenu returns to the action list.
-- `Escape` from the action list returns to the main search.
+- `Escape` and `←` from a submenu return to the action list.
+- `Escape` and `←` from the action list return to the main search.
+- `→` opens the focused row's actions from the main search, and chooses within
+  a list — the same door `Ctrl+K` and `Enter` open.
+- `Escape` in the main search clears a typed query first, and closes Prelude
+  only when there is nothing left to back out of.
+- The arrow keys belong to the query line whenever a query exists, so they act
+  on levels only while nothing is typed. `Ctrl+K` is unconditional.
 - Copy, details, Skill Diff, cached MCP tools, and MCP comparison remain in the
   panel after completion.
 - A canceled confirmation returns to the action list.

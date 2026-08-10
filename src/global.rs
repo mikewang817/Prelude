@@ -622,9 +622,27 @@ pub fn run_surface() -> i32 {
 /// first pressed. And `window-save-state` has to be declined or the instance
 /// restores the previous session's windows, so one press arrives with a crowd.
 ///
-/// `unconsumed:escape` is the dismissal. It hides the panel *and* passes the
-/// key through, so fzf aborts, the loop starts a fresh launcher behind the
-/// hidden panel, and the next press is a reveal rather than a rebuild.
+/// **Escape is not bound here, and that is the point.** It used to be
+/// `unconsumed:escape=toggle_quick_terminal`, which hides the panel *and*
+/// passes the key through — unconditionally, at every level. So Escape inside
+/// the action panel did perform its "back", and the person never saw it: the
+/// whole panel had already gone. One key meant "leave this modal" and "close
+/// the launcher" at the same time, and the second always won.
+///
+/// It was kept because it is a dismissal Prelude cannot wedge — Ghostty
+/// performs it whatever the launcher is doing. That argument is sound and it
+/// does not need Escape: `global:{chord}` is the same kind of guarantee, an
+/// Accessibility event tap that toggles the panel without consulting anything
+/// of ours, and `quick-terminal-autohide` closes it when focus moves away.
+/// Two Ghostty-level escape hatches remain; what changed is that the third key
+/// now carries a product meaning instead of overriding one.
+///
+/// Escape therefore belongs to Prelude, which is the only party that knows
+/// which level you are on: it backs out of a submenu, then the action panel,
+/// then the query, and only closes the panel when there is nothing left to
+/// back out of. The cost is that toggling away with the chord now leaves the
+/// launcher as you left it rather than resetting it behind a hidden panel;
+/// the outermost Escape is the explicit way to ask for a clean start.
 fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
     // Ghostty starts its command through a non-interactive login shell. That
     // shell does not read ~/.zshrc, so it otherwise loses Homebrew's fzf path.
@@ -652,7 +670,7 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          env = PATH={path}\n\
          working-directory = {directory}\n\
          keybind = global:{chord}=toggle_quick_terminal\n\
-         keybind = unconsumed:escape=toggle_quick_terminal\n\
+         # Escape is deliberately *not* bound here. See `quick_config`.\n\
          # fzf cannot receive Command. Translate it to Prelude's private Ctrl+G\n\
          # inside this dedicated panel; the person's normal Ghostty is untouched.\n\
          keybind = cmd+enter=text:\\x07\n\
@@ -1686,9 +1704,17 @@ mod tests {
         // Ghostty registers the chord itself; nothing of Prelude's runs when
         // the key is pressed.
         assert!(config.contains("keybind = global:cmd+shift+space=toggle_quick_terminal"));
-        // Escape hides the panel *and* reaches fzf, so the launcher resets
-        // behind a hidden panel and the next press is a reveal, not a rebuild.
-        assert!(config.contains("keybind = unconsumed:escape=toggle_quick_terminal"));
+        // Escape belongs to Prelude, which is the only party that knows which
+        // level you are on. Bound here it hid the whole panel at every level,
+        // so backing out of the action panel and closing the launcher were the
+        // same keypress and the second always won.
+        assert!(!config.contains("escape"),
+                "Escape must reach fzf unclaimed; see quick_config");
+        // The dismissal Prelude cannot wedge is the chord, which Ghostty
+        // performs through an event tap without consulting the launcher — plus
+        // autohide when focus moves away. Both must survive.
+        assert!(config.contains("keybind = global:cmd+shift+space=toggle_quick_terminal"));
+        assert!(config.contains("quick-terminal-autohide = true"));
         assert!(config.contains(r"keybind = cmd+enter=text:\x07"));
         // Every surface enters through the marker gate. Quick terminals run
         // Prelude; ordinary windows are redirected to a normal Ghostty app.

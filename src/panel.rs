@@ -80,6 +80,15 @@ fn once() -> (i32, After) {
         // Nothing to hand over. Either the launcher was dismissed, or it acted
         // on an object directly and the result is in another application —
         // which took focus, so the panel is already gone.
+        //
+        // A dismissal is now Escape at the outermost level and nothing else:
+        // Ghostty stopped binding the key, and every inner level backs out to
+        // the one above rather than exiting. So it means what it says, and the
+        // panel closes. It used to be indistinguishable from Escape anywhere
+        // else, which is why it could not.
+        if code == DISMISSED {
+            return (code, After::Close);
+        }
         return (code, After::Continue);
     };
     match verb {

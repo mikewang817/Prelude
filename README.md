@@ -166,7 +166,9 @@ prelude quicklink check
 | `Ctrl+K` | Open contextual actions |
 | `Ctrl+P` | Toggle Quick Look when enabled |
 | `Cmd+Enter` | Open a file's containing folder from the global panel |
-| `Escape` | Go back or dismiss Prelude |
+| `→` | Open the focused row's actions, when nothing is typed |
+| `←` | Go back one level, when nothing is typed |
+| `Escape` | Go back one level; close Prelude at the outermost one |
 
 ## Boundaries
 

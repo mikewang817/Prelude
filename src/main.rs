@@ -454,15 +454,28 @@ fn focus(q: &str, line: &str) -> i32 {
 /// ordinary queries we leave fuzzy search exactly as it was.
 fn bind(q: &str, path: &str, cols: &str, tw: &str) -> i32 {
     let me = std::env::current_exe().unwrap_or_default();
-    let me = exec::shq(&me.to_string_lossy());
+    println!("{}", bind_actions(q, &exec::shq(&me.to_string_lossy()), path, cols, tw));
+    0
+}
+
+/// The keystroke decision itself, with no process to read it out of — the same
+/// reason every rule below `surface()` takes its inputs as parameters.
+fn bind_actions(q: &str, me: &str, path: &str, cols: &str, tw: &str) -> String {
     let search = if compute::is_special(q) { "disable-search" } else { "enable-search" };
     // The prefix hints belong to the empty query and nothing else: once there
     // is a query there are results to read, and a row of syntax above them is
     // in the way rather than helpful.
     let header = if q.trim().is_empty() { ui::HINTS } else { "" };
-    println!("{search}+change-header({header})+reload({me} _dynamic {} {} {} {})",
-             exec::shq(q), exec::shq(path), exec::shq(cols), exec::shq(tw));
-    0
+    // The arrow keys belong to the query line whenever there is a query to
+    // move through, and to the level structure when there is not. `^K` is the
+    // way in either way, so nothing is lost while they are away.
+    let arrows = if q.is_empty() {
+        format!("rebind({})", ui::ARROW_INTO)
+    } else {
+        format!("unbind({})", ui::ARROW_INTO)
+    };
+    format!("{search}+{arrows}+change-header({header})+reload({me} _dynamic {} {} {} {})",
+            exec::shq(q), exec::shq(path), exec::shq(cols), exec::shq(tw))
 }
 
 /// Emit query-dependent rows, then the pre-rendered static list.
@@ -1042,6 +1055,25 @@ mod tests {
         assert_eq!(scope.style().1, "search");
         assert!(crate::cache::by_rank(&template, &scope) == std::cmp::Ordering::Less,
                 "and the person's keyword still leads the built-in scope");
+    }
+
+    /// Arrows move between levels only while there is no text to move
+    /// through. Taking `←`/`→` away from a half-typed scope would be the
+    /// launcher deciding it knows better than the person editing.
+    #[test]
+    fn the_arrow_keys_yield_to_a_query_and_ctrl_k_never_does() {
+        let actions = |q: &str| crate::bind_actions(q, "prelude", "/dev/null", "80", "20");
+        assert!(actions("").contains(&format!("rebind({})", crate::ui::ARROW_INTO)),
+                "an empty query has nothing to move through, so → enters");
+        assert!(actions("c:").contains(&format!("unbind({})", crate::ui::ARROW_INTO)),
+                "a typed scope keeps its cursor keys");
+        assert!(actions("claude ").contains(&format!("unbind({})", crate::ui::ARROW_INTO)));
+
+        // `→` cannot be an --expect key, because those cannot be unbound. It
+        // announces itself on the output queue instead, and the marker must
+        // never look like an item.
+        assert!(!crate::ui::OPEN_ACTIONS.contains(crate::render::SEP));
+        assert!(!crate::ui::OPEN_ACTIONS.trim().is_empty());
     }
 
     /// The panel refreshes itself behind your back, so the one thing it must
