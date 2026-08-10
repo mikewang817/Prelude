@@ -271,17 +271,31 @@ explicit `prelude global status`.
 
 **Latency is the product.** fzf re-invokes the binary on *every keystroke*
 through a transform binding, so startup cost is paid hundreds of times per
-session. Be sceptical of new dependencies. `bench` must stay under 40ms; it
-sits around 15 on a quiet machine, and every millisecond of that is a
-subprocess. Per keystroke the binary costs about 2ms, of which 1.6 is the
-kernel's fork and exec — there is nothing left to win there, so measure
-`gather` and leave the helpers alone.
+session. Be sceptical of new dependencies — the rule is about what a
+*keystroke* pays, which is why the `ignore` crate (a library walk inside
+gather, zero startup cost) was admitted while a URL crate for `web_url` was
+not. `bench` must stay under 40ms; it sits around 8 on a quiet machine.
+Per keystroke the binary costs about 2ms, of which 1.8 is the kernel's fork
+and exec — there is nothing left to win there, so measure `gather` and leave
+the helpers alone. `bench --sources` is the instrument: it times every phase
+of one gather and prints them sorted, because the floor is the slowest FAST
+source and the profile has to be re-read after every win.
 
 **A launch costs whatever its slowest subprocess costs.** The `FAST` sources
 run on threads and are waited for together, so the floor is the slowest one
 and the local work underneath it is free. That is the only shape worth
 optimising for: shaving a source that is not the slowest changes nothing,
 and the profile has to be re-read after every win because the floor moves.
+It has moved twice now, and both times the fix was the same: FAST membership
+*is* the performance decision. `procs` was the floor at ~20ms — `ps` costs
+12–14ms merely enumerating a thousand processes, whatever fields are asked
+for — for rows that only appear inside `proc:`, filtered from the snapshot;
+it went behind the cache on the reasoning that already put 65ms `lsof`
+there. Then `files` was the floor at ~8ms, nearly all of it fd's fork, exec
+and thread pool built per launch; the `ignore` crate is fd's engine as a
+library and does the same walk in under 1ms. `files` stays FAST because a
+file you just created must be in `f:` on the very next press — the failure
+to avoid is a missing row.
 
 **One rule, two surfaces.** `defaults::Surface` is `Prompt` (the zsh widget)
 or `Clipboard` (the panel). It changes no behaviour — Enter does the same

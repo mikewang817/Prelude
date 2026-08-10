@@ -83,6 +83,21 @@ fn main() -> ExitCode {
         // rendered table.
         ["doctor", rest @ ..] => doctor::dispatch(rest),
         ["bench"] => bench(),
+        // Where the money goes, phase by phase. The rule this serves: the
+        // floor is the slowest FAST source and the local work under it is
+        // free — so the profile has to be re-read after every win, because
+        // the floor moves.
+        ["bench", "--sources"] => {
+            let _ = cache::gather(); // warm
+            let (n, samples) = cache::profile_gather();
+            println!("gather: {n} items");
+            for (name, ms) in &samples {
+                if *ms >= 0.05 {
+                    println!("  {ms:7.2}ms  {name}");
+                }
+            }
+            0
+        }
         ["fleet"] => fleet::list(false),
         ["fleet", "--json"] => fleet::list(true),
         ["fleet", "--status"] => fleet::status(),

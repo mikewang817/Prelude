@@ -124,11 +124,18 @@ pub fn stale(name: &str) -> bool {
 type Source = (&'static str, fn() -> Vec<Item>);
 
 /// Sources that shell out but are fast enough to wait for.
+///
+/// The floor of a launch is the slowest entry here, so membership is the
+/// performance decision. `files` stays because a file you just created must
+/// be in `f:` on the very next press — the failure to avoid is a missing
+/// row. `procs` and `dirs` used to be here too, and between them they *were*
+/// the floor: `ps` costs 12–14ms merely enumerating a thousand processes,
+/// whatever fields are asked for, and zoxide another 7ms — for rows that
+/// only ever appear inside their own scopes, filtered from the snapshot, on
+/// exactly the reasoning that already put 65ms `lsof` behind the cache.
 const FAST: &[Source] = &[
-    ("dirs", crate::sources::user::dirs),
     ("containers", crate::sources::machine::containers),
     ("files", crate::sources::project::files),
-    ("procs", crate::sources::machine::procs),
 ];
 
 /// Too slow to ever block on: lsof costs ~65ms and cannot be made faster.
@@ -136,6 +143,11 @@ const FAST: &[Source] = &[
 /// re-resolves the pid at run time rather than trusting the cached one.
 const SLOW: &[Source] = &[
     ("ports", crate::sources::machine::ports),
+    // A process list five seconds old answers `proc:` exactly as well; what
+    // each *agent* is doing stays live through `running::live`'s syscalls.
+    ("procs", crate::sources::machine::procs),
+    // zoxide's ranking changes at the pace you change projects, not per press.
+    ("dirs", crate::sources::user::dirs),
     // Hundreds of session files, each needing its head parsed.
     ("sessions", crate::sources::sessions::all),
     // `claude mcp list` runs a network health check on every server.
@@ -175,6 +187,35 @@ pub fn refresh_named(name: &str) -> bool {
 /// whatever any subprocess is doing.
 const EXTERNAL_DEADLINE: Duration = Duration::from_millis(40);
 
+/// Where a gather spends its time, phase by phase — the instrument behind
+/// `bench --sources`. Sampling is off unless asked for, and the probe is one
+/// atomic load when it is off.
+static PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SAMPLES: std::sync::Mutex<Vec<(&'static str, f64)>> = std::sync::Mutex::new(Vec::new());
+
+fn timed<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
+    if !PROFILING.load(std::sync::atomic::Ordering::Relaxed) {
+        return f();
+    }
+    let t = std::time::Instant::now();
+    let out = f();
+    if let Ok(mut samples) = SAMPLES.lock() {
+        samples.push((name, t.elapsed().as_secs_f64() * 1000.0));
+    }
+    out
+}
+
+/// One profiled gather, as (phase, milliseconds) in descending cost.
+pub fn profile_gather() -> (usize, Vec<(&'static str, f64)>) {
+    PROFILING.store(true, std::sync::atomic::Ordering::Relaxed);
+    SAMPLES.lock().map(|mut s| s.clear()).ok();
+    let n = gather().len();
+    PROFILING.store(false, std::sync::atomic::Ordering::Relaxed);
+    let mut out = SAMPLES.lock().map(|s| s.clone()).unwrap_or_default();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    (n, out)
+}
+
 pub fn gather() -> Vec<Item> {
     let deadline = std::time::Instant::now() + EXTERNAL_DEADLINE;
     // Kick the subprocess-backed sources off first so they overlap with the
@@ -185,8 +226,8 @@ pub fn gather() -> Vec<Item> {
     for (i, (name, f)) in FAST.iter().enumerate() {
         let (name, f, tx) = (*name, *f, tx.clone());
         std::thread::spawn(move || {
-            let items = f();
-            write_cached(name, &items);
+            let items = timed(name, f);
+            timed("write_cached(fast)", || write_cached(name, &items));
             // The receiver is gone once the deadline passes; the cache write
             // above is what that straggler was still worth.
             let _ = tx.send((i, items));
@@ -197,25 +238,27 @@ pub fn gather() -> Vec<Item> {
     let mut items = Vec::with_capacity(2600);
     // Search providers, fixed Quicklinks and scope commands belong in global
     // search, but the empty-query home filters them back out.
-    items.extend(crate::compute::quicklink_items());
-    items.extend(crate::compute::scope_commands());
+    items.extend(timed("quicklinks", crate::compute::quicklink_items));
+    items.extend(timed("scopes", crate::compute::scope_commands));
 
     // Read once, then hand down. Sessions is six hundred rows of JSON that
     // the recent list, the skill ranking and the agent summary all want, and
     // the MCP list is wanted twice — between them they were most of the
     // local half of a gather, spent parsing the same two files over.
-    let sessions = read_cached("sessions");
-    let mcp = read_cached("mcp");
-    let runs = crate::sources::running::live_with_sessions(&sessions);
-    let sessions = crate::sources::running::annotate_sessions(sessions, &runs);
-    write_cached_if_changed("sessions-linked", &sessions);
+    let sessions = timed("read sessions", || read_cached("sessions"));
+    let mcp = timed("read mcp", || read_cached("mcp"));
+    let runs = timed("running::live", || crate::sources::running::live_with_sessions(&sessions));
+    let sessions = timed("annotate", || crate::sources::running::annotate_sessions(sessions, &runs));
+    timed("write sessions-linked", || write_cached_if_changed("sessions-linked", &sessions));
     for (name, _) in SLOW {
         if stale(name) {
             spawn_self(&["_refresh", name]);
         }
     }
-    items.extend(read_cached("ports"));
-    items.extend(read_cached("update"));
+    items.extend(timed("read ports", || read_cached("ports")));
+    items.extend(timed("read procs", || read_cached("procs")));
+    items.extend(timed("read dirs", || read_cached("dirs")));
+    items.extend(timed("read update", || read_cached("update")));
     // Sessions are numerous enough to swamp the list; only the newest
     // few go in, and `s:` searches the rest.
     items.extend(
@@ -233,37 +276,38 @@ pub fn gather() -> Vec<Item> {
     // had just computed was thrown away.
 
     // Pure file/CPU work — microseconds each, just run them.
-    items.extend(crate::sources::project::scripts());
-    items.extend(crate::sources::project::git());
-    items.extend(crate::sources::history::source());
-    items.extend(crate::sources::user::path_commands());
-    items.extend(crate::sources::user::ssh());
-    items.extend(crate::sources::user::snippets());
-    items.extend(crate::sources::user::clips());
-    let skills = crate::sources::agents::skills_with(&sessions);
+    items.extend(timed("scripts", crate::sources::project::scripts));
+    items.extend(timed("git", crate::sources::project::git));
+    items.extend(timed("history", crate::sources::history::source));
+    items.extend(timed("path", crate::sources::user::path_commands));
+    items.extend(timed("ssh", crate::sources::user::ssh));
+    items.extend(timed("snippets", crate::sources::user::snippets));
+    items.extend(timed("clips", crate::sources::user::clips));
+    let skills = timed("skills", || crate::sources::agents::skills_with(&sessions));
     items.extend(skills.iter().cloned());
 
     // Questions agents are blocked on. A directory read of a handful of small
     // files, and the most urgent thing the launcher can show.
-    items.extend(crate::bus::items());
+    items.extend(timed("bus", crate::bus::items));
 
     // Identities come from the cache; what each one is *doing* is decided
     // here and now, out of syscalls. A fleet view that is a minute stale is
     // worse than none — it tells you an agent is stuck that has since moved
     // on, and vice versa.
     items.extend(runs.iter().cloned());
-    items.extend(crate::sources::machine::apps());
-    items.extend(crate::sources::machine::system());
-    items.extend(crate::sources::agents::configs());
-    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions, &runs));
+    items.extend(timed("apps", crate::sources::machine::apps));
+    items.extend(timed("system", crate::sources::machine::system));
+    items.extend(timed("configs", crate::sources::agents::configs));
+    items.extend(timed("summary", || crate::sources::agents::summary(&skills, &mcp, &sessions, &runs)));
     // Prelude's own preferences. A handful of files under two kilobytes and
     // two `stat`s; `root_items` does not admit the kind, so they are reachable
     // through `set:` and nowhere else.
-    items.extend(crate::settings::items());
+    items.extend(timed("settings", crate::settings::items));
 
     // Collected by index rather than in arrival order: `finish` keeps the
     // first of any duplicate pair, so which source got there first must not
     // decide what the list contains.
+    let wait_started = std::time::Instant::now();
     let mut fast: Vec<Option<Vec<Item>>> = (0..FAST.len()).map(|_| None).collect();
     while fast.iter().any(Option::is_none) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -273,15 +317,20 @@ pub fn gather() -> Vec<Item> {
         let Ok((i, v)) = rx.recv_timeout(left) else { break };
         fast[i] = Some(v);
     }
+    if PROFILING.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(mut samples) = SAMPLES.lock() {
+            samples.push(("wait for FAST", wait_started.elapsed().as_secs_f64() * 1000.0));
+        }
+    }
     for (i, (name, _)) in FAST.iter().enumerate() {
         match fast[i].take() {
             Some(v) => items.extend(v),
             None => items.extend(read_cached(name)),
         }
     }
-    crate::archive::decorate(&mut items);
-    crate::favorites::decorate(&mut items);
-    finish(items)
+    timed("archive", || crate::archive::decorate(&mut items));
+    timed("favorites", || crate::favorites::decorate(&mut items));
+    timed("finish", || finish(items))
 }
 
 /// The agent control centre as data. Sessions deliberately have their own

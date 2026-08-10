@@ -3,11 +3,10 @@
 //! All of them return empty when there is no project context — which happens
 //! when the directory has been deleted out from under the shell.
 
-use crate::exec::{run, shq, which};
+use crate::exec::shq;
 use crate::item::{Item, Kind};
 use crate::paths;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const MARKERS: &[&str] = &[
     ".git", "package.json", "Cargo.toml", "Makefile", "justfile", "Justfile",
@@ -253,30 +252,42 @@ fn collect_refs(base: &Path, dir: &Path, out: &mut Vec<String>) {
 pub fn files() -> Vec<Item> {
     let Some(root) = root() else { return Vec::new() };
     let rootstr = root.to_string_lossy().into_owned();
-    // No --strip-cwd-prefix: fd rejects it alongside an explicit path.
-    let out = match which("fd").or_else(|| which("fdfind")) {
-        Some(fd) => run(
-            &[&fd.to_string_lossy(), "--type", "f", "--max-depth", "6",
-              "--color", "never", ".", &rootstr],
-            Duration::from_secs(5),
-        ),
-        None => run(
-            &["find", &rootstr, "-maxdepth", "6", "-type", "f", "-not", "-path", "*/.git/*"],
-            Duration::from_secs(5),
-        ),
-    };
-    out.lines()
-        .take(2000)
-        .filter(|p| !p.trim().is_empty() && !p.contains("/.git/"))
-        .filter_map(|p| {
-            let full = if p.starts_with('/') {
-                p.to_string()
-            } else {
-                root.join(p).to_string_lossy().into_owned()
-            };
-            let rel = full.strip_prefix(&rootstr)?.trim_start_matches('/').to_string();
-            let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_else(|| ".".into());
-            Some(Item::new(rel.clone(), Kind::File).title(rel).sub(dir).put("path", full))
-        })
-        .collect()
+    // The `ignore` crate is fd's own engine, used as a library. It used to be
+    // fd the subprocess, and the subprocess was the cost: fork, exec, and a
+    // thread pool built and torn down per launch came to ~8ms for a project
+    // of a few hundred files, which made this the slowest FAST source — the
+    // floor of every gather — once `procs` moved behind the cache. Same
+    // semantics on purpose: hidden files skipped, `.gitignore` respected,
+    // depth six, capped at 2000.
+    //
+    // In gather this runs on a FAST thread, so the dependency rule is kept:
+    // nothing here is on a keystroke, and a library walk adds zero startup
+    // cost to the binary the keystrokes do pay for.
+    let mut items = Vec::new();
+    let walker = ignore::WalkBuilder::new(&root)
+        .max_depth(Some(6))
+        .follow_links(false)
+        .build();
+    for entry in walker.flatten() {
+        if items.len() >= 2000 {
+            break;
+        }
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let full = entry.path().to_string_lossy().into_owned();
+        if full.contains("/.git/") {
+            continue;
+        }
+        let Some(rel) = full.strip_prefix(&rootstr).map(|r| r.trim_start_matches('/')) else {
+            continue;
+        };
+        if rel.is_empty() {
+            continue;
+        }
+        let rel = rel.to_string();
+        let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_else(|| ".".into());
+        items.push(Item::new(rel.clone(), Kind::File).title(rel).sub(dir).put("path", full));
+    }
+    items
 }

@@ -130,7 +130,7 @@ fn fingerprint() -> u64 {
     let data = crate::paths::data();
     let cache = crate::paths::cache();
     let config = crate::paths::config();
-    let watched: [PathBuf; 9] = [
+    let watched: [PathBuf; 11] = [
         // What a person changes and expects to see immediately.
         data.join("clipboard.jsonl"),
         config.join("quicklinks.toml"),
@@ -142,6 +142,8 @@ fn fingerprint() -> u64 {
         cache.join("mcp.json"),
         cache.join("fleet.json"),
         cache.join("ports.json"),
+        cache.join("procs.json"),
+        cache.join("dirs.json"),
         data.join("sessions.json"),
         data.join("capabilities.json"),
     ];

@@ -14,6 +14,7 @@ name = "prelude"
 path = "src/main.rs"
 
 [dependencies]
+ignore = "0.4.33"
 # Deliberately few: every crate is startup cost, and startup latency is the
 # entire point of this rewrite.
 serde = { version = "1", features = ["derive"] }
