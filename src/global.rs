@@ -10,6 +10,7 @@
 //! terminal in this module is the one the panel itself is.
 
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -264,7 +265,7 @@ pub struct GlobalStatus {
     pub last_event: Option<serde_json::Value>,
 }
 
-fn ghostty_app() -> Option<PathBuf> {
+pub(crate) fn ghostty_app() -> Option<PathBuf> {
     [
         PathBuf::from("/Applications/Ghostty.app"),
         crate::paths::home().join("Applications/Ghostty.app"),
@@ -582,6 +583,36 @@ fn run_visible(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// A surface made by the quick-terminal action carries Ghostty's explicit
+/// marker. An ordinary `open Ghostty` request can be routed to this hidden app
+/// after the panel was most recently active, so process identity alone cannot
+/// decide which command belongs in the surface.
+fn is_quick_terminal(marker: Option<&OsStr>) -> bool {
+    marker == Some(OsStr::new("1"))
+}
+
+/// `prelude _surface` — route a surface created inside the dedicated Ghostty.
+///
+/// The quick terminal owns Prelude. Any ordinary window was delivered to the
+/// wrong Ghostty instance by Launch Services; replace it with a fresh,
+/// default-configured Ghostty application and let this transient surface close.
+pub fn run_surface() -> i32 {
+    if is_quick_terminal(std::env::var_os("GHOSTTY_QUICK_TERMINAL").as_deref()) {
+        return crate::panel::run();
+    }
+    let Some(app) = ghostty_app() else {
+        eprintln!("prelude: Ghostty is no longer installed");
+        return 2;
+    };
+    match crate::openwith::launch_now(&app.to_string_lossy()) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("prelude: {error}");
+            2
+        }
+    }
+}
+
 /// The panel's Ghostty configuration.
 ///
 /// Every line here is load-bearing, and three were found the hard way.
@@ -615,6 +646,9 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          quick-terminal-space-behavior = move\n\
          quick-terminal-animation-duration = 0.08\n\
          confirm-close-surface = false\n\
+         # An ordinary open request can briefly create a routing surface here.\n\
+         # Its successful, immediate exit is intentional and must close cleanly.\n\
+         abnormal-command-exit-runtime = 0\n\
          env = PATH={path}\n\
          working-directory = {directory}\n\
          keybind = global:{chord}=toggle_quick_terminal\n\
@@ -622,7 +656,7 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          # fzf cannot receive Command. Translate it to Prelude's private Ctrl+G\n\
          # inside this dedicated panel; the person's normal Ghostty is untouched.\n\
          keybind = cmd+enter=text:\\x07\n\
-         command = {exe} _panel\n",
+         command = {exe} _surface\n",
         chord = hotkey.canonical(),
         exe = exe.display(),
         directory = directory.display(),
@@ -1623,6 +1657,14 @@ mod tests {
 
 
     #[test]
+    fn only_ghosttys_quick_terminal_marker_routes_to_prelude() {
+        assert!(is_quick_terminal(Some(OsStr::new("1"))));
+        assert!(!is_quick_terminal(None));
+        assert!(!is_quick_terminal(Some(OsStr::new("0"))));
+        assert!(!is_quick_terminal(Some(OsStr::new("true"))));
+    }
+
+    #[test]
     fn the_panel_is_hidden_warm_and_dismissible() {
         let config = quick_config(
             Path::new("/opt/homebrew/bin/prelude"),
@@ -1645,7 +1687,11 @@ mod tests {
         // behind a hidden panel and the next press is a reveal, not a rebuild.
         assert!(config.contains("keybind = unconsumed:escape=toggle_quick_terminal"));
         assert!(config.contains(r"keybind = cmd+enter=text:\x07"));
-        assert!(config.contains("command = /opt/homebrew/bin/prelude _panel"));
+        // Every surface enters through the marker gate. Quick terminals run
+        // Prelude; ordinary windows are redirected to a normal Ghostty app.
+        assert!(config.contains("command = /opt/homebrew/bin/prelude _surface"));
+        assert!(!config.contains("command = /opt/homebrew/bin/prelude _panel"));
+        assert!(config.contains("abnormal-command-exit-runtime = 0"));
         assert!(config.contains("env = PATH="));
         assert!(config.contains("quick-terminal-position = center"));
         assert!(config.contains("quick-terminal-autohide = true"));

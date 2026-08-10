@@ -13,6 +13,11 @@ and nothing is torn down afterwards.
 The surface is a Ghostty quick terminal: a centred macOS panel belonging to a
 dedicated Ghostty instance that is hidden from the Dock and the app switcher,
 owns no window at rest, and never touches the Ghostty the person works in.
+Because macOS still sees that hidden process as Ghostty, it can receive a later
+ordinary Ghostty launch after its quick terminal was active. Every surface
+therefore enters through a marker-aware gate: quick-terminal surfaces run
+Prelude, while an ordinary surface is replaced by a new default-configured
+Ghostty instance. Other applications retain normal Launch Services reuse.
 Escape dismisses and resets. Any action that moves focus dismisses it too.
 
 The launcher is not the destination, and it never creates one. A command goes
@@ -26,10 +31,12 @@ or a log.
 ```text
 login -> LaunchAgent -> supervised hidden Ghostty instance (no window)
 chord -> Ghostty's own global: keybind -> quick terminal panel
-                                       -> prelude _panel
-                                          -> prelude -> fzf
-                                          -> INSERT|RUN -> clipboard, close
-                                          -> object     -> Launch Services
+                                       -> prelude _surface [quick marker]
+                                          -> prelude _panel -> prelude -> fzf
+                                             -> INSERT|RUN -> clipboard, close
+                                             -> object     -> Launch Services
+ordinary Ghostty request routed here -> prelude _surface [no marker]
+                                       -> open -n exact Ghostty.app, close
 escape -> panel hidden, fzf aborted, loop starts a fresh launcher
 ```
 
@@ -484,3 +491,38 @@ Validation:
 - A generated Cmd+Shift+Space event opened the replacement process's quick
   terminal and produced one `prelude _panel` and one fzf child. Escape reset it.
 - Three release gathers remained below the 40 ms median budget (27.0–35.8 ms).
+
+## Milestone — opening Ghostty does not open Prelude `[x]`
+
+The hidden panel has Ghostty's bundle identity even though it is absent from the
+Dock and app switcher. After the quick terminal becomes the most recently active
+Ghostty instance, a plain application launch can be delivered to that process.
+The panel configuration used to apply `command = prelude _panel` to every
+surface, so each ordinary window created there became another Prelude launcher.
+
+- [x] The generated command is `prelude _surface`, not `_panel`. Ghostty's
+      `GHOSTTY_QUICK_TERMINAL=1` marker is the authority that enters the panel;
+      missing, false-looking or invented values never do.
+- [x] An unmarked surface launches the exact discovered `Ghostty.app` path with
+      `open -n` and exits, replacing the misrouted surface with an ordinary,
+      default-configured Ghostty instance.
+- [x] The routing surface sets `abnormal-command-exit-runtime = 0`, so its
+      intentional immediate exit closes rather than leaving an error terminal.
+- [x] The Ghostty Application row also carries `open -na Ghostty`, so copying or
+      inserting its command preserves the independent-instance requirement.
+- [x] No other application receives `-n`; ordinary macOS application reuse is
+      unchanged, and launch arguments go directly to `/usr/bin/open` without
+      shell interpolation.
+
+Validation:
+
+- Unit coverage pins the exact quick-terminal marker, generated surface gate,
+  Ghostty's displayed command and direct launch arguments. Visual Studio Code
+  retains the ordinary `open -a` command and path-only Launch Services arguments.
+- With only the supervised hidden instance running, a real plain `open
+  /Applications/Ghostty.app` first reached that instance, passed through the
+  unmarked gate, and left no child there. It produced a second Ghostty process
+  with an ordinary login-zsh child and no Prelude child — the exact misrouting
+  path that previously reproduced the fault.
+- 165 tests, release Clippy, `git diff --check` and a release build pass. A
+  settled gather remains within budget at a 24.3 ms median and 33.4 ms maximum.

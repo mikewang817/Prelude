@@ -56,8 +56,12 @@ fn main() -> ExitCode {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match a.as_slice() {
         [] => ui::search(),
-        // The process the quick-terminal launcher panel runs. It outlives
-        // every press, so a press reveals a launcher instead of building one.
+        // Ghostty marks quick-terminal surfaces in their environment. The
+        // gate matters because macOS can deliver an ordinary Ghostty launch
+        // to Prelude's hidden instance after its panel was most recently used.
+        ["_surface"] => global::run_surface(),
+        // Kept as an internal test/debug door; generated Ghostty configuration
+        // enters through `_surface` so ordinary windows never become Prelude.
         ["_panel"] => panel::run(),
         // `paste [pane]` typed the result into a tmux pane instead of
         // returning it. Nothing types into anything now, and a command that
@@ -1337,7 +1341,7 @@ mod tests {
     /// in an application or path therefore remain inside one argument.
     #[test]
     fn external_open_arguments_are_well_formed() {
-        use crate::openwith::{ext_of, open_args};
+        use crate::openwith::{app_command, ext_of, launch_args, open_args};
         assert_eq!(open_args("/tmp/x.json", None), ["/tmp/x.json"]);
         assert_eq!(open_args("/tmp/a b.json", None), ["/tmp/a b.json"]);
         assert_eq!(
@@ -1346,6 +1350,21 @@ mod tests {
         );
         // An empty remembered app must fall back, not produce `-a ''`.
         assert_eq!(open_args("/tmp/x.json", Some("  ")), ["/tmp/x.json"]);
+
+        // The hidden global panel has Ghostty's bundle identity. Launching the
+        // ordinary app directly should therefore ask Launch Services for a new
+        // instance instead of first being misrouted through the surface gate.
+        assert_eq!(app_command("Ghostty"), "open -na Ghostty");
+        assert_eq!(
+            launch_args("/Applications/Ghostty.app"),
+            ["-n", "/Applications/Ghostty.app"]
+        );
+        assert_eq!(app_command("Visual Studio Code"), "open -a 'Visual Studio Code'");
+        assert_eq!(
+            launch_args("/Applications/Visual Studio Code.app"),
+            ["/Applications/Visual Studio Code.app"]
+        );
+
         assert_eq!(ext_of("/a/b/.claude.json"), "json");
         assert_eq!(ext_of("/a/b/Makefile"), "");
         assert_eq!(ext_of("/a/b/X.JSON"), "json", "extensions are matched case-insensitively");

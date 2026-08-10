@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 141 tests
+cargo test                 # 165 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -16,8 +16,8 @@ cargo clippy --release     # expected warning-free
 ./target/release/prelude _dump-all   # complete catalogue behind scopes
 ```
 
-`_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`, `_bind`, `_dynamic`,
-`_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`,
+`_surface`, `_panel`, `_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`,
+`_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`,
 `_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
@@ -124,6 +124,17 @@ was "and run it" must not offer that row.
 
 This binds the global launcher to Ghostty; no other macOS terminal has a quick
 terminal.
+
+**Opening Ghostty must not open Prelude.** The hidden panel is a real Ghostty
+process with Ghostty's bundle identity. After the quick terminal was active,
+macOS can deliver a later ordinary Ghostty launch to that process. Its command
+must therefore be `prelude _surface`, never `_panel` directly:
+`GHOSTTY_QUICK_TERMINAL=1` enters the panel, while an unmarked surface opens a
+new exact-path Ghostty instance and exits. Keep
+`abnormal-command-exit-runtime = 0` so that intentional routing exit closes
+without an error surface. Application rows also carry `open -na Ghostty` and
+pass `-n` with the exact app path. Do not apply `-n` to every application —
+ordinary apps should keep macOS's reuse semantics.
 
 ## Agent Control Plane work
 

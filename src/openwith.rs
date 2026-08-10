@@ -108,6 +108,37 @@ pub fn open_args(target: &str, app: Option<&str>) -> Vec<String> {
     args
 }
 
+fn is_ghostty_app(target: &str) -> bool {
+    Path::new(target)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("Ghostty.app"))
+}
+
+/// The command text carried by an Application row.
+///
+/// Prelude's global panel is itself a hidden Ghostty process. A plain
+/// `open -a Ghostty` can therefore ask that process for a normal window. The
+/// surface gate repairs such a misroute, but `-n` avoids it entirely and gives
+/// the selected app its own ordinary instance. Other applications retain
+/// normal macOS reuse semantics.
+pub fn app_command(name: &str) -> String {
+    let flag = if name.eq_ignore_ascii_case("Ghostty") { "-na" } else { "-a" };
+    format!("open {flag} {}", crate::exec::shq(name))
+}
+
+/// Arguments for launching an Application row. The exact path is retained so
+/// multiple app installations are not confused; `open -n PATH` is the
+/// path-specific equivalent of `open -na Ghostty`.
+pub fn launch_args(target: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if is_ghostty_app(target) {
+        args.push("-n".to_string());
+    }
+    args.push(target.to_string());
+    args
+}
+
 /// Hand a URL, file, folder or application directly to macOS Launch Services.
 ///
 /// Arguments go straight to `/usr/bin/open`, never through `sh -c`, so an
@@ -130,6 +161,22 @@ pub fn open_now(target: &str, app: Option<&str>) -> Result<(), String> {
 
 pub fn open_default_now(path: &str) -> Result<(), String> {
     open_now(path, chosen_for(path).as_deref())
+}
+
+/// Launch an application. Ghostty is deliberately a new instance so Prelude's
+/// hidden quick-terminal process cannot receive the ordinary window request.
+pub fn launch_now(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("nothing to launch".into());
+    }
+    let status = Command::new("/usr/bin/open")
+        .args(launch_args(path))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not ask macOS to launch it: {e}"))?;
+    if status.success() { Ok(()) } else { Err("macOS could not launch it".into()) }
 }
 
 pub fn reveal_now(path: &str) -> Result<(), String> {

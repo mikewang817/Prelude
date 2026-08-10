@@ -299,7 +299,7 @@ pub fn apps() -> Vec<Item> {
                     .map(|p| paths::tilde(&p.to_string_lossy()))
                     .unwrap_or_default();
                 items.push(
-                    Item::new(format!("open -a {}", shq(&stem)), Kind::App)
+                    Item::new(crate::openwith::app_command(&stem), Kind::App)
                         .title(stem)
                         .sub(parent)
                         .put("path", path.to_string_lossy()),

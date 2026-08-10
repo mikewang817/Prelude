@@ -331,7 +331,7 @@ fn act(item: &Item, verb: crate::defaults::Verb) -> i32 {
             return crate::bus::answer(id, &line);
         }
         Launch => {
-            if let Err(e) = crate::openwith::open_now(item.get("path"), None) {
+            if let Err(e) = crate::openwith::launch_now(item.get("path")) {
                 note(&e);
                 return 2;
             }
