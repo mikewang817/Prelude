@@ -3,3 +3,6 @@ target/
 
 # Local editor / agent settings, machine-specific
 .claude/
+
+# Draft posts, not part of the published project
+social-media/

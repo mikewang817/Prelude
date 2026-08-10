@@ -36,8 +36,35 @@ login
                       └─ prelude _surface
                            ├─ quick-terminal marker == 1 → prelude _panel loop
                            │    └─ child prelude → fzf
+                           │         └─ refresh thread → fzf --listen socket
                            └─ no marker → open -n exact Ghostty.app and exit
 ```
+
+## Keeping the list current
+
+The launcher starts before the reveal, not after it, so `gather` runs when the
+previous interaction ended. Without anything further, the list on screen is a
+snapshot from that moment — possibly hours old — and a clipping copied since
+does not appear until the panel is dismissed and re-opened once.
+
+A background thread in the launcher process re-gathers and hands the result to
+fzf over a Unix-domain `--listen` socket at
+`$XDG_DATA_HOME/prelude/panel.sock`.
+
+- A tick every 3 seconds compares the modification times of the files behind
+  the list; a gather runs only when one has moved, or every 30 seconds
+  regardless, since a detached slow-source refresh lands without notice.
+- The reload is delivered as a `transform`, so fzf evaluates it with the live
+  query and cursor index. A panel with a typed query or a moved cursor is left
+  untouched; only a panel in the state it was drawn in is redrawn.
+- Column widths and the title column come from the initial layout, so computed
+  rows and static rows stay in the same columns.
+- The socket is absent while `Ctrl+K` runs, which skips a tick rather than
+  ending the loop.
+
+Only the global panel does this. The zsh widget's snapshot is never older than
+the keypress that made it. Every failure path degrades to the previous
+behavior: one snapshot per interaction.
 
 The generated Ghostty configuration sets:
 
@@ -262,3 +289,8 @@ prelude global stop
 - Conflict-owner discovery is best effort for third-party event-tap apps.
 - The configured panel directory is global. Prelude does not infer a working
   directory from the foreground application.
+- Live refresh cannot redraw a panel that is being used, because a reload
+  resets the cursor. A panel left mid-query keeps the list it had until it is
+  dismissed.
+- Ghostty reports no reveal event, so freshness is bounded by the tick
+  interval rather than triggered by the press.

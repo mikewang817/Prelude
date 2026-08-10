@@ -87,7 +87,7 @@ fn base_args(prompt: &str, label: &str, footer: Option<&str>) -> Vec<String> {
     a
 }
 
-fn env_flag(name: &str) -> bool {
+pub fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 
@@ -202,14 +202,30 @@ pub fn search() -> i32 {
     // kind of thing it is. Where the answer *lands* — a prompt or the
     // clipboard — the helper inherits from our environment, so nothing about
     // the surface has to travel on its argv.
-    args.push("--bind".into());
-    args.push(if preview {
+    // `focus` fires on cursor movement and on a search-result update — but
+    // *not* when `reload` replaces the whole list and the cursor stays where
+    // it already was, on the first row. Every scope entry is such a reload, so
+    // the first row of `c:`, `s:`, `f:` and the rest arrived describing the
+    // row that was focused before them: the footer under a clipboard entry
+    // read "Open this search", which is what `c:`'s own scope command says,
+    // and the contextual clipboard preview never opened at all because the
+    // decision to open it is made in the same helper. One arrow press fixed
+    // it, which is why it survived — the state was only ever wrong at the
+    // moment nobody had touched anything yet.
+    //
+    // `load` is the missing half: it fires when a list has finished arriving,
+    // including after every reload. Both events run the same helper.
+    let on_focus = if preview {
         // One helper updates both the item-specific footer and the contextual
         // c: image preview, so moving the cursor does not pay for two forks.
-        format!("focus:transform:{} _focus {{q}} {{2}}", shq(&me))
+        format!("transform:{} _focus {{q}} {{2}}", shq(&me))
     } else {
-        format!("focus:transform-footer:{} _footer {{2}}", shq(&me))
-    });
+        format!("transform-footer:{} _footer {{2}}", shq(&me))
+    };
+    args.push("--bind".into());
+    args.push(format!("focus:{on_focus}"));
+    args.push("--bind".into());
+    args.push(format!("load:{on_focus}"));
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
@@ -221,6 +237,12 @@ pub fn search() -> i32 {
         args.push("down,99%,wrap,border-top,hidden".into());
         args.push("--bind".into());
         args.push("ctrl-p:toggle-preview".into());
+    }
+
+    // The panel outlives its list, so the list has to be kept alive too.
+    if let Some(socket) = crate::refresh::listen_socket() {
+        args.push(format!("--listen={}", socket.display()));
+        crate::refresh::keep_current(socket, widths, tw, cols);
     }
 
     loop {

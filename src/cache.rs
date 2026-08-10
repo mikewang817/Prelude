@@ -68,7 +68,7 @@ pub fn read_cached(name: &str) -> Vec<Item> {
             it.data.insert("sensitive".into(), "true".into());
             scrubbed = true;
         }
-        it.score = it.kind.priority() as f64 + it.get("rank").parse::<f64>().unwrap_or(0.0);
+        it.score = it.band() as f64 + it.get("rank").parse::<f64>().unwrap_or(0.0);
     }
     if scrubbed {
         if let Ok(json) = serde_json::to_vec(&items) {
@@ -321,9 +321,10 @@ pub fn gather_agents() -> Vec<Item> {
 /// cancels. What is left there is the source's own ordering (a run's state,
 /// a session's recency) plus frecency.
 pub fn by_rank(a: &Item, b: &Item) -> std::cmp::Ordering {
-    b.kind
-        .priority()
-        .cmp(&a.kind.priority())
+    // `band`, not `kind.priority`: a saved Quicklink is banded by the person
+    // having named it, not by whatever it points at. See `Kind::QUICKLINK`.
+    b.band()
+        .cmp(&a.band())
         .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
 }
 

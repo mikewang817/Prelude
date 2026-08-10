@@ -371,10 +371,27 @@ fn looks_like_filename(t: &str) -> bool {
     )
 }
 
-pub const QUICKLINKS_DEFAULT: &str = r#"# Prelude quicklinks
-# Type the keyword followed by your search terms, e.g.  g rust async.
-# {q} is replaced with what you typed (URL-encoded).
-# Fixed file, folder, URL and application entries can be created from ^K.
+pub const QUICKLINKS_DEFAULT: &str = r#"# Prelude quicklinks — keywords you type to reach one thing.
+#
+# Two shapes. A template takes a search term:
+#
+#     [jira]
+#     name = "Jira"
+#     url  = "https://jira.example.com/issues?jql={q}"     # j api timeout
+#
+# and a fixed entry points at one file, folder, application or URL:
+#
+#     [notes]
+#     name   = "Notes"
+#     kind   = "folder"                # file · folder · app · url · template
+#     target = "~/Documents/notes"     # type  notes
+#
+# {q} is replaced with what you typed, URL-encoded. Keywords are matched
+# case-insensitively and may be written in any language.
+#
+#   ql:                        browse and manage every keyword
+#   ^K on any row              create one from the thing you are looking at
+#   prelude quicklink --help   the same, from a script
 # prelude:defaults web-search-v2
 
 [g]
@@ -408,13 +425,106 @@ url  = "https://www.bing.com/search?q={q}"
 [ddg]
 name = "DuckDuckGo"
 url  = "https://duckduckgo.com/?q={q}"
+
+# prelude:defaults dev-agent-v3
+
+[so]
+name = "Stack Overflow"
+url  = "https://stackoverflow.com/search?q={q}"
+
+[crates]
+name = "crates.io"
+url  = "https://crates.io/search?q={q}"
+
+[docsrs]
+name = "docs.rs"
+url  = "https://docs.rs/releases/search?query={q}"
+
+[pypi]
+name = "PyPI"
+url  = "https://pypi.org/search/?q={q}"
+
+[pkg]
+name = "pkg.go.dev"
+url  = "https://pkg.go.dev/search?q={q}"
+
+[caniuse]
+name = "Can I use"
+url  = "https://caniuse.com/?search={q}"
+
+[explain]
+name = "explainshell"
+url  = "https://explainshell.com/explain?cmd={q}"
+
+[hn]
+name = "Hacker News"
+url  = "https://hn.algolia.com/?q={q}"
+
+[hf]
+name = "Hugging Face"
+url  = "https://huggingface.co/models?search={q}"
+
+[arxiv]
+name = "arXiv"
+url  = "https://arxiv.org/search/?query={q}&searchtype=all"
+
+[ccdocs]
+name = "Claude Code docs"
+url  = "https://docs.claude.com/en/docs/claude-code/overview"
+
+[mcpdocs]
+name = "Model Context Protocol"
+url  = "https://modelcontextprotocol.io"
 "#;
 
-const WEB_SEARCH_V2_MARKER: &str = "# prelude:defaults web-search-v2";
-const WEB_SEARCH_V2: [(&str, &str, &str); 3] = [
-    ("b", "Baidu", "https://www.baidu.com/s?wd={q}"),
-    ("bing", "Bing", "https://www.bing.com/search?q={q}"),
-    ("ddg", "DuckDuckGo", "https://duckduckgo.com/?q={q}"),
+/// Versioned blocks of built-in Quicklinks.
+///
+/// Each block is added once, to a file that has not seen its marker. An entry
+/// whose keyword the person already uses is skipped rather than overwritten,
+/// and a deleted default is not restored — the marker records that the block
+/// was offered, not that its contents are still present. Adding a block later
+/// means appending to this table; nothing else changes.
+///
+/// Built-in keywords are chosen against the scope prefixes and against the
+/// built-in Agent names, because both would be shadowed or shadowing: a
+/// keyword the search box has already spent is refused outright, and an exact
+/// keyword equal to `claude` would push the Agent row it names down one line
+/// for everybody, by default, forever. A test walks this table for both.
+/// `(keyword, name, url)`. A url with `{q}` is a template, one without is a
+/// fixed link.
+pub(crate) type BuiltIn = (&'static str, &'static str, &'static str);
+
+pub(crate) const DEFAULT_BLOCKS: &[(&str, &[BuiltIn])] = &[
+    (
+        "# prelude:defaults web-search-v2",
+        &[
+            ("b", "Baidu", "https://www.baidu.com/s?wd={q}"),
+            ("bing", "Bing", "https://www.bing.com/search?q={q}"),
+            ("ddg", "DuckDuckGo", "https://duckduckgo.com/?q={q}"),
+        ],
+    ),
+    // What this launcher's two audiences look up all day: the package
+    // registry and the error message for one, the model hub and the agent's
+    // own documentation for the other. `ccdocs` and `mcpdocs` carry no `{q}`,
+    // which also makes the shipped file show both shapes — every default used
+    // to be a template, so nothing taught that a fixed entry existed.
+    (
+        "# prelude:defaults dev-agent-v3",
+        &[
+            ("so", "Stack Overflow", "https://stackoverflow.com/search?q={q}"),
+            ("crates", "crates.io", "https://crates.io/search?q={q}"),
+            ("docsrs", "docs.rs", "https://docs.rs/releases/search?query={q}"),
+            ("pypi", "PyPI", "https://pypi.org/search/?q={q}"),
+            ("pkg", "pkg.go.dev", "https://pkg.go.dev/search?q={q}"),
+            ("caniuse", "Can I use", "https://caniuse.com/?search={q}"),
+            ("explain", "explainshell", "https://explainshell.com/explain?cmd={q}"),
+            ("hn", "Hacker News", "https://hn.algolia.com/?q={q}"),
+            ("hf", "Hugging Face", "https://huggingface.co/models?search={q}"),
+            ("arxiv", "arXiv", "https://arxiv.org/search/?query={q}&searchtype=all"),
+            ("ccdocs", "Claude Code docs", "https://docs.claude.com/en/docs/claude-code/overview"),
+            ("mcpdocs", "Model Context Protocol", "https://modelcontextprotocol.io"),
+        ],
+    ),
 ];
 
 pub fn quicklinks_file() -> std::path::PathBuf {
@@ -422,50 +532,146 @@ pub fn quicklinks_file() -> std::path::PathBuf {
 }
 
 pub(crate) fn add_web_search_defaults(mut text: String) -> (String, bool) {
-    if text.lines().any(|line| line == WEB_SEARCH_V2_MARKER) {
-        return (text, false);
-    }
-    let existing = crate::minitoml::parse(&text);
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push('\n');
-    text.push_str(WEB_SEARCH_V2_MARKER);
-    text.push('\n');
-    for (key, name, url) in WEB_SEARCH_V2 {
-        if existing.contains_key(key) {
+    let mut changed = false;
+    for (marker, entries) in DEFAULT_BLOCKS {
+        if text.lines().any(|line| line == *marker) {
             continue;
         }
-        text.push_str(&format!(
-            "\n[{key}]\nname = {}\nurl = {}\n",
-            toml_string(name),
-            toml_string(url),
-        ));
+        let existing = crate::minitoml::parse(&text);
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+        text.push_str(marker);
+        text.push('\n');
+        for (key, name, url) in *entries {
+            if quicklink_entry(&existing, key).is_some() || quicklink_conflict(key).is_some() {
+                continue;
+            }
+            text.push_str(&format!(
+                "\n[{key}]\nname = {}\nurl = {}\n",
+                toml_string(name),
+                toml_string(url),
+            ));
+        }
+        changed = true;
     }
-    (text, true)
+    (text, changed)
 }
 
+/// Create the file if it is missing and add any versioned default block it
+/// has not seen yet.
+///
+/// This is the *write* half of reading quicklinks, and it is deliberately not
+/// on the per-keystroke path. It used to be: `quicklinks_text` created the
+/// file and could rewrite it, and `is_special` plus `dynamic_rows_with`
+/// between them called that up to four times per keystroke — a read path with
+/// a write in it, on the one path in this program that must not do file work
+/// it can avoid. Callers that are already doing a launch's worth of work
+/// (`quicklink_items` from `gather`, the settings editor, the CLI, `doctor`)
+/// call this; the keystroke path reads and never writes.
 pub fn ensure_quicklinks_file() -> Result<std::path::PathBuf, String> {
     let path = quicklinks_file();
-    if !path.exists() {
+    let Some(current) = read_quicklinks_file() else {
+        // Absent is a fresh install; unreadable is a file with contents in it
+        // that we could not see. Only the first may be written to.
+        if path.exists() {
+            return Err(format!("{} is there but cannot be read", path.display()));
+        }
         crate::cache::write_atomic(&path, QUICKLINKS_DEFAULT.as_bytes())
             .map_err(|e| e.to_string())?;
+        invalidate_quicklinks();
+        return Ok(path);
+    };
+    let (text, changed) = add_web_search_defaults(current);
+    if changed {
+        crate::cache::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+        invalidate_quicklinks();
     }
     Ok(path)
 }
 
+/// The file as it is on disk — `None` when it could not be read at all, which
+/// is never the same answer as "empty" and never the same as "the defaults".
+///
+/// Every write derives from this. It used to substitute `QUICKLINKS_DEFAULT`
+/// on any error, which reads harmlessly and is not: `ensure_quicklinks_file`
+/// would then write those defaults *over* a file it had just failed to read,
+/// and `remove_quicklink` would edit a copy of the built-ins and save it as
+/// the person's config. A read that fails must stop the write, not invent its
+/// input.
+fn read_quicklinks_file() -> Option<String> {
+    std::fs::read_to_string(quicklinks_file()).ok()
+}
+
+/// The same read, for display: a file that is genuinely absent answers with
+/// the built-in defaults, so a fresh install can type `g rust` before anything
+/// has been written anywhere. Never used as the basis of a write.
+fn read_quicklinks_text() -> String {
+    read_quicklinks_file().unwrap_or_else(|| QUICKLINKS_DEFAULT.to_string())
+}
+
+/// What a mutation is allowed to start from. A file that is there and
+/// unreadable stops the edit; an absent one is a fresh install and starts from
+/// the built-ins, which is the only case where substituting them is honest.
+fn read_for_write() -> Result<String, String> {
+    match read_quicklinks_file() {
+        Some(text) => Ok(text),
+        None if !quicklinks_file().exists() => Ok(QUICKLINKS_DEFAULT.to_string()),
+        None => Err(format!("{} cannot be read; nothing was changed", quicklinks_file().display())),
+    }
+}
+
+fn quicklinks_cache() -> &'static std::sync::RwLock<Option<String>> {
+    static TEXT: std::sync::OnceLock<std::sync::RwLock<Option<String>>> =
+        std::sync::OnceLock::new();
+    TEXT.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+fn invalidate_quicklinks() {
+    if let Ok(mut slot) = quicklinks_cache().write() {
+        *slot = None;
+    }
+}
+
+/// The quicklinks file, read once per process.
+///
+/// One keystroke asks four separate questions of this file — is the query an
+/// exact key, is its first word a template, and both again while the rows are
+/// built — and each used to be a fresh open, read and parse.
 fn quicklinks_text() -> String {
-    let p = ensure_quicklinks_file().unwrap_or_else(|_| quicklinks_file());
-    let text = std::fs::read_to_string(&p).unwrap_or_default();
-    let (text, changed) = add_web_search_defaults(text);
-    if changed {
-        let _ = crate::cache::write_atomic(&p, text.as_bytes());
+    if let Ok(slot) = quicklinks_cache().read() {
+        if let Some(text) = slot.as_ref() {
+            return text.clone();
+        }
+    }
+    let text = read_quicklinks_text();
+    if let Ok(mut slot) = quicklinks_cache().write() {
+        *slot = Some(text.clone());
     }
     text
 }
 
 pub fn quicklinks() -> crate::minitoml::Table {
     crate::minitoml::parse(&quicklinks_text())
+}
+
+/// Look an entry up the way a person types it.
+///
+/// `minitoml` keeps a section name exactly as written, and every lookup here
+/// lowercases what it was given — so a hand-written `[Design]` or `[GH]` was
+/// matched by nothing, produced no row, and reported no error. It was not
+/// broken so much as invisible, which is the worse of the two.
+pub(crate) fn quicklink_entry<'a>(
+    links: &'a crate::minitoml::Table,
+    key: &str,
+) -> Option<(String, &'a std::collections::BTreeMap<String, String>)> {
+    let want = fold_key(key);
+    links.iter().find(|(k, _)| fold_key(k) == want).map(|(k, v)| (k.clone(), v))
+}
+
+fn fold_key(key: &str) -> String {
+    key.trim().trim_matches('"').to_lowercase()
 }
 
 #[derive(Clone, Debug)]
@@ -475,8 +681,67 @@ pub struct QuicklinkDraft {
     pub target: String,
 }
 
+impl QuicklinkDraft {
+    pub fn is_template(&self) -> bool {
+        self.target.contains("{q}")
+    }
+}
+
 pub fn quicklinkable(kind: Kind) -> bool {
     matches!(kind, Kind::File | Kind::Find | Kind::Config | Kind::Dir | Kind::Link | Kind::App)
+}
+
+/// Turn a URL that already has a search term in it into a template to edit.
+///
+/// The most useful half of this feature — the `{q}` templates — had no way in
+/// at all: `quicklink_draft` accepts only fixed objects, so anyone wanting
+/// their own issue tracker or wiki search had to hand-write TOML, which is
+/// exactly the population least likely to. The way in is the URL you are
+/// looking at, and the guess that makes it one keystroke is that the term sits
+/// in the last non-empty query parameter — `?q=`, `?wd=`, `?search=`,
+/// `?query=` all land on it. The person sees the result before it is saved and
+/// can move the `{q}` anywhere.
+pub fn template_suggestion(url: &str) -> String {
+    let Some((head, tail)) = url.split_once('?') else {
+        return format!("{url}{}", if url.ends_with('/') { "{q}" } else { "/{q}" });
+    };
+    let (query, fragment) = match tail.split_once('#') {
+        Some((q, f)) => (q, format!("#{f}")),
+        None => (tail, String::new()),
+    };
+    let mut parts: Vec<String> = query.split('&').map(str::to_string).collect();
+    let last = parts.iter().rposition(|p| {
+        p.split_once('=').is_some_and(|(k, v)| !k.is_empty() && !v.is_empty())
+    });
+    match last {
+        Some(i) => {
+            let key = parts[i].split_once('=').map(|(k, _)| k).unwrap_or_default().to_string();
+            parts[i] = format!("{key}={{q}}");
+            format!("{head}?{}{fragment}", parts.join("&"))
+        }
+        None => format!("{url}{}{{q}}", if query.is_empty() { "" } else { "&" }),
+    }
+}
+
+/// Validate a hand-composed `{q}` template and turn it into a draft.
+pub fn template_draft(name: &str, template: &str) -> Result<QuicklinkDraft, String> {
+    let template = template.trim();
+    if !template.contains("{q}") {
+        return Err("a search quicklink needs {q} where the search term goes".into());
+    }
+    if crate::secrets::looks_secret(template) || url_has_secret(template) {
+        return Err("that URL appears to contain a credential and will not be indexed".into());
+    }
+    // `web_url` judges a real address, so check the shape the template will
+    // actually take rather than the one with braces in it.
+    if web_url(&template.replace("{q}", "prelude")).is_none() {
+        return Err("that is not a safe HTTP or HTTPS URL".into());
+    }
+    let name = crate::width::flatten(name.trim());
+    if name.is_empty() {
+        return Err("give it a name to show in the list".into());
+    }
+    Ok(QuicklinkDraft { name, kind: "template", target: template.to_string() })
 }
 
 /// The stable identity behind a selected object. Local targets are resolved
@@ -529,6 +794,13 @@ fn url_has_secret(url: &str) -> bool {
         ))
 }
 
+/// A keyword to offer when creating a quicklink for this row.
+///
+/// Non-ASCII characters used to be dropped one at a time, so every CJK-named
+/// file suggested the empty string and the prompt opened blank — for a whole
+/// class of user the feature arrived with nothing filled in and a keyword they
+/// were then not allowed to type either. Letters of any script are kept now;
+/// only the punctuation between them becomes a hyphen.
 pub fn quicklink_suggestion(it: &Item) -> String {
     let base = quicklink_draft(it).ok().flatten().map(|d| d.name).unwrap_or_else(|| it.title.clone());
     let base = std::path::Path::new(&base)
@@ -538,33 +810,57 @@ pub fn quicklink_suggestion(it: &Item) -> String {
     let mut out = String::new();
     let mut dash = false;
     for c in base.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
             dash = false;
         } else if !out.is_empty() && !dash {
             out.push('-');
             dash = true;
         }
-        if out.len() >= 32 {
+        if out.chars().count() >= KEY_MAX {
             break;
         }
     }
     out.trim_matches('-').to_string()
 }
 
+const KEY_MAX: usize = 40;
+
+/// What may be a keyword.
+///
+/// Letters and digits of any script, plus `-` and `_`. It was ASCII-only,
+/// which meant a Chinese user could not name a quicklink in the language the
+/// thing they were naming was written in. Everything else is excluded because
+/// it already means something in the search box: `:` opens a scope, `/` a
+/// skill, `@` an agent, `.` reads as a hostname, and quotes and brackets are
+/// the config file's own syntax.
 fn valid_quicklink_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 40
-        && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    let n = key.chars().count();
+    n > 0 && n <= KEY_MAX && key.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 pub fn normalize_quicklink_key(raw: &str) -> Result<String, String> {
-    let key = raw.trim().to_ascii_lowercase();
+    let key = raw.trim().to_lowercase();
     if valid_quicklink_key(&key) {
         Ok(key)
     } else {
-        Err("use 1–40 letters, numbers, hyphens or underscores".into())
+        Err(format!("use 1–{KEY_MAX} letters, numbers, hyphens or underscores"))
     }
+}
+
+/// Words the search box has already spent, and which a quicklink therefore
+/// cannot have.
+///
+/// `dynamic_rows_with` resolves a scope command before it resolves a
+/// quicklink, so a quicklink called `f` or `s` was accepted, written to the
+/// file, listed by `doctor` — and unreachable forever, with nothing anywhere
+/// saying why. Refusing at the point of naming is the only moment this can be
+/// explained.
+pub fn quicklink_conflict(key: &str) -> Option<String> {
+    if SCOPES.iter().any(|d| d.prefix.trim_end_matches(':') == key) {
+        return Some(format!("“{key}” is the {key}: scope command — the scope would always win"));
+    }
+    None
 }
 
 fn toml_string(s: &str) -> String {
@@ -592,60 +888,434 @@ pub(crate) fn append_quicklink(
     key: &str,
     draft: &QuicklinkDraft,
 ) -> Result<String, String> {
-    if !valid_quicklink_key(key) {
-        return Err("use 1–40 letters, numbers, hyphens or underscores".into());
+    let key = normalize_quicklink_key(key)?;
+    if let Some(why) = quicklink_conflict(&key) {
+        return Err(why);
     }
-    if crate::minitoml::parse(&text).contains_key(key) {
-        return Err(format!("a quicklink called {key} already exists"));
+    if let Some((existing, _)) = quicklink_entry(&crate::minitoml::parse(&text), &key) {
+        return Err(format!("a quicklink called {existing} already exists"));
     }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
     text.push_str(&format!(
         "\n{}\n[{key}]\nname = {}\nkind = {}\ntarget = {}\n{}\n",
-        quicklink_marker(key, false),
+        quicklink_marker(&key, false),
         toml_string(&draft.name),
         toml_string(draft.kind),
         toml_string(&draft.target),
-        quicklink_marker(key, true),
+        quicklink_marker(&key, true),
     ));
     Ok(text)
 }
 
-pub fn create_quicklink(key: &str, it: &Item) -> Result<QuicklinkDraft, String> {
+/// The one door every creation path goes through — the launcher, the CLI and
+/// the template flow — so the reserved-word check and the duplicate check
+/// cannot be true in one of them and not another.
+pub fn create_quicklink_from(key: &str, draft: &QuicklinkDraft) -> Result<String, String> {
     let key = normalize_quicklink_key(key)?;
-    let draft = quicklink_draft(it)?.ok_or_else(|| "that kind cannot be a quicklink".to_string())?;
-    let text = append_quicklink(quicklinks_text(), &key, &draft)?;
+    ensure_quicklinks_file()?;
+    let text = append_quicklink(read_for_write()?, &key, draft)?;
+    write_quicklinks(&text)?;
+    Ok(key)
+}
+
+fn write_quicklinks(text: &str) -> Result<(), String> {
     crate::cache::write_atomic(&quicklinks_file(), text.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(draft)
+    invalidate_quicklinks();
+    Ok(())
+}
+
+/// The byte range one entry occupies, whether Prelude wrote it or a person did.
+///
+/// Removal used to work only on marked blocks, and a hand-written entry
+/// answered "that quicklink is managed in the config file" — a sentence whose
+/// plain reading is the opposite of what it meant, offered in place of the
+/// thing the person asked for. Prelude's own entries still use the markers,
+/// so removing one leaves every hand-written line byte-for-byte; an unmarked
+/// entry is bounded by its `[section]` header and the next one.
+fn quicklink_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let begin = format!("{}\n", quicklink_marker(key, false));
+    let end = format!("\n{}", quicklink_marker(key, true));
+    if let Some(start) = text.find(&begin) {
+        if let Some(tail) = text[start + begin.len()..].find(&end) {
+            let mut finish = start + begin.len() + tail + end.len();
+            if text[finish..].starts_with('\n') {
+                finish += 1;
+            }
+            return Some((if start > 0 && text[..start].ends_with('\n') { start - 1 } else { start }, finish));
+        }
+    }
+    // Unmarked: from its header line to the line before the next section, with
+    // the blank lines that separated them left behind rather than collapsed.
+    let mut start = None;
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let is_header = trimmed.starts_with('[') && trimmed.ends_with(']');
+        if is_header {
+            let name = trimmed[1..trimmed.len() - 1].trim();
+            match start {
+                None if fold_key(name) == fold_key(key) => start = Some(at),
+                None => {}
+                Some(s) => return Some((s, at)),
+            }
+        }
+        // A marker line belongs to the block it opens, so stop before it.
+        if let Some(s) = start {
+            if !is_header && trimmed.starts_with("# prelude:quicklink") {
+                return Some((s, at));
+            }
+        }
+        at += line.len();
+    }
+    start.map(|s| (s, text.len()))
 }
 
 pub(crate) fn remove_quicklink_block(mut text: String, key: &str) -> Result<String, String> {
     if !valid_quicklink_key(key) {
         return Err("invalid quicklink name".into());
     }
-    let begin = format!("{}\n", quicklink_marker(key, false));
-    let end = format!("\n{}", quicklink_marker(key, true));
-    let start = text.find(&begin).ok_or_else(|| "that quicklink is managed in the config file".to_string())?;
-    let tail = text[start + begin.len()..]
-        .find(&end)
-        .ok_or_else(|| "quicklink block is incomplete".to_string())?;
-    let mut finish = start + begin.len() + tail + end.len();
-    if text[finish..].starts_with('\n') {
-        finish += 1;
-    }
-    if start > 0 && text[..start].ends_with('\n') {
-        text.replace_range(start - 1..finish, "");
-    } else {
-        text.replace_range(start..finish, "");
-    }
+    let (start, finish) =
+        quicklink_span(&text, key).ok_or_else(|| format!("no quicklink called {key}"))?;
+    text.replace_range(start..finish, "");
     Ok(text)
 }
 
 pub fn remove_quicklink(key: &str) -> Result<(), String> {
     let key = normalize_quicklink_key(key)?;
-    let text = remove_quicklink_block(quicklinks_text(), &key)?;
-    crate::cache::write_atomic(&quicklinks_file(), text.as_bytes()).map_err(|e| e.to_string())
+    let text = remove_quicklink_block(read_for_write()?, &key)?;
+    write_quicklinks(&text)
+}
+
+/// Replace one `field = value` line inside an entry, or add it if the entry
+/// never had one.
+///
+/// Renaming, re-pointing and re-labelling were the three things the launcher
+/// could not do: creation was a product and every subsequent edit was "open
+/// the TOML in `$EDITOR` and find it yourself", in a file that by then has
+/// dozens of entries and no ordering.
+pub(crate) fn set_quicklink_field(
+    text: &str,
+    key: &str,
+    field: &str,
+    value: &str,
+) -> Result<String, String> {
+    let (start, finish) =
+        quicklink_span(text, key).ok_or_else(|| format!("no quicklink called {key}"))?;
+    let block = &text[start..finish];
+    let mut out = String::with_capacity(block.len() + value.len());
+    let mut replaced = false;
+    let mut header_end = None;
+    for line in block.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            out.push_str(line);
+            header_end = Some(out.len());
+            continue;
+        }
+        if !replaced && trimmed.split_once('=').is_some_and(|(k, _)| k.trim().trim_matches('"') == field) {
+            out.push_str(&format!("{field} = {}\n", toml_string(value)));
+            replaced = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    if !replaced {
+        let at = header_end.ok_or_else(|| format!("no quicklink called {key}"))?;
+        out.insert_str(at, &format!("{field} = {}\n", toml_string(value)));
+    }
+    let mut whole = text.to_string();
+    whole.replace_range(start..finish, &out);
+    Ok(whole)
+}
+
+/// Rename the keyword, leaving the target and everything else alone.
+pub(crate) fn rename_quicklink_key(text: &str, old: &str, new: &str) -> Result<String, String> {
+    let new = normalize_quicklink_key(new)?;
+    if let Some(why) = quicklink_conflict(&new) {
+        return Err(why);
+    }
+    let links = crate::minitoml::parse(text);
+    if fold_key(old) != fold_key(&new) {
+        if let Some((existing, _)) = quicklink_entry(&links, &new) {
+            return Err(format!("a quicklink called {existing} already exists"));
+        }
+    }
+    let (start, finish) =
+        quicklink_span(text, old).ok_or_else(|| format!("no quicklink called {old}"))?;
+    let block = text[start..finish]
+        .replace(&quicklink_marker(old, false), &quicklink_marker(&new, false))
+        .replace(&quicklink_marker(old, true), &quicklink_marker(&new, true));
+    let mut out = String::with_capacity(block.len());
+    let mut done = false;
+    for line in block.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !done && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            out.push_str(&format!("{indent}[{new}]\n"));
+            done = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    if !done {
+        return Err(format!("no quicklink called {old}"));
+    }
+    let mut whole = text.to_string();
+    whole.replace_range(start..finish, &out);
+    Ok(whole)
+}
+
+pub fn rename_quicklink(old: &str, new: &str) -> Result<String, String> {
+    let old = normalize_quicklink_key(old)?;
+    let new = normalize_quicklink_key(new)?;
+    let text = rename_quicklink_key(&read_for_write()?, &old, &new)?;
+    write_quicklinks(&text)?;
+    Ok(new)
+}
+
+/// Point an existing quicklink somewhere else. A `{q}` value re-points a
+/// template; anything else is resolved and stored the way creation would.
+pub fn retarget_quicklink(key: &str, target: &str) -> Result<String, String> {
+    let key = normalize_quicklink_key(key)?;
+    let (kind, stored) = resolve_quicklink_target(target)?;
+    let text = read_for_write()?;
+    let text = set_quicklink_field(&text, &key, "target", &stored)?;
+    // The old entry may still carry a `url = ` line from a hand-written file;
+    // leaving both would let the two disagree about where the keyword goes.
+    let text = match quicklink_entry(&crate::minitoml::parse(&text), &key) {
+        Some((_, body)) if body.contains_key("url") => {
+            set_quicklink_field(&text, &key, "url", &stored)?
+        }
+        _ => text,
+    };
+    let text = set_quicklink_field(&text, &key, "kind", kind)?;
+    write_quicklinks(&text)?;
+    Ok(stored)
+}
+
+pub fn rename_quicklink_label(key: &str, name: &str) -> Result<(), String> {
+    let key = normalize_quicklink_key(key)?;
+    let name = crate::width::flatten(name.trim());
+    if name.is_empty() {
+        return Err("give it a name to show in the list".into());
+    }
+    let text = set_quicklink_field(&read_for_write()?, &key, "name", &name)?;
+    write_quicklinks(&text)
+}
+
+/// What a typed target is, and the form it should be stored in.
+pub fn resolve_quicklink_target(raw: &str) -> Result<(&'static str, String), String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("give it something to point at".into());
+    }
+    if raw.contains("{q}") {
+        return template_draft("x", raw).map(|d| (d.kind, d.target));
+    }
+    if crate::secrets::looks_secret(raw) || url_has_secret(raw) {
+        return Err("that target appears to contain a credential and will not be indexed".into());
+    }
+    if let Some(url) = web_url(raw) {
+        return Ok(("url", url));
+    }
+    let real = crate::settings::readings_of(raw)
+        .into_iter()
+        .find_map(|candidate| candidate.canonicalize().ok())
+        .ok_or_else(|| "that target is not there".to_string())?;
+    let kind = if real.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) {
+        "app"
+    } else if real.is_dir() {
+        "folder"
+    } else {
+        "file"
+    };
+    Ok((kind, crate::paths::tilde(&real.to_string_lossy())))
+}
+
+/// `prelude quicklink …` — the same guards, without a terminal.
+///
+/// Creation was reachable only through an fzf prompt, which meant quicklinks
+/// could not be scripted, synced, backed up or exercised by a test, and every
+/// guard in this file had to be verified by pressing keys. `settings
+/// add-root` exists for exactly this reason; this is the door that was
+/// missing beside it.
+pub fn quicklink_cli(args: &[&str]) -> i32 {
+    fn fail(e: impl std::fmt::Display) -> i32 {
+        eprintln!("prelude: {e}");
+        2
+    }
+    match args {
+        [] | ["list"] | ["ls"] => {
+            // A file that is there and unreadable must say so rather than
+            // let the built-in fallback pass for the person's own list.
+            if let Err(e) = ensure_quicklinks_file() {
+                return fail(e);
+            }
+            let rows = quicklink_scope_rows();
+            if rows.is_empty() {
+                println!("no quicklinks yet — ^K on any file, folder, app or URL creates one");
+                return 0;
+            }
+            let w = rows.iter().map(|it| crate::width::dwidth(it.get("quicklink"))).max().unwrap_or(4);
+            for it in rows {
+                let target = if it.get("quicklink_target").is_empty() {
+                    it.fields.get(1).cloned().unwrap_or_default()
+                } else {
+                    it.get("quicklink_target").to_string()
+                };
+                // `dwidth`, not character count: a CJK keyword is two columns
+                // wide and `{:<w$}` would put the next column somewhere else.
+                println!(
+                    "  {}  {}  {}",
+                    crate::width::pad_to(it.get("quicklink"), w, false),
+                    crate::width::pad_to(it.get("quicklink_kind"), 8, false),
+                    target,
+                );
+            }
+            0
+        }
+        ["list", "--json"] | ["--json"] => {
+            // A file that is there and unreadable must say so rather than
+            // let the built-in fallback pass for the person's own list.
+            if let Err(e) = ensure_quicklinks_file() {
+                return fail(e);
+            }
+            match serde_json::to_string_pretty(&quicklink_scope_rows()) {
+                Ok(json) => {
+                    println!("{json}");
+                    0
+                }
+                Err(e) => fail(e),
+            }
+        }
+        ["add", key, target, name @ ..] => {
+            let (kind, stored) = match resolve_quicklink_target(target) {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            let label = if name.is_empty() {
+                std::path::Path::new(&stored)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| (*key).to_string())
+            } else {
+                name.join(" ")
+            };
+            let draft = QuicklinkDraft { name: label, kind, target: stored };
+            match create_quicklink_from(key, &draft) {
+                Ok(key) => {
+                    let how = if draft.is_template() {
+                        format!("type “{key} something”")
+                    } else {
+                        format!("type “{key}”")
+                    };
+                    println!("added {key} -> {} · {how}", draft.target);
+                    0
+                }
+                Err(e) => fail(e),
+            }
+        }
+        ["rm", key] | ["remove", key] => match remove_quicklink(key) {
+            Ok(()) => {
+                println!("removed {key}");
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["rename", old, new] => match rename_quicklink(old, new) {
+            Ok(new) => {
+                println!("{old} -> {new}");
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["set-name", key, name @ ..] if !name.is_empty() => {
+            match rename_quicklink_label(key, &name.join(" ")) {
+                Ok(()) => {
+                    println!("{key} now reads “{}”", name.join(" "));
+                    0
+                }
+                Err(e) => fail(e),
+            }
+        }
+        ["set-target", key, target] => match retarget_quicklink(key, target) {
+            Ok(stored) => {
+                println!("{key} -> {stored}");
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["check"] => {
+            if let Err(e) = ensure_quicklinks_file() {
+                return fail(e);
+            }
+            let problems = quicklink_problems();
+            if problems.is_empty() {
+                println!("all quicklinks resolve");
+                return 0;
+            }
+            for (key, why) in &problems {
+                println!("  {key}: {why}");
+            }
+            1
+        }
+        _ => {
+            eprintln!("prelude quicklink list [--json]");
+            eprintln!("prelude quicklink add KEY TARGET [NAME...]   TARGET is a path, a URL, or a URL with {{q}}");
+            eprintln!("prelude quicklink rm KEY");
+            eprintln!("prelude quicklink rename OLD NEW");
+            eprintln!("prelude quicklink set-name KEY NAME...");
+            eprintln!("prelude quicklink set-target KEY TARGET");
+            eprintln!("prelude quicklink check");
+            2
+        }
+    }
+}
+
+/// Every entry that will not do what its author meant, with the reason.
+///
+/// `doctor` used to print the bare list of keys, which says a quicklink exists
+/// and nothing about whether it works — a missing target, an unusable keyword
+/// and a keyword the search box has already spent all looked identical to a
+/// healthy one.
+pub fn quicklink_problems() -> Vec<(String, String)> {
+    quicklink_problems_in(&quicklinks_text())
+}
+
+pub(crate) fn quicklink_problems_in(text: &str) -> Vec<(String, String)> {
+    let links = crate::minitoml::parse(text);
+    let mut out = Vec::new();
+    for (stored, body) in &links {
+        let key = fold_key(stored);
+        if !valid_quicklink_key(&key) {
+            out.push((stored.clone(), "not typeable as a keyword".to_string()));
+            continue;
+        }
+        if let Some(why) = quicklink_conflict(&key) {
+            out.push((key, why));
+            continue;
+        }
+        let Some(target) = body.get("target").or_else(|| body.get("url")) else {
+            out.push((key, "no target or url".to_string()));
+            continue;
+        };
+        if target.contains("{q}") {
+            if web_url(&target.replace("{q}", "prelude")).is_none() {
+                out.push((key, format!("not a usable URL: {target}")));
+            }
+            continue;
+        }
+        match fixed_quicklink_from(text, &key) {
+            Some(item) if item.get("quicklink_missing") == "true" => {
+                out.push((key, format!("target is gone: {}", item.get("quicklink_target"))))
+            }
+            Some(_) => {}
+            None => out.push((key, format!("unrecognised kind or target: {target}"))),
+        }
+    }
+    out
 }
 
 fn expand_quicklink_target(target: &str) -> String {
@@ -661,13 +1331,18 @@ fn managed_quicklink(text: &str, key: &str) -> bool {
 }
 
 /// Resolve an exact fixed quicklink back into the kind of object it targets.
+///
+/// The row keeps the target's Kind, because that is what Enter and `^K` must
+/// act on — a quicklink to a file is opened by the application that owns it,
+/// exactly as the file itself would be. Only the band and the label come from
+/// its being a quicklink; see `Item::quicklink`.
 pub(crate) fn fixed_quicklink_from(text: &str, q: &str) -> Option<Item> {
-    let key = q.trim().to_ascii_lowercase();
+    let links = crate::minitoml::parse(text);
+    let (stored, body) = quicklink_entry(&links, q)?;
+    let key = fold_key(&stored);
     if !valid_quicklink_key(&key) {
         return None;
     }
-    let links = crate::minitoml::parse(text);
-    let body = links.get(&key)?;
     let raw = body.get("target").or_else(|| body.get("url"))?;
     if raw.contains("{q}") {
         return None;
@@ -693,8 +1368,10 @@ pub(crate) fn fixed_quicklink_from(text: &str, q: &str) -> Option<Item> {
     let missing = kind != "url" && !std::path::Path::new(&target).exists();
     Some(item
         .fields([key.clone(), if missing { "⚠ target missing".to_string() } else { crate::paths::tilde(&target) }])
-        .put("quicklink", key)
+        .quicklink(&key, "fixed")
         .put("quicklink_managed", managed)
+        .put("quicklink_kind", kind)
+        .put("quicklink_missing", if missing { "true" } else { "" })
         .put("quicklink_target", target))
 }
 
@@ -704,14 +1381,15 @@ pub(crate) fn fixed_quicklink_from(text: &str, q: &str) -> Option<Item> {
 pub(crate) fn quicklink_items_from(text: &str) -> Vec<Item> {
     let links = crate::minitoml::parse(text);
     let mut out = Vec::with_capacity(links.len());
-    for (key, body) in links {
+    for (stored, body) in &links {
+        let key = fold_key(stored);
         if !valid_quicklink_key(&key) {
             continue;
         }
         let Some(target) = body.get("target").or_else(|| body.get("url")) else { continue };
         if target.contains("{q}") {
             let name = body.get("name").cloned().unwrap_or_else(|| key.clone());
-            let title = if name.to_ascii_lowercase().starts_with("search ") {
+            let title = if name.to_lowercase().starts_with("search ") {
                 name
             } else {
                 format!("Search {name}")
@@ -719,10 +1397,14 @@ pub(crate) fn quicklink_items_from(text: &str) -> Vec<Item> {
             out.push(
                 Item::new(key.clone(), Kind::Search)
                     .title(title)
-                    .fields([format!("{key} <query>"), "web search".to_string()])
+                    .fields([format!("{key} <query>"), dtrunc_template(target)])
+                    .quicklink(&key, "template")
                     .put("mode", "complete-query")
                     .put("completion", format!("{key} "))
-                    .put("provider", key)
+                    .put("provider", key.clone())
+                    .put("quicklink_managed", managed_quicklink(text, &key).to_string())
+                    .put("quicklink_kind", "template")
+                    .put("quicklink_target", target.clone())
                     .put("desc", "type a search term"),
             );
         } else if let Some(item) = fixed_quicklink_from(text, &key) {
@@ -732,36 +1414,141 @@ pub(crate) fn quicklink_items_from(text: &str) -> Vec<Item> {
     out
 }
 
+/// The host of a template, which is what identifies it — the rest is
+/// boilerplate that would push the keyword out of the column.
+fn dtrunc_template(target: &str) -> String {
+    let rest = target
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(target);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host.is_empty() { "search".to_string() } else { host.to_string() }
+}
+
 pub fn quicklink_items() -> Vec<Item> {
+    // The one caller already doing a launch's worth of work, and therefore
+    // where the file gets created and migrated. See `ensure_quicklinks_file`.
+    let _ = ensure_quicklinks_file();
     quicklink_items_from(&quicklinks_text())
 }
 
 pub(crate) fn exact_quicklink_key_from(text: &str, q: &str) -> bool {
-    let key = q.trim().to_ascii_lowercase();
-    if !valid_quicklink_key(&key) {
+    if !valid_quicklink_key(&fold_key(q)) {
         return false;
     }
-    crate::minitoml::parse(text)
-        .get(&key)
-        .is_some_and(|body| body.contains_key("target") || body.contains_key("url"))
+    quicklink_entry(&crate::minitoml::parse(text), q)
+        .is_some_and(|(_, body)| body.contains_key("target") || body.contains_key("url"))
 }
 
 pub(crate) fn search_provider_from(text: &str, q: &str) -> Option<Item> {
-    let want = q.trim().to_ascii_lowercase();
-    quicklink_items_from(text).into_iter().find(|it| {
-        if it.kind != Kind::Search || it.get("provider").is_empty() {
-            return false;
+    let want = q.trim().to_lowercase();
+    let by = |name_match: bool| {
+        quicklink_items_from(text).into_iter().find(|it| {
+            if it.kind != Kind::Search || it.get("provider").is_empty() {
+                return false;
+            }
+            if name_match {
+                let name = it.title.strip_prefix("Search ").unwrap_or(&it.title);
+                name.to_lowercase() == want
+            } else {
+                it.get("provider") == want
+            }
+        })
+    };
+    by(false).or_else(|| by(true))
+}
+
+/// Every entry in the file, including the ones that do not work.
+///
+/// The ordinary catalogue silently drops an entry whose kind it does not
+/// recognise or whose key is not usable, which is correct for a search result
+/// and wrong for the one screen whose job is to let you repair it. A broken
+/// entry appears here, says what is wrong with it, and carries the same
+/// rename, re-point and remove actions as a working one.
+pub fn quicklink_scope_rows() -> Vec<Item> {
+    let text = quicklinks_text();
+    let links = crate::minitoml::parse(&text);
+    let working = quicklink_items_from(&text);
+    let mut out = Vec::with_capacity(links.len());
+    for (stored, body) in &links {
+        let key = fold_key(stored);
+        if let Some(item) = working.iter().find(|it| it.get("quicklink") == key) {
+            out.push(item.clone());
+            continue;
         }
-        let name = it.title.strip_prefix("Search ").unwrap_or(&it.title);
-        it.get("provider") == want || name.to_ascii_lowercase() == want
-    })
+        let why = if !valid_quicklink_key(&key) {
+            format!("⚠ “{stored}” cannot be typed as a keyword")
+        } else if body.get("target").or_else(|| body.get("url")).is_none() {
+            "⚠ no target or url".to_string()
+        } else if let Some(reason) = quicklink_conflict(&key) {
+            format!("⚠ {reason}")
+        } else {
+            format!("⚠ unknown kind “{}”", body.get("kind").map(String::as_str).unwrap_or(""))
+        };
+        let path = quicklinks_file().to_string_lossy().into_owned();
+        out.push(
+            Item::new(path.clone(), Kind::Config)
+                .title(body.get("name").cloned().unwrap_or_else(|| stored.clone()))
+                .fields([key.clone(), why.clone()])
+                .quicklink(&key, "fixed")
+                .put("path", path)
+                .put("quicklink_managed", managed_quicklink(&text, &key).to_string())
+                .put("quicklink_broken", why),
+        );
+    }
+    out
+}
+
+/// An exact keyword, in the order the person would expect.
+///
+/// A key the person typed beats a *name* another entry happens to carry.
+/// It used to be the other way round, and the effect was silent: a fixed
+/// `[google]` pointing at somebody's own profile was never reachable, because
+/// `[g]`'s display name is "Google" and the name match was tried first. The
+/// row existed, `doctor` listed it, and typing its keyword opened a different
+/// thing entirely.
+/// An exact alias leads the list; it does not clear the room.
+///
+/// It used to be the only row: `is_special` is true for an exact key, so the
+/// catalogue underneath was suppressed entirely. One keystroke turned two
+/// sensible candidates into one — typing `github` made the `Search GitHub`
+/// that was on screen at `githu` disappear, with nothing saying it had been
+/// decided against. The keyword still wins, because it is the one thing on
+/// screen the person definitely meant; everything else that matches simply
+/// follows it.
+///
+/// Leaving it to fzf instead is not an option, and this was measured rather
+/// than assumed: with the whole root list and `--tiebreak=index`, `github`
+/// does rank the quicklink first, but `google` loses to an MCP server, and
+/// `g` and `b` lose to skills. An alias that wins only when its name is long
+/// and unusual is not an alias.
+pub(crate) fn quicklink_with_neighbours(exact: Item, q: &str, static_items: &[Item]) -> Vec<Item> {
+    let key = exact.get("quicklink").to_string();
+    // The same quicklink is in the catalogue too; it belongs on screen once,
+    // at the top, as the row the exact match resolved to. Identity is checked
+    // both ways `finish` checks it — by key, and by `(kind, cmd)` — because a
+    // catalogue cached by an older build carries neither the key nor anything
+    // else new, and a duplicated row is exactly what an upgrade would show.
+    let same = (exact.kind, exact.cmd.clone());
+    let mut rows = vec![exact];
+    rows.extend(
+        root_items(static_items)
+            .into_iter()
+            .filter(|it| it.get("quicklink") != key && (it.kind, it.cmd.clone()) != same)
+            .filter(|it| matches_terms(it, q))
+            .take(50),
+    );
+    rows
 }
 
 fn exact_quicklink_item(q: &str) -> Option<Item> {
     let text = quicklinks_text();
-    search_provider_from(&text, q).or_else(|| {
-        exact_quicklink_key_from(&text, q).then(|| fixed_quicklink_from(&text, q)).flatten()
-    })
+    if exact_quicklink_key_from(&text, q) {
+        if let Some(item) = fixed_quicklink_from(&text, q) {
+            return Some(item);
+        }
+    }
+    search_provider_from(&text, q)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -785,6 +1572,11 @@ pub enum Scope {
     Mcp,
     Config,
     Settings,
+    /// The keywords the person saved. Everything else in this list is a source
+    /// Prelude discovered; this is the one the person wrote, and it was the
+    /// only one with nowhere to be seen as a whole — the sole way to answer
+    /// "what quicklinks do I have" was to open the TOML.
+    Quicklinks,
 }
 
 struct ScopeDef {
@@ -813,6 +1605,7 @@ const SCOPES: &[ScopeDef] = &[
     ScopeDef { scope: Scope::Containers, prefix: "docker:", title: "Containers", desc: "running Docker containers" },
     ScopeDef { scope: Scope::Mcp, prefix: "mcp:", title: "MCP Servers", desc: "all agent integrations" },
     ScopeDef { scope: Scope::Config, prefix: "cfg:", title: "Agent Config", desc: "settings and instruction files" },
+    ScopeDef { scope: Scope::Quicklinks, prefix: "ql:", title: "Quicklinks", desc: "keywords you saved yourself" },
     // Prelude's own, as opposed to the four agents' above it. It was the only
     // thing in this list the launcher could not reach.
     ScopeDef { scope: Scope::Settings, prefix: "set:", title: "Prelude Settings", desc: "search roots, hotkey, keys and rules" },
@@ -851,6 +1644,10 @@ pub fn needs_static_items(q: &str) -> bool {
     scope_query(t).is_some()
         || t.starts_with('/')
         || (t.starts_with('@') && !t.chars().any(char::is_whitespace))
+        // An exact alias needs the catalogue so the rows it leads can come
+        // with it. This is a config read on the handful of keystrokes that
+        // complete a keyword, not on every keystroke.
+        || exact_quicklink_item(t).is_some()
 }
 
 fn skill_prefix_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
@@ -946,7 +1743,7 @@ pub fn root_items(items: &[Item]) -> Vec<Item> {
             (matches!(
                 it.kind,
                 Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search
-            ) && crate::archive::visible(it)) || !it.get("quicklink").is_empty()
+            ) && crate::archive::visible(it)) || it.is_quicklink()
         })
         .cloned()
         .collect()
@@ -1244,6 +2041,13 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
             .cloned()
             .collect();
     }
+    if scope == Scope::Quicklinks {
+        let mut rows = quicklink_scope_rows();
+        rows.retain(|it| matches_terms(it, term));
+        rows.sort_by(crate::cache::by_rank);
+        rows.truncate(200);
+        return rows;
+    }
     if matches!(scope, Scope::Skills | Scope::Mcp) {
         let kind = if scope == Scope::Skills { Skill } else { Mcp };
         let (archive_view, needles) = capability_archive_filter(term);
@@ -1275,6 +2079,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         Scope::Skills | Scope::Mcp => false,
         Scope::Config => kind == Config,
         Scope::Settings => kind == Setting,
+        Scope::Quicklinks => false,
         Scope::Agent | Scope::Running | Scope::Sessions | Scope::Files => false,
     };
     static_items.iter()
@@ -1304,14 +2109,14 @@ pub(crate) fn quicklink_from(text: &str, q: &str) -> Option<(String, String, Str
         return None;
     }
     let links = crate::minitoml::parse(text);
-    let body = links.get(&key.to_ascii_lowercase())?;
+    let (_, body) = quicklink_entry(&links, key)?;
     let template = body.get("target").or_else(|| body.get("url"))?;
     if !template.contains("{q}") {
         return None;
     }
     let url = template.replace("{q}", &percent_encode(term));
     let name = body.get("name").cloned().unwrap_or_else(|| key.to_string());
-    Some((url, name, term.to_string(), key.to_ascii_lowercase()))
+    Some((url, name, term.to_string(), fold_key(key)))
 }
 
 pub fn quicklink(q: &str) -> Option<(String, String, String, String)> {
@@ -1319,9 +2124,8 @@ pub fn quicklink(q: &str) -> Option<(String, String, String, String)> {
 }
 
 fn is_quicklink_template(key: &str) -> bool {
-    quicklinks()
-        .get(&key.to_ascii_lowercase())
-        .and_then(|body| body.get("target").or_else(|| body.get("url")))
+    quicklink_entry(&quicklinks(), key)
+        .and_then(|(_, body)| body.get("target").or_else(|| body.get("url")).cloned())
         .is_some_and(|target| target.contains("{q}"))
 }
 
@@ -1681,7 +2485,7 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
         return rows;
     }
     if let Some(item) = exact_quicklink_item(q) {
-        return vec![item];
+        return quicklink_with_neighbours(item, q, static_items);
     }
     if let Some(url) = web_url(q) {
         rows.push(
@@ -1706,7 +2510,14 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
                 .title(format!("{name}: {term}"))
                 .sub(format!("{name} · {term}"))
                 .put("url", url)
+                // A result, not a saved quicklink: it keeps the key so the
+                // provider behind it can be edited, and stays an ordinary Link
+                // row so it can also be *saved* — the row you are looking at
+                // after a search is the one you most want to keep, and it was
+                // the single row where "Create Quicklink…" was suppressed.
+                .put("ql", "result")
                 .put("quicklink", key)
+                .put("quicklink_term", term)
                 .put("quicklink_managed", "false"),
         );
     }

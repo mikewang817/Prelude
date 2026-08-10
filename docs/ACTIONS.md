@@ -261,7 +261,7 @@ File rows may offer:
 - copy a real Finder file object
 - copy the path as text
 - remember an application per extension
-- create/manage a Quicklink
+- create or manage a Quicklink
 - move the file to the Trash
 
 Config rows use the same open actions but omit Trash. The default opens through
@@ -270,16 +270,42 @@ Launch Services; `$EDITOR` is an explicit command-producing alternative.
 ### Folder, application, and link
 
 - Folder: default opens Finder; alternatives copy a Finder object, hand over
-  `cd`, copy the path, and create/manage a Quicklink.
+  `cd`, copy the path, and create or manage a Quicklink.
 - Application: default launches it; alternatives reveal it, copy the app or its
-  path, hand over an `open` command, create/manage a Quicklink, and move the app
-  to the Trash.
-- Link: default opens the browser; alternatives hand over/copy the URL and
-  create/manage a Quicklink.
+  path, hand over an `open` command, create or manage a Quicklink, and move the
+  app to the Trash.
+- Link: default opens the browser; alternatives hand over/copy the URL, create
+  a fixed Quicklink, and save it as a `{q}` search keyword.
 
-Quicklink removal removes only the keyword. The target remains untouched.
-Prelude-created fixed entries can be removed directly; hand-written templates
-are edited in `quicklinks.toml`.
+### Quicklink
+
+Any file, folder, application, or URL row offers `Create Quicklink…`. A URL
+additionally offers `Save As A Search Keyword…`, which asks for the keyword and
+then for the URL with `{q}` already placed where the search term most likely
+was; the guess is editable before anything is written. The result row a
+template produces is an ordinary Link and may itself be saved either way.
+
+A row that already is a Quicklink offers, without opening any file:
+
+- rename the keyword
+- rename what the row says
+- point it somewhere else
+- remove the Quicklink
+- open `quicklinks.toml`
+
+Removal removes only the keyword; the target remains untouched. It reaches
+hand-written entries as well as Prelude's own — Prelude's carry markers so
+removing one leaves every hand-written line byte-for-byte, and an unmarked
+entry is bounded by its own section header.
+
+An entry whose target has gone leads with `Point It Somewhere Else…` rather
+than stating the fault and offering nothing. `prelude quicklink` performs each
+of these without a terminal, and `prelude quicklink check` reports every entry
+that will not resolve.
+
+A keyword is refused when it collides with a scope command, when it is already
+taken, or when it cannot be typed as a keyword — at the moment it is named,
+which is the only moment the reason can be given.
 
 ### Port, process, and container
 

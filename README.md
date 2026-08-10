@@ -119,6 +119,7 @@ mcp:is:archived           archived MCP servers, ready to restore
 @claude explain this      ask an installed Agent and show its answer
 f:tag:work                indexed files carrying a Finder tag
 c:                        clipboard text, Finder objects, and images
+ql:                       keywords you saved yourself
 h:git rebase              recent, filtered shell history
 app:zed                   installed applications
 10kg to lb                unit conversion
@@ -126,6 +127,38 @@ app:zed                   installed applications
 ```
 
 See [the search guide](docs/SEARCH.md) for the complete query grammar.
+
+## Quicklinks
+
+A Quicklink is a keyword you type to reach one thing. `Ctrl+K` on any file,
+folder, application, or URL creates one; `ql:` lists every keyword you have.
+
+```text
+notes                     a folder, an app, a file or a URL you named
+jira api timeout          a {q} template, with the term filled in
+ql:                       browse, rename, re-point or remove them
+```
+
+Prelude ships with keywords for general search (`g`, `gh`, `npm`, `mdn`, `gs`,
+`b`, `bing`, `ddg`), for looking things up while writing code (`so`, `crates`,
+`docsrs`, `pypi`, `pkg`, `caniuse`, `explain`, `hn`), and for working with
+agents (`hf`, `arxiv`, `ccdocs`, `mcpdocs`). They arrive in versioned blocks:
+one that clashes with a keyword you already use is skipped, and one you delete
+stays deleted.
+
+Keywords are matched without regard to case and may be written in any
+language. A saved keyword outranks anything Prelude merely found, so it leads
+the list well before you finish typing it. Prelude refuses a keyword a scope
+command has already spent, refuses to overwrite an existing one, and refuses a
+URL that looks like it carries a credential.
+
+```sh
+prelude quicklink list
+prelude quicklink add notes ~/Documents/notes
+prelude quicklink add jira 'https://jira.example.com/issues?jql={q}' Jira
+prelude quicklink rename notes n
+prelude quicklink check
+```
 
 | Key | Action |
 |---|---|

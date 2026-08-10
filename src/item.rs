@@ -134,6 +134,25 @@ impl Kind {
         }
     }
 
+    /// The band a Quicklink sits in, whatever it points at.
+    ///
+    /// A quicklink is not a file that happens to be indexed; it is a name the
+    /// person chose for something they expect to reach by typing that name.
+    /// Left in the target's own band it was hopeless — `File` is 60 and
+    /// `Link` 147, so a keyword the person invented sat below every scope
+    /// command in `root_items`, and only an exactly-complete key ever came
+    /// first, because `is_special` short-circuits before ranking happens at
+    /// all. Typing three letters of a six-letter keyword put it back at the
+    /// bottom of the list.
+    ///
+    /// Above `Setting` and `Search` so it beats the scope commands, and well
+    /// below the agent cluster, which is what the launcher is for.
+    pub const QUICKLINK: i64 = 460;
+
+    /// The label shown for a Quicklink row, regardless of its target's kind.
+    pub const QUICKLINK_STYLE: (&'static str, &'static str) =
+        (crate::ansi::BRIGHT_CYAN, "quicklink");
+
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
@@ -218,8 +237,58 @@ impl Item {
     /// source.
     pub fn rank(mut self, r: f64) -> Self {
         self.data.insert("rank".to_string(), format!("{r:.3}"));
-        self.score = self.kind.priority() as f64 + r;
+        self.score = self.band() as f64 + r;
         self
+    }
+
+    /// Mark this row as a saved Quicklink and move it into the Quicklink band.
+    ///
+    /// `shape` is `fixed` or `template`. The *result* of a template — the Link
+    /// row `g rust async` produces — is deliberately not one of these: it
+    /// carries the key so its provider can be edited, but it is a search
+    /// result, not a thing the person saved, and it must keep saying `open`.
+    ///
+    /// The score is reset rather than added to, so every quicklink starts
+    /// level and frecency alone decides their order among themselves. Left at
+    /// the target's priority they sorted Link before App before Dir before
+    /// File — an order nobody chose and nothing on the row explained.
+    pub fn quicklink(mut self, key: &str, shape: &str) -> Self {
+        self.data.insert("ql".to_string(), shape.to_string());
+        self.data.insert("quicklink".to_string(), key.to_string());
+        self.score = Kind::QUICKLINK as f64;
+        self
+    }
+
+    /// Is this a Quicklink the person saved, as opposed to a row that merely
+    /// came out of one?
+    pub fn is_quicklink(&self) -> bool {
+        matches!(self.get("ql"), "fixed" | "template")
+    }
+
+    /// The band this row sorts in. Normally the kind's, but a Quicklink is
+    /// banded by the fact that somebody named it — both shapes of one, since
+    /// a template is every bit as much a keyword the person chose.
+    pub fn band(&self) -> i64 {
+        if self.is_quicklink() { Kind::QUICKLINK } else { self.kind.priority() }
+    }
+
+    /// Colour and label for the list.
+    ///
+    /// This column answers *what kind of thing is this row*, not what Enter
+    /// will do to it. Almost every label is a noun naming a source — `agent`,
+    /// `session`, `skill`, `mcp`, `clipboard`, `history`, `app`, `folder`,
+    /// `branch`, `script` — and what Enter does is already stated twice
+    /// elsewhere, in the footer and at the top of the `^K` panel.
+    ///
+    /// So both shapes of a Quicklink say `quicklink`, and `search` is left to
+    /// mean the thing it actually names: a scope command into Prelude's own
+    /// index. `Kind::Search` carries both populations, and they are not the
+    /// same thing — `f:` is built in and goes to the file index, `gh <query>`
+    /// is a line in the person's `quicklinks.toml` and goes to the web. That
+    /// they behave alike on Enter is a coincidence of both needing an
+    /// argument, and it is not what the column was being asked.
+    pub fn style(&self) -> (&'static str, &'static str) {
+        if self.is_quicklink() { Kind::QUICKLINK_STYLE } else { self.kind.style() }
     }
 
     pub fn put(mut self, k: &str, v: impl Into<String>) -> Self {

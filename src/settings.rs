@@ -774,7 +774,7 @@ pub fn items() -> Vec<Item> {
             "quicklinks",
             "Quicklinks",
             if n == 0 { "none yet".into() } else { format!("{n} keywords") },
-            "type the keyword to reach the object",
+            "ql: to browse · ^K on any row to add",
             EDIT_OPEN,
         )
         .put("source", if quicklinks.is_file() { "saved" } else { "built-in" })

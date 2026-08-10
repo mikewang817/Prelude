@@ -476,9 +476,12 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
         // its counterpart already are both of them. The panel listed them
         // again underneath: four rows, two actions.
         Kind::Calc => vec![],
-        Kind::Search if !it.get("provider").is_empty() => vec![
-            a("quicklink-edit", "Edit Search Providers", crate::compute::quicklinks_file().to_string_lossy()),
-        ],
+        // A template quicklink is a Quicklink, and the block below gives it
+        // the same rename, re-point and remove verbs as a fixed one. It used
+        // to have a single row here calling the same file "Search Providers",
+        // while two rows away the same file was "Quicklink Definition" and the
+        // settings list called it "Quicklinks" — three names for one file, and
+        // no way to tell they were the same thing.
         Kind::Search => vec![],
         Kind::Ssh => vec![
             a("editssh", "Edit ~/.ssh/config", ""),
@@ -519,17 +522,44 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
     // A quicklink names a stable object without changing what kind of object
     // it is. Its configuration belongs before any action that removes the
     // target itself.
-    if crate::compute::quicklinkable(it.kind) {
+    if crate::compute::quicklinkable(it.kind) || it.is_quicklink() {
         let mut qacts = Vec::new();
-        if it.get("quicklink").is_empty() {
-            qacts.push(a("quicklink-create", "Create Quicklink…", "give this object a keyword"));
+        if it.is_quicklink() {
+            let key = it.get("quicklink");
+            // Everything except creation used to be "open the TOML in your
+            // editor and find it yourself". Each of these is one prompt.
+            if !it.get("quicklink_missing").is_empty() || !it.get("quicklink_broken").is_empty() {
+                qacts.push(a("quicklink-retarget", "Point It Somewhere Else…", "its target is gone"));
+            }
+            qacts.push(a("quicklink-rename", "Rename Keyword…", key));
+            qacts.push(a("quicklink-relabel", "Rename What The Row Says…", &it.title));
+            if it.get("quicklink_missing").is_empty() && it.get("quicklink_broken").is_empty() {
+                qacts.push(a("quicklink-retarget", "Point It Somewhere Else…", it.get("quicklink_target")));
+            }
+            // Removal reaches hand-written entries too now. It used to refuse
+            // them with a sentence that read as the opposite of what it meant.
+            qacts.push(a("quicklink-remove", "Remove Quicklink…", "the target is untouched"));
+            qacts.push(a("quicklink-edit", "Open The Quicklinks File", crate::compute::quicklinks_file().to_string_lossy()));
         } else {
-            qacts.push(a("quicklink-edit", "Edit Quicklink Definition", it.get("quicklink")));
-            if it.get("quicklink_managed") == "true" {
-                qacts.push(a("quicklink-remove", "Remove Quicklink…", "the target is untouched"));
+            qacts.push(a("quicklink-create", "Create Quicklink…", "give this object a keyword"));
+            // The `{q}` half of the feature had no way in at all. A URL is
+            // where one comes from, and the result of a search is the URL you
+            // are most likely to want saved as one.
+            if it.kind == Kind::Link {
+                qacts.push(a("quicklink-template", "Save As A Search Keyword…", "with {q} where the term goes"));
             }
         }
-        let at = acts.iter().position(|(id, ..)| is_destructive(it.kind, id)).unwrap_or(acts.len());
+        // Normally these sit with the other management verbs, before anything
+        // that removes the target. When the target is *gone* they lead: every
+        // verb above them — open it, reveal it, open it with something else —
+        // is an offer to act on a file that is not there, and the one useful
+        // answer was buried below all of them.
+        let broken = !it.get("quicklink_missing").is_empty() || !it.get("quicklink_broken").is_empty();
+        let at = if broken {
+            0
+        } else {
+            acts.iter().position(|(id, ..)| is_destructive(it.kind, id)).unwrap_or(acts.len())
+        };
         acts.splice(at..at, qacts);
     }
 
@@ -867,7 +897,7 @@ pub fn panel(it: &Item) -> i32 {
         .collect();
 
     let title = crate::width::dtrunc(&crate::width::flatten(&it.title), 48);
-    let kind = it.kind.style().1;
+    let kind = it.style().1;
     let default = crate::defaults::describe(it, surface);
     let header = format!("{DIM}Default: {default} · Enter{RESET}");
 
@@ -1015,20 +1045,13 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         "editssh" => ui::emit("INSERT", &format!("{editor} ~/.ssh/config")),
         "quicklink-create" => {
             let suggestion = crate::compute::quicklink_suggestion(it);
-            let Some(raw_key) = ui::prompt_line_initial(" quicklink keyword ", &suggestion) else {
+            let Some(key) = ask_quicklink_key(" quicklink keyword ", &suggestion) else {
                 return 130;
             };
-            let key = match crate::compute::normalize_quicklink_key(&raw_key) {
+            let key = match key {
                 Ok(key) => key,
-                Err(e) => {
-                    ui::note(&e);
-                    return 2;
-                }
+                Err(code) => return code,
             };
-            if crate::compute::quicklinks().contains_key(&key) {
-                ui::note(&format!("a quicklink called {key} already exists"));
-                return 2;
-            }
             let draft = match crate::compute::quicklink_draft(it) {
                 Ok(Some(d)) => d,
                 Ok(None) => {
@@ -1047,8 +1070,102 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             ) {
                 return 130;
             }
-            match crate::compute::create_quicklink(&key, it) {
+            match crate::compute::create_quicklink_from(&key, &draft) {
                 Ok(_) => ui::note(&format!("created quicklink {key}")),
+                Err(e) => {
+                    ui::note(&e);
+                    return 2;
+                }
+            }
+        }
+        // Two prompts: the keyword, then the URL with `{q}` already put where
+        // the search term most likely was. Guessing badly costs one edit;
+        // not offering it at all cost everyone who wanted their own search a
+        // hand-written TOML entry.
+        "quicklink-template" => {
+            let url = it.get("url");
+            let url = if url.is_empty() { it.cmd.clone() } else { url.to_string() };
+            let Some(key) = ask_quicklink_key(" search keyword ", "") else { return 130 };
+            let key = match key {
+                Ok(key) => key,
+                Err(code) => return code,
+            };
+            let Some(template) = ui::prompt_line_initial(
+                " url · {q} is the search term ",
+                &crate::compute::template_suggestion(&url),
+            ) else {
+                return 130;
+            };
+            let Some(name) = ui::prompt_line_initial(" what to call it ", &key) else {
+                return 130;
+            };
+            let draft = match crate::compute::template_draft(&name, &template) {
+                Ok(d) => d,
+                Err(e) => {
+                    ui::note(&e);
+                    return 2;
+                }
+            };
+            if !ui::confirm(
+                &format!("create search quicklink “{key}”?"),
+                "Create Quicklink",
+                &draft.target,
+            ) {
+                return 130;
+            }
+            match crate::compute::create_quicklink_from(&key, &draft) {
+                Ok(_) => ui::note(&format!("created {key} — type “{key} something”")),
+                Err(e) => {
+                    ui::note(&e);
+                    return 2;
+                }
+            }
+        }
+        "quicklink-rename" => {
+            let old = it.get("quicklink");
+            if old.is_empty() {
+                return 2;
+            }
+            let Some(key) = ask_quicklink_key(" new keyword ", old) else { return 130 };
+            let key = match key {
+                Ok(key) => key,
+                Err(code) => return code,
+            };
+            match crate::compute::rename_quicklink(old, &key) {
+                Ok(new) => ui::note(&format!("{old} is now {new}")),
+                Err(e) => {
+                    ui::note(&e);
+                    return 2;
+                }
+            }
+        }
+        "quicklink-relabel" => {
+            let key = it.get("quicklink");
+            if key.is_empty() {
+                return 2;
+            }
+            let Some(name) = ui::prompt_line_initial(" what the row should say ", &it.title) else {
+                return 130;
+            };
+            match crate::compute::rename_quicklink_label(key, &name) {
+                Ok(()) => ui::note(&format!("{key} now reads “{}”", name.trim())),
+                Err(e) => {
+                    ui::note(&e);
+                    return 2;
+                }
+            }
+        }
+        "quicklink-retarget" => {
+            let key = it.get("quicklink");
+            if key.is_empty() {
+                return 2;
+            }
+            let current = it.get("quicklink_target");
+            let Some(target) = ui::prompt_line_initial(" point it at ", current) else {
+                return 130;
+            };
+            match crate::compute::retarget_quicklink(key, &target) {
+                Ok(stored) => ui::note(&format!("{key} now points at {stored}")),
                 Err(e) => {
                     ui::note(&e);
                     return 2;
@@ -1057,7 +1174,7 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         }
         "quicklink-edit" => {
             // Reading once also creates the default file on a fresh install.
-            let _ = crate::compute::quicklinks();
+            let _ = crate::compute::ensure_quicklinks_file();
             run_or_emit(
                 &format!("{editor} {}", shq(&crate::compute::quicklinks_file().to_string_lossy())),
             );
@@ -1684,6 +1801,37 @@ pub fn apply(id: &str, it: &Item) -> i32 {
 /// typed the command into the chat; there is no such surface now.
 fn run_or_emit(cmd: &str) {
     ui::emit("RUN", cmd);
+}
+
+/// Ask for a keyword and answer the three questions that can make it useless,
+/// at the one moment they can still be explained.
+///
+/// `None` means the person cancelled. `Err` carries the exit code for a
+/// keyword that was refused — a shape the search box has already spent, or one
+/// that is taken. Naming a quicklink `f` used to be accepted silently and then
+/// never resolve, because `dynamic_rows_with` settles the scope command first.
+fn ask_quicklink_key(label: &str, initial: &str) -> Option<Result<String, i32>> {
+    let raw = ui::prompt_line_initial(label, initial)?;
+    let key = match crate::compute::normalize_quicklink_key(&raw) {
+        Ok(key) => key,
+        Err(e) => {
+            ui::note(&e);
+            return Some(Err(2));
+        }
+    };
+    if let Some(why) = crate::compute::quicklink_conflict(&key) {
+        ui::note(&why);
+        return Some(Err(2));
+    }
+    if key != initial.trim().to_lowercase() {
+        if let Some((existing, _)) =
+            crate::compute::quicklink_entry(&crate::compute::quicklinks(), &key)
+        {
+            ui::note(&format!("a quicklink called {existing} already exists"));
+            return Some(Err(2));
+        }
+    }
+    Some(Ok(key))
 }
 
 fn copy_text(it: &Item) -> String {

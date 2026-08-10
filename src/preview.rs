@@ -184,7 +184,7 @@ fn base64(bytes: &[u8]) -> String {
 /// Render the same detail view as text so the action panel can page it and
 /// then return to the actions instead of closing the launcher.
 pub fn text(it: &Item) -> String {
-    let (color, label) = it.kind.style();
+    let (color, label) = it.style();
     let mut out = vec![format!("{color}{label}{RESET}"), String::new()];
     fn kv(out: &mut Vec<String>, k: &str, v: &str) {
         if !v.is_empty() {

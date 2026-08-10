@@ -43,9 +43,8 @@ Once a non-special query is typed, fzf searches a smaller root catalogue:
 
 - unanswered questions
 - Agent, Run, Skill, and MCP inventory rows
-- search-provider commands
 - scope commands such as `Past Conversations` and `Search Files`
-- fixed Quicklinks
+- every Quicklink, fixed and template alike
 
 Session and Config objects themselves are not in root search; their visible
 scope commands lead to `s:` and `cfg:`. Large sources such as files, history,
@@ -77,6 +76,7 @@ Clearing the query returns to the Agent home. Type `:` to list every scope.
 | `docker:` | running Docker containers |
 | `mcp:` | non-archived Claude/Codex MCP inventory rows |
 | `cfg:` | existing Agent settings and instruction files |
+| `ql:` | every Quicklink, including entries that do not resolve |
 | `set:` | Prelude settings with their effective values and sources |
 
 A bare prefix lists the scope. Scoped queries disable fzf's own fuzzy filter;
@@ -230,19 +230,62 @@ preview. Image previews use Ghostty/Kitty's native transfer protocol when
 available, then Chafa as a fallback. `Ctrl+P` remains the ordinary manual Quick
 Look toggle outside that contextual behavior.
 
-## Providers, Quicklinks, URLs, and computed rows
+Entering a scope replaces the list, and the first row of the new list is
+described as soon as it arrives — its footer and, in `c:`, its preview. This
+holds without touching the cursor.
 
-A template Quicklink has a command state and a result state:
+## Quicklinks, URLs, and computed rows
+
+A Quicklink is a keyword the person saved. It has two shapes. A *fixed*
+Quicklink points at one file, folder, application, or URL; a *template*
+Quicklink carries `{q}` and takes a search term, so it has a command state and
+a result state:
 
 ```text
+notes         the folder that keyword names · Enter opens it
 g             Search Google · Enter changes the query to `g `
 g rust async  real Link row · Enter opens the generated URL
 ```
 
-Default templates include Google, GitHub, npm, MDN, Google Scholar, Baidu,
-Bing, and DuckDuckGo. `quicklinks.toml` may also hold fixed file, folder, app,
-and URL objects. Exact aliases outrank fuzzy root matches. Credential-looking
-URLs are refused when creating a Quicklink.
+Every Quicklink is a row in `ql:`, including entries that do not resolve —
+that scope states what is wrong with a broken entry and carries the same
+rename, re-point, and remove actions as a working one.
+
+The built-in set covers general web search (`g`, `gh`, `npm`, `mdn`, `gs`,
+`b`, `bing`, `ddg`), the places a programmer looks things up (`so`, `crates`,
+`docsrs`, `pypi`, `pkg`, `caniuse`, `explain`, `hn`), and the ones an agent
+user does (`hf`, `arxiv`, `ccdocs`, `mcpdocs`). Built-ins arrive in versioned
+blocks: each block is offered once, an entry whose keyword you already use is
+skipped rather than overwritten, and a default you delete is not restored. No
+built-in keyword is a scope prefix or an Agent's name.
+
+Quicklinks sort in a band of their own, above every scope command and below
+the Agent rows, so a partially typed keyword leads the list rather than
+sinking to the bottom of it with the kind of object it points at. Exact
+aliases outrank fuzzy root matches, and an exact key outranks a name another
+entry happens to carry.
+
+An exact keyword leads the list without replacing it: everything else matching
+the query follows underneath, so completing `github` keeps the `Search GitHub`
+that was already on screen instead of deleting it.
+
+Both shapes are labelled `quicklink`. The kind column names what a row is, not
+what Enter does to it, and `search` is reserved for the scope commands — a
+scope command is built in and leads into Prelude's own index, while a template
+is a line in your `quicklinks.toml` that leads to the web. The two happen to
+behave alike on Enter because both need an argument.
+
+Keys are folded to lower case on both sides of a comparison, so an entry
+written `[Design]` by hand is reached by typing `design`. A key may use
+letters and digits of any script plus `-` and `_`; anything the search box has
+already spent — a scope prefix, `:`, `/`, `@`, whitespace — is refused when
+the Quicklink is named rather than accepted and then left unreachable.
+Credential-looking URLs are refused, in a fixed target and in a template.
+
+`Ctrl+K` creates, renames, re-points, re-labels, and removes them; removal
+reaches hand-written entries as well as Prelude's own. `prelude quicklink`
+does the same from a script, and `prelude quicklink check` reports every entry
+that will not resolve.
 
 Prelude also recognizes explicit `http://` and `https://` URLs, unambiguous
 hostnames, localhost/IP addresses, and `.local`/`.test` hosts. It refuses URL

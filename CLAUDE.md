@@ -67,6 +67,43 @@ never needed a terminal. Every bug in launch and teardown came from that. There
 is now nothing to launch and nothing to strand: the loop outlives every press
 and the panel is shown and hidden.
 
+**The bill for that is that the list is older than the press, and `refresh.rs`
+is how it is paid.** `once()` starts the launcher *before* the reveal, so
+`gather` runs when the previous interaction ended: dismiss at nine, press at
+two, and you are reading the morning's machine. The clipping you copied a
+minute ago is not in it and will not be until you dismiss and re-open once.
+People report this as "it takes a while to show up", which is the wrong shape
+— nothing was slow, the snapshot predates what they came for.
+
+A thread therefore re-gathers behind the hidden panel and hands the new list to
+fzf through its own `--listen` Unix socket. Three things keep it from being
+felt, and each is the part to preserve if this is ever rewritten:
+
+* **Ask fzf before touching it.** The refresh is sent as a `transform`, which
+  fzf evaluates with the live `{q}` and `{n}`, so `_tick` can answer with *no
+  action* when a query is typed or the cursor has moved. Only fzf knows that;
+  guessing would mean a background reload moving somebody's selection, which
+  is worse than the staleness it fixes. `may_redraw` treats anything it does
+  not recognise as "in use".
+* **Do nothing when nothing happened.** A tick is a handful of `stat`s over
+  the files behind the list. A gather runs only on a changed mtime, or every
+  `FORCE_AFTER` regardless, because a detached slow-source refresh lands in
+  its cache with nobody being told.
+* **Reuse the layout.** Widths and the title column come from the caller.
+  Recomputing them here would put the per-keystroke helper's rows in a
+  different column from the static ones — the same trap as everywhere else.
+
+`^K` is a modal: fzf exits, the action panel runs, the list is rebuilt after.
+The socket is gone for that whole time, so its absence skips a tick and never
+ends the loop. Ending there left every session that had opened `^K` once
+silently un-refreshed for the rest of its life.
+
+Everything degrades to nothing: no socket, a failed bind, a POST into the
+void, and the panel behaves exactly as it did before — one snapshot per
+interaction. Only the panel gets this; the zsh widget is opened, used and
+closed in seconds, and its snapshot is never older than the press that made
+it.
+
 Four config lines are load-bearing and each was found the hard way.
 `macos-hidden = always` keeps the launcher out of the Dock and the app switcher
 — Ghostty documents it for exactly this. `initial-window = false` keeps the
@@ -277,6 +314,20 @@ do not add a second focus helper or a subprocess to decide it. Hiding must put
 `hide-preview` shows it again, which is how text rows acquired a 99%-high
 horizontal pane.
 
+**`focus` is not enough on its own: bind `load` to the same helper.** fzf
+raises `focus` on cursor movement and on a search-result update, and *not*
+when `reload` replaces the list while the cursor stays where it already was —
+on the first row. Every scope entry is exactly that reload, so the first row
+of `c:`, `s:`, `f:`, `app:` and the rest arrived carrying the previous row's
+state: the footer under a clipboard entry read "Open this search", which is
+what `c:`'s own scope command says, and the contextual clipboard preview never
+opened, because the same helper decides both. One arrow press put it right,
+which is why it lasted — the state was only ever wrong before anybody had
+touched anything. `load` fires when a list has finished arriving, including
+after every reload, so both events run the same binding. It costs one extra
+fork per list, and it also gives the very first row on startup a real footer
+instead of the static one.
+
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
 Option+Enter comes through as a bare Enter — running the *primary* action,
@@ -385,6 +436,100 @@ invocation, so `/cnipa-ooa` is the single row that runs it and the Skill row
 is gone. Nothing here shows two rows for one intent, and MCP servers are not
 on `/` at all: they are not invoked by name, and `mcp:` is their scope.
 
+**A Quicklink is banded by the person having named it, not by what it points
+at.** `Item::band` is `Kind::priority` for everything else and
+`Kind::QUICKLINK` for a saved quicklink, and `by_rank` reads that instead of
+the kind. It was the kind's, which read as principled and was hopeless in
+practice: `File` is 60 and `Link` 147, so a keyword somebody invented sat
+below every scope command in `root_items`, and the only thing that ever
+rescued it was `is_special` short-circuiting on an *exactly complete* key.
+Three letters into a six-letter keyword it was at the bottom of the list. The
+score is reset rather than added to, so quicklinks start level with each other
+and frecency alone orders them — banded by kind they sorted Link, App, Dir,
+File, an order nobody chose and no row explained. The target's `Kind` stays on
+the item, because Enter and `^K` must still act on what it points at; only the
+band and the label come from its being a quicklink. `Item::style` is why the
+label is not `kind.style()` at any call site.
+
+**The kind column names what a row *is*, not what Enter does to it.** Look at
+the other twenty-six labels — `agent`, `session`, `skill`, `mcp`, `clipboard`,
+`history`, `app`, `folder`, `branch`, `script`, `port`, `process` — they are
+nouns naming a source. What Enter does is already stated twice, in the footer
+and at the top of the `^K` panel, and a third statement in a five-column row
+is not worth the column.
+
+So **both** shapes of a Quicklink read `quicklink`, and `search` is left
+meaning the one thing it names: a scope command into Prelude's own index.
+`Kind::Search` carries both populations and they are not the same thing — `f:`
+is built in and goes to the file index, `gh <query>` is a line in the person's
+`quicklinks.toml` and goes to the web. That the two behave alike on Enter is a
+coincidence of both needing an argument.
+
+This was briefly the other way round, and the correction is worth keeping
+because the reasoning that produced it was the giveaway: "the kind column
+answers what Enter will do" is a rule invented to justify one row, and it is
+contradicted by twenty-five of the twenty-seven labels. A principle that holds
+for the case in front of you and nothing else is not the principle.
+
+The *result* of a template — the Link row `g rust async` produces — carries
+its provider's key but is not a saved quicklink (`ql=result`). It keeps
+saying `open`, and it keeps `Create Quicklink…`, which it did not: the row
+suppressed creation because it carried a key, so the one URL a person most
+wants to keep was the one URL they could not.
+
+**An exact alias leads the list; it does not clear the room.** `is_special` is
+true for an exact key, and `dynamic_rows_with` used to answer it with
+`vec![item]` — so the catalogue underneath was suppressed and one keystroke
+turned two sensible candidates into one. At `githu` both a `github` quicklink
+and `Search GitHub` were on screen; typing the last character deleted one of
+them, and nothing said which or why. `quicklink_with_neighbours` keeps the
+exact row first and appends every root item that still matches, deduped on the
+key *and* on `(kind, cmd)` — a catalogue cached by an older build carries
+neither the key nor anything else new, and a duplicated row is precisely what
+an upgrade would otherwise show.
+
+Do not try to solve this by dropping the exact match and letting fzf rank it.
+That was measured against the real root list with `--tiebreak=index`: `github`
+does put the quicklink first, but `google` loses to an MCP server and `g` and
+`b` lose to skills. fzf scores its own way and the band only breaks its ties;
+an alias that wins only when its name is long and unusual is not an alias.
+This is why an exact key is the one thing `is_special` still resolves from
+config, and why `needs_static_items` now says yes to it — one 400KB parse on
+the handful of keystrokes that complete a keyword, measured at 0.4ms against a
+2ms keystroke.
+
+**Every lookup folds case, and every refusal happens at the moment of naming.**
+`minitoml` keeps a section name as written and every lookup lowercases the
+query, so a hand-written `[Design]` matched nothing, produced no row and
+reported no error — `quicklink_entry` is now the only way in. The same
+applies to the three ways a key could be accepted and then never work: a scope
+prefix (`dynamic_rows_with` settles `f:` before any quicklink, so `[f]` was
+written to the file and unreachable forever), a name another entry already
+carries (`[g]` is called "Google", and it swallowed a fixed `[google]` until
+exact keys were tried first), and a duplicate. All three are refused by
+`quicklink_conflict` and `append_quicklink` when the person types the keyword,
+because that is the only moment a reason can be given. Keys accept letters and
+digits of *any* script: ASCII-only meant a Chinese user could not name a
+quicklink in the language the thing being named was written in, and
+`quicklink_suggestion` handed them an empty prompt on top of it.
+
+**Reading quicklinks must not write them.** `quicklinks_text` was
+create-the-file-and-maybe-migrate-it, and `is_special` plus `dynamic_rows_with`
+called it up to four times per keystroke. It is now a memoised pure read that
+falls back to `QUICKLINKS_DEFAULT` in memory when the file is absent;
+`ensure_quicklinks_file` owns the creation and the versioned migration and is
+called from `quicklink_items` (once per gather), the settings editor, the CLI
+and `doctor`. Mutations read uncached and invalidate.
+
+**`ql:` shows the entries that do not work.** The ordinary catalogue is right
+to drop an entry it cannot render — a broken row is not a search result — but
+that left the one screen whose job is repair unable to show the thing needing
+repair, and for a long time there was no such screen at all: the only way to
+answer "what quicklinks do I have" was to open the TOML. `quicklink_scope_rows`
+adds a stating row for each entry `quicklink_items_from` refused, carrying the
+same rename, re-point and remove actions. `prelude quicklink` is the same set
+of verbs without fzf, for the reason `settings add-root` exists.
+
 **A provider is a command until it has an argument.** Exact `g` and `google`
 show one Search Google row; Enter changes the query to `g ` without closing
 fzf, and only `g term` becomes a Link. Scope commands use the same
@@ -421,7 +566,20 @@ are private, bounded, and removed when their history rows age out. Some
 screenshot tools bump `NSPasteboard.changeCount` several times while publishing
 one image; clipd v3 records a private content fingerprint, migrates old rows
 behind the daemon boundary, keeps only the newest byte-identical occurrence and
-removes superseded payloads. Never hash those images on gather. A Ghostty or
+removes superseded payloads. Never hash those images on gather.
+
+**AppKit has no pasteboard notification, so the poll interval is the whole of
+the latency, and it follows the activity.** A flat one-second poll measured a
+654ms median — exactly a uniform draw from a one-second window — which made
+the launcher wrong about the thing it is most often opened for: copy, press
+the chord, and half the time the clipping is not there. v4 polls `IDLE` (0.5s)
+between bursts and `ALERT` (0.08s) for fifteen seconds after any change,
+because copying comes in runs; measured 83–86ms in a burst and ≤524ms cold.
+**The version was bumped for a change the record format did not need**, and
+that is the precedent: a watcher that is merely half a second late is not
+wrong, so nothing would ever have replaced it, and it would have gone on being
+late for as long as the machine stayed up. A version that only advances on
+format changes strands the one kind of fix a person can actually feel. A Ghostty or
 Kitty preview uses the native `t=f` path transfer before Chafa, with one fixed
 Prelude image id deleted before every render; this keeps an arrow press to a
 path-sized terminal message and stops graphics placements overlapping after
@@ -662,11 +820,24 @@ where the others take a prompt positionally; `codex exec` refuses to run
 outside a git repository. See `AGENTS` in `sources/sessions.rs`.
 
 Prelude writes its own config for explicit settings such as open-with rules
-and Quicklinks (and versioned, one-time additions to their built-in search
-providers). Quicklink writes are atomic and never overwrite a keyword;
+and Quicklinks (and versioned, one-time additions to their built-in
+keywords — `DEFAULT_BLOCKS`, one entry per block, appended to a file that has
+not seen that block's marker; an existing keyword is skipped rather than
+overwritten and a deleted default is not restored, because the marker records
+that a block was *offered*, not that its contents survived. A built-in keyword
+may not be a scope prefix or a built-in Agent's name: an exact keyword
+resolves ahead of the catalogue, so shipping `claude` would push the Agent row
+it names down a line for everyone, by default, and a test walks the table for
+both). Quicklink writes are atomic and never overwrite a keyword;
 generated blocks are marked so removing one preserves hand-written
 `quicklinks.toml` comments and search templates byte-for-byte, and URLs that
-look credential-bearing are refused rather than indexed. Outside Prelude's
+look credential-bearing are refused rather than indexed — in a fixed target
+and in a `{q}` template, which is checked with the braces substituted so a
+credential cannot ride along in every search. Removing, renaming and
+re-pointing reach hand-written entries too, bounded by the section header
+rather than the markers; refusing them was the older behaviour and it said so
+with "that quicklink is managed in the config file", a sentence whose plain
+reading is the opposite of what it meant. Outside Prelude's
 config and caches, only explicit actions write user files: installing a skill
 copy, exporting a raw Session, or moving a selected file, application, skill
 copy or inactive native Session to the Trash. None is a default action.

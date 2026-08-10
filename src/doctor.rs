@@ -1545,7 +1545,7 @@ pub fn run() -> i32 {
 
     let mut counts = std::collections::BTreeMap::new();
     for i in &items {
-        *counts.entry(i.kind.style().1).or_insert(0usize) += 1;
+        *counts.entry(i.style().1).or_insert(0usize) += 1;
     }
     println!("\n  {DIM}by source:{RESET} {}",
              counts.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("  "));
@@ -1556,9 +1556,21 @@ pub fn run() -> i32 {
              if u { format!("{GREEN}✓{RESET}") } else { format!("{YELLOW}✗{RESET}") });
     println!("    {GREEN}✓{RESET} time     {DIM}now + 3 days · 1699999999{RESET}");
     println!("    {GREEN}✓{RESET} web      {DIM}github.com · localhost:3000 · https://example.com{RESET}");
+    // A key list says a quicklink exists, not that it works. A gone target, a
+    // keyword that cannot be typed and a keyword the scope commands have
+    // already spent all printed exactly like a healthy one.
     let ql = crate::compute::quicklinks();
-    println!("    {GREEN}✓{RESET} links    {DIM}{}{RESET}",
-             ql.keys().filter(|k| !k.is_empty()).cloned().collect::<Vec<_>>().join(" "));
+    let keys: Vec<String> = ql.keys().filter(|k| !k.is_empty()).cloned().collect();
+    let problems = crate::compute::quicklink_problems();
+    if problems.is_empty() {
+        println!("    {GREEN}✓{RESET} ql:      {DIM}{}{RESET}", keys.join(" "));
+    } else {
+        println!("    {YELLOW}✗{RESET} ql:      {DIM}{} of {} broken — run:  prelude quicklink check{RESET}",
+                 problems.len(), keys.len());
+        for (key, why) in problems.iter().take(5) {
+            println!("             {DIM}{key} — {why}{RESET}");
+        }
+    }
     // The roots decide what `f:` can find, and an index built before they
     // last changed answers from a set nothing on screen describes. Silence
     // there is the failure worth naming here.

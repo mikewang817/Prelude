@@ -32,6 +32,7 @@ mod panel;
 mod paths;
 mod preview;
 mod probe;
+mod refresh;
 mod render;
 mod runhere;
 mod secrets;
@@ -138,6 +139,10 @@ fn main() -> ExitCode {
             )
         }
         ["settings", rest @ ..] => settings::dispatch(rest),
+        // `ql` because that is the scope prefix; one word for one concept.
+        ["quicklink", rest @ ..] | ["quicklinks", rest @ ..] | ["ql", rest @ ..] => {
+            compute::quicklink_cli(rest)
+        }
         ["skills", rest @ ..] => {
             json_dump(sources::agents::skills(), rest.contains(&"--json"))
         }
@@ -234,6 +239,11 @@ fn main() -> ExitCode {
             cols.parse().unwrap_or_else(|_| term_width()),
             tw.parse().ok(),
         ),
+        // Asked by the panel's background refresher, through fzf's own socket,
+        // so the answer can be "do nothing" when somebody is using the panel.
+        // Only fzf knows what has been typed and where the cursor is.
+        ["_tick", q, n] => refresh::tick(q, n),
+        ["_tick", q] => refresh::tick(q, ""),
         ["_ask", line] => match render::parse_line(line) {
             Some(i) => ui::ask(&i),
             None => 1,
@@ -310,7 +320,7 @@ fn json_dump(items: Vec<item::Item>, json: bool) -> i32 {
     }
     for it in &items {
         let sub = if it.fields.is_empty() { it.subtitle.clone() } else { it.fields.join(" · ") };
-        println!("{}\t{}\t{}", it.kind.style().1, it.title, sub);
+        println!("{}\t{}\t{}", it.style().1, it.title, sub);
     }
     0
 }
@@ -868,6 +878,307 @@ mod tests {
         assert!(crate::compute::quicklink_draft(&clip).unwrap().is_none(), "ephemeral rows are not stable targets");
     }
 
+    /// A hand-written entry is as real as one Prelude wrote, and every one of
+    /// these was a silent failure: the row simply never appeared, or the
+    /// keyword simply never resolved, with nothing anywhere saying why.
+    #[test]
+    fn hand_written_entries_are_found_edited_and_removed_like_any_other() {
+        use crate::compute::*;
+
+        // `minitoml` keeps a section name as written and every lookup
+        // lowercased it, so `[Design]` matched nothing and produced no row.
+        let text = "# header\n\n[Design]\nname = \"Design\"\nkind = \"url\"\ntarget = \"https://example.com/d\"\n\n[GH]\nname = \"GitHub\"\nurl = \"https://github.com/search?q={q}\"\n";
+        assert!(fixed_quicklink_from(text, "design").is_some(), "a capitalised key must still be reachable");
+        assert!(fixed_quicklink_from(text, "DESIGN").is_some());
+        assert!(exact_quicklink_key_from(text, "gh"));
+        let keys: Vec<String> =
+            quicklink_items_from(text).iter().map(|it| it.get("quicklink").to_string()).collect();
+        assert_eq!(keys, ["design", "gh"], "both entries reach the catalogue, folded to lower case");
+        assert!(quicklink_from(text, "GH rust").is_some(), "and a template resolves the same way");
+
+        // Removal reached only marked blocks; an unmarked one was refused.
+        let gone = remove_quicklink_block(text.to_string(), "design").unwrap();
+        assert!(!gone.contains("[Design]"));
+        assert!(gone.contains("[GH]"), "the neighbour is untouched");
+        assert!(gone.starts_with("# header"), "and so is the file's own comment");
+
+        // Renaming and re-pointing existed nowhere but $EDITOR.
+        let renamed = rename_quicklink_key(text, "design", "d").unwrap();
+        assert!(fixed_quicklink_from(&renamed, "d").is_some());
+        assert!(fixed_quicklink_from(&renamed, "design").is_none());
+        assert!(renamed.contains("target = \"https://example.com/d\""), "renaming moves nothing else");
+
+        let repointed = set_quicklink_field(text, "design", "target", "https://example.com/new").unwrap();
+        assert_eq!(fixed_quicklink_from(&repointed, "design").unwrap().get("url"), "https://example.com/new");
+        let added = set_quicklink_field(text, "design", "name", "Design docs").unwrap();
+        assert_eq!(fixed_quicklink_from(&added, "design").unwrap().title, "Design docs");
+    }
+
+    /// The three ways a keyword could be accepted and then never work.
+    #[test]
+    fn a_keyword_is_refused_at_the_one_moment_it_can_be_explained() {
+        use crate::compute::*;
+
+        // `dynamic_rows_with` settles a scope command before a quicklink, so
+        // `f` was written to the file and was unreachable forever.
+        assert!(quicklink_conflict("f").is_some(), "f: is the file scope");
+        assert!(quicklink_conflict("s").is_some());
+        assert!(quicklink_conflict("mcp").is_some());
+        assert!(quicklink_conflict("design").is_none());
+        assert!(append_quicklink(String::new(), "f", &QuicklinkDraft {
+            name: "Figma".into(), kind: "url", target: "https://figma.com".into(),
+        }).is_err());
+
+        // ASCII-only keys meant a Chinese user could not name a quicklink in
+        // the language the thing they were naming was written in.
+        assert_eq!(normalize_quicklink_key(" 设计 ").unwrap(), "设计");
+        assert_eq!(normalize_quicklink_key("GH").unwrap(), "gh");
+        assert!(normalize_quicklink_key("a b").is_err(), "a space would split the query");
+        assert!(normalize_quicklink_key("a:b").is_err(), "and a colon is a scope");
+        assert!(normalize_quicklink_key("").is_err());
+
+        let text = "[设计]\nname = \"设计文档\"\nkind = \"url\"\ntarget = \"https://example.com/d\"\n";
+        assert!(fixed_quicklink_from(text, "设计").is_some(), "and it has to resolve once written");
+
+        // The suggestion was built by dropping every non-ASCII character, so a
+        // CJK-named file always opened the prompt blank.
+        let cn = crate::item::Item::new("/tmp/设计文档.pdf", crate::item::Kind::File)
+            .title("设计文档.pdf")
+            .put("path", "/tmp/设计文档.pdf");
+        assert_eq!(quicklink_suggestion(&cn), "设计文档");
+    }
+
+    /// The `{q}` half of the feature had no way in that was not hand-written
+    /// TOML — which is exactly the population least likely to write any.
+    #[test]
+    fn a_search_keyword_can_be_made_from_the_url_in_front_of_you() {
+        use crate::compute::*;
+
+        assert_eq!(
+            template_suggestion("https://jira.example.com/issues?jql=timeout"),
+            "https://jira.example.com/issues?jql={q}"
+        );
+        assert_eq!(
+            template_suggestion("https://example.com/s?lang=en&query=rust+async#top"),
+            "https://example.com/s?lang=en&query={q}#top",
+            "the last filled parameter is the term; the others are settings"
+        );
+        assert_eq!(template_suggestion("https://example.com/wiki"), "https://example.com/wiki/{q}");
+
+        let draft = template_draft("Jira", "https://jira.example.com/issues?jql={q}").unwrap();
+        assert!(draft.is_template());
+        assert!(template_draft("x", "https://example.com/s?q=fixed").is_err(), "no braces, no template");
+        assert!(template_draft("x", "not a url {q}").is_err());
+        assert!(
+            template_draft("x", "https://example.com/s?token=abc&q={q}").is_err(),
+            "a credential in the template is a credential in every search"
+        );
+
+        let made = append_quicklink(String::new(), "jira", &draft).unwrap();
+        let (url, _, term, key) = quicklink_from(&made, "jira api timeout").unwrap();
+        assert_eq!(url, "https://jira.example.com/issues?jql=api%20timeout");
+        assert_eq!((term.as_str(), key.as_str()), ("api timeout", "jira"));
+
+        // A key the person typed beats a display name another entry carries.
+        // `[g]` is named "Google", and it used to swallow a fixed `[google]`.
+        let both = concat!(
+            "[g]\nname = \"Google\"\nurl = \"https://www.google.com/search?q={q}\"\n",
+            "\n[google]\nname = \"My profile\"\nkind = \"url\"\ntarget = \"https://example.com/me\"\n",
+        );
+        assert!(exact_quicklink_key_from(both, "google"));
+        assert_eq!(fixed_quicklink_from(both, "google").unwrap().get("url"), "https://example.com/me");
+        assert_eq!(search_provider_from(both, "g").unwrap().get("provider"), "g");
+    }
+
+    /// A keyword the person invented outranks anything Prelude merely found.
+    #[test]
+    fn a_saved_quicklink_outranks_the_catalogue_it_points_into() {
+        use crate::item::{Item, Kind};
+
+        let text = "[notes]\nname = \"Notes\"\nkind = \"url\"\ntarget = \"https://example.com/notes\"\n";
+        let ql = crate::compute::fixed_quicklink_from(text, "notes").unwrap();
+        assert_eq!(ql.kind, Kind::Link, "the target's kind still drives Enter and ^K");
+        assert!(ql.is_quicklink());
+        assert_eq!(ql.style().1, "quicklink", "but the row says which one it is");
+        assert_eq!(ql.band(), Kind::QUICKLINK);
+
+        // Left in the target's band a File quicklink sat at 60, below every
+        // scope command in root search.
+        for kind in [Kind::File, Kind::Link, Kind::App, Kind::Dir, Kind::Search] {
+            let scope = Item::new("f:", kind);
+            assert!(crate::cache::by_rank(&ql, &scope) == std::cmp::Ordering::Less,
+                    "a quicklink must sort above a bare {kind:?} row");
+        }
+        // And not above the things the launcher is actually for.
+        let agent = Item::new("claude", Kind::Agent);
+        assert!(crate::cache::by_rank(&ql, &agent) == std::cmp::Ordering::Greater);
+
+        // Two quicklinks pointing at different kinds start level, so frecency
+        // alone orders them rather than Link-beats-App-beats-Dir-beats-File.
+        let file_ql = crate::compute::fixed_quicklink_from(
+            "[readme]\nname = \"readme\"\nkind = \"file\"\ntarget = \"/etc/hosts\"\n", "readme").unwrap();
+        assert_eq!(file_ql.score, ql.score);
+
+        // A search *result* is not a saved quicklink and must keep saying so.
+        let result = Item::new("https://x.test", Kind::Link).put("ql", "result").put("quicklink", "g");
+        assert!(!result.is_quicklink());
+        assert_eq!(result.style().1, "open");
+
+        // The kind column answers "what kind of thing is this", not "what will
+        // Enter do" — almost every other label is a noun naming a source, and
+        // Enter is already stated in the footer and in the ^K header. So both
+        // shapes of a Quicklink say so, and `search` is left meaning the one
+        // thing it names: a scope command into Prelude's own index.
+        let template = crate::compute::search_provider_from(
+            "[gh]\nname = \"GitHub\"\nurl = \"https://github.com/search?q={q}\"\n", "gh").unwrap();
+        assert_eq!(template.style().1, "quicklink");
+        assert_eq!(template.band(), Kind::QUICKLINK);
+
+        // `Kind::Search` carries both populations. A scope command is built in
+        // and goes to Prelude's index; it is not a Quicklink and must not
+        // borrow the word.
+        let scope = Item::new("f:", Kind::Search).put("mode", "complete-query");
+        assert!(!scope.is_quicklink());
+        assert_eq!(scope.style().1, "search");
+        assert!(crate::cache::by_rank(&template, &scope) == std::cmp::Ordering::Less,
+                "and the person's keyword still leads the built-in scope");
+    }
+
+    /// The panel refreshes itself behind your back, so the one thing it must
+    /// never do is move something you are looking at.
+    #[test]
+    fn a_background_refresh_only_touches_an_untouched_panel() {
+        use crate::refresh::may_redraw;
+
+        // A hidden panel waiting to be revealed: nothing typed, cursor where
+        // fzf drew it.
+        assert!(may_redraw("", "0"));
+        assert!(may_redraw("", ""));
+
+        // Somebody is typing. Reloading under a query would replace the
+        // results they are reading.
+        assert!(!may_redraw("c:", "0"));
+        assert!(!may_redraw("g", ""));
+        // Somebody has scrolled. A reload resets the cursor to the top, which
+        // is the same as losing their place.
+        assert!(!may_redraw("", "4"));
+        // Anything unrecognised is treated as "in use". The cost of being
+        // wrong that way is a stale row; the other way it is a moving list.
+        assert!(!may_redraw("", "unexpected"));
+    }
+
+    /// A built-in keyword is chosen for everybody and can be corrected by
+    /// nobody who does not know it is there, so it has to clear the bars a
+    /// hand-made one is merely checked against.
+    #[test]
+    fn built_in_keywords_shadow_nothing_and_every_one_of_them_resolves() {
+        use crate::compute::*;
+
+        let shipped = crate::minitoml::parse(QUICKLINKS_DEFAULT);
+        let mut seen: Vec<&str> = Vec::new();
+        for (marker, entries) in DEFAULT_BLOCKS {
+            assert!(
+                QUICKLINKS_DEFAULT.lines().any(|l| l == *marker),
+                "{marker} must also be in the file a fresh install gets, or the \
+                 migration will append the block on top of entries already there"
+            );
+            for (key, name, url) in *entries {
+                assert!(normalize_quicklink_key(key).is_ok_and(|k| k == *key), "{key} is not a usable keyword");
+                assert!(quicklink_conflict(key).is_none(), "{key} is a scope command");
+                // An exact keyword resolves ahead of the catalogue, so a
+                // built-in `claude` would push the Agent row it names down a
+                // line for every user, by default.
+                assert!(
+                    !crate::agent::SPECS.iter().any(|s| s.name == *key),
+                    "{key} is an Agent's name"
+                );
+                assert!(!seen.contains(key), "{key} is shipped twice");
+                seen.push(key);
+
+                assert_eq!(shipped.get(*key).and_then(|b| b.get("url")).map(String::as_str), Some(*url),
+                           "{key} differs between the migration and the shipped file");
+                assert_eq!(shipped.get(*key).and_then(|b| b.get("name")).map(String::as_str), Some(*name));
+
+                // Every one has to actually go somewhere. A template is
+                // checked with a term in it; a fixed entry as it stands.
+                if url.contains("{q}") {
+                    let (made, _, term, got) = quicklink_from(QUICKLINKS_DEFAULT, &format!("{key} a b")).unwrap();
+                    assert_eq!((got.as_str(), term.as_str()), (*key, "a b"));
+                    assert!(crate::compute::web_url(&made).is_some(), "{key} builds {made}");
+                } else {
+                    assert!(fixed_quicklink_from(QUICKLINKS_DEFAULT, key).is_some(), "{key} does not resolve");
+                }
+            }
+        }
+        assert!(seen.contains(&"so") && seen.contains(&"hf") && seen.contains(&"ccdocs"));
+    }
+
+    /// An exact keyword is the one row the person definitely meant. It is not
+    /// the only row they can have meant, and it used to be the only row shown:
+    /// at `githu` both `Search GitHub` and a `github` quicklink were on
+    /// screen, and the next keystroke deleted one of them.
+    #[test]
+    fn an_exact_keyword_leads_the_list_without_clearing_it() {
+        use crate::compute::{fixed_quicklink_from, quicklink_items_from, quicklink_with_neighbours};
+
+        let text = concat!(
+            "[gh]\nname = \"GitHub\"\nurl = \"https://github.com/search?q={q}\"\n",
+            "\n[github]\nname = \"My GitHub\"\nkind = \"url\"\ntarget = \"https://github.com/me\"\n",
+        );
+        let catalogue = quicklink_items_from(text);
+        let exact = fixed_quicklink_from(text, "github").unwrap();
+
+        let rows = quicklink_with_neighbours(exact.clone(), "github", &catalogue);
+        assert_eq!(rows[0].get("quicklink"), "github", "the keyword leads");
+        assert!(
+            rows.iter().skip(1).any(|it| it.get("quicklink") == "gh"),
+            "and Search GitHub is still there: {:?}",
+            rows.iter().map(|it| it.title.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rows.iter().filter(|it| it.get("quicklink") == "github").count(),
+            1,
+            "the row the exact match resolved to is not also listed underneath"
+        );
+
+        // A catalogue cached by an older build carries none of the new data
+        // keys — and a template row is admitted to root search by its Kind, so
+        // nothing else would have caught it. Identity holds on (kind, cmd) too.
+        let template = crate::compute::search_provider_from(text, "gh").unwrap();
+        let mut legacy = template.clone();
+        legacy.data.clear();
+        assert_eq!(legacy.kind, crate::item::Kind::Search);
+        let rows = quicklink_with_neighbours(template, "gh", &[legacy]);
+        assert_eq!(rows.len(), 1, "an upgrade must not show the same row twice");
+    }
+
+    /// `ql:` is the only place the whole set is visible, so it has to show the
+    /// entries that do not work as well as the ones that do.
+    #[test]
+    fn broken_entries_are_visible_where_they_can_be_repaired() {
+        let text = concat!(
+            "[ok]\nname = \"OK\"\nkind = \"url\"\ntarget = \"https://example.com\"\n",
+            "\n[bad]\nname = \"Bad\"\nkind = \"wat\"\ntarget = \"???\"\n",
+            "\n[f]\nname = \"Shadowed\"\nkind = \"url\"\ntarget = \"https://example.com/f\"\n",
+        );
+        // The ordinary catalogue is right to drop what it cannot render.
+        let listed: Vec<String> = crate::compute::quicklink_items_from(text)
+            .iter().map(|it| it.get("quicklink").to_string()).collect();
+        assert_eq!(listed, ["f", "ok"], "a row that cannot be built is not a search result");
+
+        let problems = |t: &str| {
+            let mut v: Vec<String> = Vec::new();
+            for (key, why) in crate::compute::quicklink_problems_in(t) {
+                v.push(format!("{key}: {why}"));
+            }
+            v
+        };
+        let found = problems(text);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().any(|p| p.starts_with("bad:")));
+        assert!(found.iter().any(|p| p.starts_with("f:")), "a shadowed keyword is broken, not healthy");
+    }
+
     #[test]
     fn typed_local_paths_are_file_objects_with_quicklink_and_quick_look() {
         use crate::defaults::Surface;
@@ -1132,20 +1443,43 @@ mod tests {
         let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
         assert_eq!(ids(&app), ["reveal-finder", "copy-file", "copy", "insert", "quicklink-create", "trash"]);
 
+        // A URL is where a `{q}` template comes from, so it carries both.
         let link = Item::new("https://example.com", Kind::Link).put("url", "https://example.com");
-        assert_eq!(ids(&link), ["secondary", "copy", "quicklink-create"]);
+        assert_eq!(ids(&link), ["secondary", "copy", "quicklink-create", "quicklink-template"]);
 
         let dir = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
         assert_eq!(ids(&dir), ["secondary", "copy-file", "insert", "copy", "quicklink-create"]);
 
         let linked = Item::new("/tmp/readme.md", Kind::File)
             .put("path", "/tmp/readme.md")
-            .put("quicklink", "readme")
+            .quicklink("readme", "fixed")
             .put("quicklink_managed", "true");
         let linked_ids = ids(&linked);
         assert!(!linked_ids.contains(&"quicklink-create".to_string()));
+        // Every edit a quicklink needs, without opening the file.
+        for id in ["quicklink-rename", "quicklink-relabel", "quicklink-retarget", "quicklink-remove"] {
+            assert!(linked_ids.contains(&id.to_string()), "{id} missing from {linked_ids:?}");
+        }
         assert!(linked_ids.iter().position(|id| id == "quicklink-remove").unwrap()
             < linked_ids.iter().position(|id| id == "trash").unwrap());
+
+        // A hand-written entry is removable too. It used to be refused with
+        // "that quicklink is managed in the config file", which reads as the
+        // opposite of what it meant.
+        let handwritten = Item::new("/tmp/readme.md", Kind::File)
+            .put("path", "/tmp/readme.md")
+            .quicklink("readme", "fixed")
+            .put("quicklink_managed", "false");
+        assert!(ids(&handwritten).contains(&"quicklink-remove".to_string()));
+
+        // The result of a search is the URL most worth keeping, and it was the
+        // one row where saving was suppressed.
+        let result = Item::new("https://www.google.com/search?q=rust", Kind::Link)
+            .put("url", "https://www.google.com/search?q=rust")
+            .put("ql", "result")
+            .put("quicklink", "g");
+        assert!(ids(&result).contains(&"quicklink-create".to_string()));
+        assert!(ids(&result).contains(&"quicklink-template".to_string()));
 
         let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
         let clip_ids = ids(&clip);

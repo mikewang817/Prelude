@@ -23,6 +23,7 @@ pub fn label_width() -> usize {
         Kind::all()
             .iter()
             .map(|k| dwidth(k.style().1))
+            .chain(std::iter::once(dwidth(Kind::QUICKLINK_STYLE.1)))
             .max()
             .unwrap_or(9)
     })
@@ -164,7 +165,7 @@ pub fn render_files(items: &[Item], width: usize) -> String {
         };
         let parent_width = path_width.saturating_sub(dwidth(&tag_text));
         let parent = dtrunc_middle(&flatten(&parent), parent_width);
-        let (color, label) = item.kind.style();
+        let (color, label) = item.style();
 
         out.push_str(&title);
         out.push_str(&" ".repeat((tw + 2).saturating_sub(dwidth(&title)).max(1)));
@@ -202,7 +203,7 @@ pub fn render_with(
 
     let mut out = String::with_capacity(items.len() * 96);
     for it in items {
-        let (color, label) = it.kind.style();
+        let (color, label) = it.style();
         let title = dtrunc(&flatten(&it.title), tw);
         let pad = " ".repeat((tw + 2).saturating_sub(dwidth(&title)).max(1));
 
