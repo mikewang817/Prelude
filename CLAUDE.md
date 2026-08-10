@@ -678,15 +678,24 @@ wrong, so nothing would ever have replaced it, and it would have gone on being
 late for as long as the machine stayed up. A version that only advances on
 format changes strands the one kind of fix a person can actually feel. **A path transfer is cheap for Prelude and not for the terminal, so scale
 before handing it over.** The native transfer writes a path and returns in
-under 2ms, which is why this looked free; the decode is on the other side of
-it, and Prelude deletes and re-transmits its placement on *every* render, so a
-3.7MB Retina screenshot is re-decoded on every redraw. Revealing the panel is a
-redraw — which is why entering `c:` and toggling the panel back stuttered while
-everything else stayed instant, and why the symptom never appeared in any
-timing of `_preview`. `scaled_for_preview` puts a pane-sized copy in the cache
-tier, keyed by path and mtime: measured 86ms of decode down to 22ms, and 30ms
-per image down to 2ms once warm. The directory is pruned, because clipboard
-images age out of their own history and their thumbnails would not. A Ghostty or
+under 2ms, which is why this looks free; the decode is on the other side of it,
+and a 3.7MB Retina screenshot measured 86ms. That is paid on every *focus
+change* — every arrow press through `c:` — so `scaled_for_preview` puts a
+pane-sized copy in the cache tier, keyed by path and mtime: decode 86ms down to
+22ms, and 30ms per image down to 2ms once warm. The pane is sixty columns;
+sending thirty times the pixels it can show is work nobody sees. The directory
+is pruned, because clipboard images age out of their own history and their
+thumbnails would not.
+
+It is *not* paid per redraw, and the first version of this note said it was.
+fzf runs a preview command on focus change and on nothing else — measured: a
+resize does not re-run it, a redraw does not re-run it. So revealing the panel
+does not re-decode anything, and an explanation that sounded mechanical ("we
+delete and re-transmit every render, therefore every redraw decodes") was an
+inference from the code's shape that one experiment falsified. Where the
+remaining reveal-time cost lives is the terminal's own compositing of a
+placement it already holds — which is Ghostty's side of the line, and smaller
+now only because the picture is. A Ghostty or
 Kitty preview uses the native `t=f` path transfer before Chafa, with one fixed
 Prelude image id deleted before every render; this keeps an arrow press to a
 path-sized terminal message and stops graphics placements overlapping after
