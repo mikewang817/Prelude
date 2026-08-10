@@ -101,6 +101,109 @@ fn clear_native_image() {
     }
 }
 
+/// The widest a preview is ever asked to be, in pixels.
+///
+/// A pane is around sixty columns of a terminal cell; twelve hundred pixels
+/// covers that on a Retina display with room to spare, and is the point past
+/// which more pixels are thrown away by the terminal rather than seen.
+const PREVIEW_MAX_WIDTH: u32 = 1200;
+
+/// A screenshot small enough that scaling it would cost more than sending it.
+const SCALE_ABOVE_BYTES: u64 = 256 * 1024;
+
+/// FNV-1a, for naming a cache entry. Not a security boundary — it answers
+/// "have I already scaled this exact file" and nothing else, so a hashing
+/// dependency would be paid at every startup for a filename.
+fn fnv64(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+/// Hand the terminal a picture the size of the pane, not the size of the
+/// screenshot.
+///
+/// The native path transfer writes a path and returns in under two
+/// milliseconds — which is why this looked free and was not. The decode
+/// happens on the other side of it: a 3372×730 Retina screenshot is 3.7MB of
+/// PNG, measured at ~40ms to decode and scale, and Prelude deletes and
+/// re-transmits its placement on *every* render, so that cost is paid again on
+/// every redraw. Revealing the panel is a redraw, which is why entering `c:`
+/// and then toggling the panel back made it stutter while everything else
+/// stayed instant.
+///
+/// The pane is sixty columns wide. Sending thirty times the pixels it can show
+/// is work nobody sees, so it is done once, into the cache tier, keyed by the
+/// source path and its mtime — the same rule as every other expensive thing
+/// here. Failure returns the original: a slow preview is better than none.
+pub(crate) fn scaled_for_preview(path: &str) -> Option<String> {
+    let source = std::path::Path::new(path);
+    let meta = source.metadata().ok()?;
+    if meta.len() < SCALE_ABOVE_BYTES {
+        return None;
+    }
+    let stamp = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let key = format!("{path}\u{1f}{stamp}\u{1f}{PREVIEW_MAX_WIDTH}");
+    let name = format!("preview-{:016x}.png", fnv64(&key));
+    let cached = crate::paths::cache().join("previews").join(name);
+    if cached.is_file() {
+        return Some(cached.to_string_lossy().into_owned());
+    }
+    std::fs::create_dir_all(cached.parent()?).ok()?;
+    // `sips` ships with macOS, so this adds no dependency and no binary size —
+    // the same reasoning that made `shasum` the hash for release archives.
+    let out = std::process::Command::new("sips")
+        .args(["-s", "format", "png", "-Z", &PREVIEW_MAX_WIDTH.to_string()])
+        .arg(source)
+        .arg("--out")
+        .arg(&cached)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !out.success() || !cached.is_file() {
+        // A partial file would be served forever as if it were a picture.
+        let _ = std::fs::remove_file(&cached);
+        return None;
+    }
+    prune_previews(cached.parent()?);
+    Some(cached.to_string_lossy().into_owned())
+}
+
+/// Clipboard images age out of their own history; their thumbnails would not.
+/// Keyed by mtime as well as path, every edit of a file leaves another one
+/// behind, so the directory is bounded rather than trusted.
+const KEEP_PREVIEWS: usize = 120;
+
+fn prune_previews(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some((meta.modified().ok()?, e.path()))
+        })
+        .collect();
+    if files.len() <= KEEP_PREVIEWS {
+        return;
+    }
+    files.sort_by_key(|(when, _)| *when);
+    for (_, path) in files.iter().take(files.len() - KEEP_PREVIEWS) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Render an image inside fzf's Quick Look area.
 ///
 /// Native protocols come first. Ghostty can load a file by path, so a focus
@@ -125,6 +228,11 @@ fn show_image(path: &str, dimensions: Option<(usize, usize)>) -> bool {
         .unwrap_or(24)
         .saturating_sub(2)
         .max(1);
+
+    // The terminal decodes what it is handed, on every render. Hand it the
+    // pane, not the screenshot.
+    let scaled = scaled_for_preview(path);
+    let path = scaled.as_deref().unwrap_or(path);
 
     match native_kind() {
         "kitty" => {

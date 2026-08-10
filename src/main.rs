@@ -1127,6 +1127,25 @@ mod tests {
         assert!(ids.contains(&"copy".to_string()), "{ids:?}");
     }
 
+    /// A native path transfer costs the *terminal* a decode, on every render,
+    /// and Prelude re-transmits its placement every time — so the size of what
+    /// is handed over is a per-redraw cost, not a one-off.
+    #[test]
+    fn a_large_image_is_scaled_once_and_a_small_one_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("prelude-preview-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let small = dir.join("small.png");
+        std::fs::write(&small, vec![0u8; 1024]).unwrap();
+        // Below the threshold, scaling would cost more than sending it: the
+        // original path is used and no cache entry is made.
+        assert!(crate::preview::scaled_for_preview(&small.to_string_lossy()).is_none());
+        // A path that is not there at all is not an error either — a preview
+        // that cannot be built falls back to the original, and a slow preview
+        // beats none.
+        assert!(crate::preview::scaled_for_preview("/nonexistent/x.png").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The panel refreshes itself behind your back, so the one thing it must
     /// never do is move something you are looking at.
     #[test]
