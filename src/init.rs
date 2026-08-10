@@ -98,20 +98,20 @@ prelude tell "migration finished — 41k rows, no errors"
 ```
 
 **See the other agents on this machine, and talk to them.** `--json` gives
-you their project, state, working directory and pane address:
+you each live Run's Agent, project, state, working directory and pid address:
 
 ```sh
 prelude fleet --json
 prelude say api-gateway "I changed the auth schema — you will need to rebase"
 ```
 
-`say` types the line straight into that agent's conversation, attributed so
-it knows the message came from a peer rather than from the human. Address it
-by project, by agent name, or by pane. If more than one thing matches it will
-refuse and list them rather than deliver to the wrong one.
+`say` leaves an attributed line in that Run project's Prelude inbox; it never
+types into another terminal. Address the Run by exact project, pid/address, or
+by Agent/project text. If anything other than one Run matches, Prelude refuses
+and lists the candidates rather than delivering to the wrong project.
 
-**Collect what was left for you**, when an agent could not be typed into
-directly:
+**Collect lines left for this working directory.** Every `say` uses the inbox,
+wherever the Agent is running:
 
 ```sh
 prelude inbox --json && prelude drain

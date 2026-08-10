@@ -45,7 +45,7 @@ use std::time::Duration;
 /// Something Prelude is willing to do about a finding, once a person has said
 /// yes to that finding in particular.
 ///
-/// Deliberately a closed set of two. Both act only on files and records
+/// Deliberately a closed set. Every repair acts only on files and records
 /// Prelude wrote itself: a repair that reached into an agent's own directories
 /// would be a destructive action arriving through a diagnostic, which is not a
 /// door this codebase has anywhere else.

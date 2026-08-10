@@ -1,401 +1,354 @@
-# The action panel
+# Defaults and the action panel
 
-`Enter` does the default thing for the selected row. `Ctrl+K` opens the
-alternatives.
+The behavior in this document comes from `src/defaults.rs`, `src/actions.rs`,
+`src/ui.rs`, and `src/panel.rs`.
 
-The panel is deliberately not a complete inventory of everything Prelude can
-possibly do. It is the short list of things a person is likely to want after
-selecting this particular object.
+`Enter` performs the focused row's default. `Ctrl+K` opens a modal list of
+alternatives for that Item. The footer and the action-panel header both state
+the current default; it is not repeated as a selectable action.
 
-## Interaction
+## Two surfaces
 
-The selected item's title and kind are in the border. Enter's default is a
-non-selectable header:
+Prelude has one Item model and two handoff surfaces:
 
-```text
- README.md · file
- Default: Open it · Enter
+| Surface | Command handoff |
+|---|---|
+| zsh widget | `INSERT` replaces the current line; `RUN` replaces and submits it |
+| global Ghostty panel | both `INSERT` and `RUN` copy the same command text; the panel then closes |
 
- Action › Insert the full path
-          Open with…
-          Open in editor
-          Reveal in Finder
-          Copy path
-          Change default app for .md files…
-          Move it to the Trash…
-```
+The global panel has no destination shell, so it cannot preserve the difference
+between “insert” and “insert and press Enter.” Commands produced by custom
+actions—resume, fork, editor, login, install, remove, and similar commands—obey
+the same rule.
 
-The consequences are simple:
+Direct object actions do not use that handoff. Files, folders, applications,
+and URLs go to macOS Launch Services on both surfaces. Actions that explicitly
+run inside Prelude, such as MCP inspection or `Run and show output`, also behave
+the same on both surfaces.
 
-- `Esc` from a submenu returns to the action list.
-- `Esc` from the action list returns to the main search.
-- Copying and viewing details leave the action list open.
-- Opening, inserting, running and navigating complete the launcher action.
-- Destructive actions are red, last, and confirm when they cannot be undone.
+`PRELUDE_CLASSIC_ENTER`, or the corresponding `set:` setting, is the exception:
+when enabled, every default becomes a command/text insertion instead of the
+per-Kind behavior below.
 
-The prompt says `Action ›`, not `⌘`: the action panel remains portable and
-terminals do not receive the Command key. The dedicated global panel has one
-explicit exception outside this menu: its own Ghostty config translates
-`Cmd+Enter` to Prelude's private `Ctrl+G`, and only a File/Find footer labels it
-`Open folder`. The footer says `Choose`, not `Run`, because an action may copy,
-reveal, open, or remove something.
+## Default behavior
 
-## Rules
+With the default **per kind** setting:
 
-### 1. Do not repeat Enter
+| Kind | Enter |
+|---|---|
+| Question (`Msg`) | prompt for an answer and write it to the bus |
+| Agent | hand over the Agent command for further editing |
+| Run | hand over `cd` for the Run's working directory |
+| idle Session | hand over its native resume command |
+| Session attached to a live Run | hand over `cd` for that active project instead of starting a competitor |
+| one-off `@agent …` or `/skill …` result | run the Agent's non-interactive form inside Prelude and show its answer |
+| Skill object | hand over an invocation through the first owning Agent |
+| MCP server | run the owner's `mcp get` inside Prelude and show its output |
+| File / indexed file / Config | open through Prelude's remembered app or the macOS default |
+| Folder | open in Finder |
+| Application | launch through Launch Services |
+| URL / Quicklink result | open in the default browser |
+| Calculator / conversion / translation | copy the result |
+| Prelude setting | carry out the setting-specific edit |
+| clipboard record | hand its text or payload path back to the surface |
+| History, script, `$PATH`, snippet, SSH, container, Git, port, process, system command | hand over the command for review |
+| incomplete search provider or scope command | keep Prelude open and complete the query prefix |
 
-The main footer already says what Enter does, and the action header repeats it
-for context. It is not a selectable row. Opening `Ctrl+K` means the user wants
-an alternative to Enter.
+The secondary action is generally the opposite: acting objects offer text, and
+handed-over commands may offer execution. It has no dedicated key because
+terminal applications do not portably deliver Command, Option, Shift+Enter, or
+Ctrl+Enter. It appears as the first relevant row in `Ctrl+K` instead.
 
-The secondary action remains available where it adds a real choice, because it
-has no portable terminal key of its own. Rich kinds such as skills and running
-agents use a more specific label instead of a generic secondary row.
+## Panel behavior
 
-### 2. Say whether an action runs or inserts
+- `Escape` from a submenu returns to the action list.
+- `Escape` from the action list returns to the main search.
+- Copy, details, Skill Diff, cached MCP tools, and MCP comparison remain in the
+  panel after completion.
+- A canceled confirmation returns to the action list.
+- Other successful actions close the launcher or return their handoff.
+- Destructive entries are red and sorted last.
+- Parameter choices—Agent, Skill, MCP server, or copy—use a submenu only when
+  more than one choice exists.
 
-A label must describe the observed result:
+The dedicated global panel has one shortcut outside `Ctrl+K`: Ghostty translates
+`Cmd+Enter` to a private `Ctrl+G`, and Prelude opens the containing directory
+only for File and indexed-File rows. The inline zsh widget never advertises it.
 
-- `Open in editor` opens it.
-- `Insert cd command` returns a command to the prompt.
-- `Insert login command` does not claim that login already happened.
-- `Insert stop command` does not claim that a container was stopped.
+## Current contextual actions
 
-An explicit `Run now` action runs immediately. Irreversible operations confirm
-first, with Cancel selected by default.
-
-Files, folders, applications and URLs are not shell commands. Their defaults
-call macOS Launch Services directly with separate arguments; no `open ...`
-line is pasted, executed by the shell, or recorded in shell history.
-
-### 3. Prefer intent over completeness
-
-There is no generic checklist appended to every kind. In particular, Prelude
-does not add `Ask an agent about this`, `Go to project folder`, `Run here`, or
-`Copy to clipboard` merely because it can construct something plausible.
-Each kind opts into actions that answer a real use case.
-
-### 4. Preserve per-kind order
-
-The order written for a kind is the product decision. It is stable and is not
-re-ranked by frecency. The only global reorder is moving destructive actions
-to the end.
-
-### 5. The surface matters, but only to the wording
-
-`Ctrl+R` hands text to the prompt you are standing at; the global panel has no
-prompt and copies. Enter does the same thing in both — what changes is what may
-honestly be said about it, so `Insert into prompt` becomes `Copy the command`
-and `Insert the full path` becomes `Copy the full path`. Everything that acts —
-opening a file, launching an application, running something inside Prelude —
-reads identically, because it is identical.
-
-One class of row disappears rather than being reworded. `Run it in the shell`
-and the generic `Run now` mean "hand it over already submitted", which needs a
-shell on the receiving end; on a clipboard a submitted command and an
-unsubmitted one are the same bytes, so the row would be Enter under a bolder
-name. `Run and show output` stays in both surfaces, because it runs inside
-Prelude and shows you the result.
-
-There used to be a second *host* rather than a second surface: a tmux popup
-over an agent's input box, where Enter's answers inverted because the
-destination was a conversation. That surface is gone, and with it the menus
-that omitted resume and lend commands so they would not be pasted into a chat
-as prose.
-
-## Current menus
-
-The exact rows are conditional: unavailable targets, missing paths and healthy
-authentication states are omitted.
+Rows below are conditional on the fields present in the Item and the capability
+flags in `src/agent.rs`.
 
 ### Agent
 
-Quick Look shows the executable, conventional settings path, Skill/MCP/Session
-counts, active projects, most recent conversation and the operations the typed
-Agent registry says this CLI supports. It starts no Agent CLI.
+An installed Agent row may offer:
 
-- Start now
-- Choose a current running instance
-- Resume the latest Session
-- Browse recent Sessions in a picker
-- Ask a one-off question and show the answer here, where supported
-- Open settings when the file exists
-- Run Agent diagnostics explicitly
-- Add or remove the Agent from Favorites
+- choose one of its current Runs and hand over `cd`
+- resume its newest visible Session
+- browse up to 100 of its Sessions
+- ask a one-off question and show the answer inside Prelude
+- open its existing settings file
+- run `prelude doctor agents` inside Prelude
+- add or remove the Agent from Favorites
+- start immediately from the zsh surface through the generic secondary action
 
-The same registry owns invocation syntax, settings and support flags for
-Claude, Codex, pi and OpenCode. An action absent there cannot appear here by
-being hard-coded in a second list.
+The Agent registry, not string matching in the panel, decides invocation,
+settings path, one-off ask, resume, fork, Skill, and MCP support.
 
-### Running agent
+### Run
 
-- Show its last response
-- Leave it a message, which waits in its inbox
-- Insert a command to change to its project
-- Copy its PID
-- End the agent
+A live Run offers:
 
-Every Run answers all of these, whatever started it. Two more were offered to
-the subset with a tmux pane — Enter putting the cursor in it, and a message
-typed straight into it — and both are gone: Prelude does not reach into a
-terminal it does not own, and a menu that is richer for some rows than others
-is harder to read than one that treats them alike.
+- show the last response and effective context
+- leave a message in the Run project's Prelude inbox
+- hand over `cd` when a working directory is known
+- copy the PID
+- end the process after confirmation
 
-Quick Look for a Run is `running::effective_context` and nothing of its own:
-Agent, project, branch, Session, state, start time, model, the capabilities
-this Run confirmed against what its Agent merely has installed, and then what
-the conversation last said.
+Prelude does not focus, split, or type into another terminal. Every Run is
+addressed by Agent/project/PID facts, not by a terminal pane.
 
-`effective_context` has exactly one caller, and it is this panel. `prelude
-fleet` renders its own columns and shows no branch, model or capabilities, and
-`control.rs` re-derives what it needs from the same underlying helpers —
-`branch_label`, `model_of`, `confirmed_capabilities` — rather than from the
-list. Those helpers are the shared part, and they are shared precisely because
-two surfaces deriving one fact separately is how they start disagreeing about
-it. Anything a second surface needs from a Run belongs in a helper both call,
-not in a second reading of the row.
+### Waiting question
 
-### Question from an agent
+A question posted through `prelude ask` offers:
 
-- Answer “go ahead”
-- Answer “no”
-- Show the conversation context
-- Go to the agent full-screen
-- Copy the question
+- answer `go ahead`
+- answer `no`
+- show its stored context
+- copy the question
 
-A custom answer remains Enter's default.
-
-### Prelude setting
-
-- Enter changes the setting, named for what that means: `Add a folder…`,
-  `Change the chord…`, `Turn Quick Look off`, `Open the file`
-- Search roots additionally: remove a folder and show every root and whether
-  it still exists
-- File index is a separate row whose Enter rebuilds it; its panel shows status
-  and reaches the index file
-- Scalar settings can be reset to their documented default; a reset never
-  removes roots, snippets, Quicklinks, favorites or open-with rules
-- The global chord additionally: start the panel, restart it after a rebuild
-- Anything file-backed: open it, open it in `$EDITOR`, reveal it, copy its path
-
-The row states the effective value and whether it is a default, saved value or
-environment override, so the panel does not have to. Nothing here repeats
-Enter — the settings are the rows most likely to break that rule, because each
-one has an obvious primary, so a test walks all of them.
+A custom answer remains Enter's default. There is no “go to conversation”
+action because the bus does not retain a terminal address.
 
 ### Session
 
-- Enter resumes an idle Session; a Session a live Run owns hands over that Run's project rather than starting a competing resume
-- Resume now, only when no active Run owns it
-- Fork it through the native Claude, Codex or pi CLI; offer nothing where the Agent has no known fork verb
-- Resume it with a Skill, or with an MCP server, that its Agent does not own — for one run only, and absent where that Agent has no one-run flag
-- Pin or unpin it
-- Rename it, or restore the Agent's native title
-- Archive it without touching the native conversation; archived Sessions appear under `s:is:archived`
-- Show conversation details
-- Start fresh in the same project
-- Insert a `cd` command
-- Export the untouched JSONL into Prelude's private exports directory
-- Export a portable Markdown transcript beside it
-- Reveal the authoritative native file
-- Copy the session ID
-- Move an inactive native conversation to the Trash, after confirmation
+Native Sessions currently come from Claude Code, Codex, and pi JSONL files. A
+Session may offer:
 
-Archive is Prelude metadata and is reversible. Trash is offered only for an
-inactive Session, re-finds the fleet at action time, accepts only canonical
-JSONL files below the known Claude, Codex and pi Session roots, and never
-unlinks the file.
+- resume now when no live Run owns it
+- fork through the native CLI for Claude Code, Codex, or pi
+- resume with a non-owned Skill or MCP server for one Run, only where the
+  target Agent has supported one-run syntax
+- pin or unpin
+- apply a local name or restore the native title
+- archive or restore through Prelude metadata
+- show conversation details
+- start a fresh Agent in the same project
+- hand over `cd`
+- export a private raw JSONL copy
+- export a readable, redacted Markdown transcript
+- reveal the native Session file
+- copy the native Session id
+- move an inactive recognized native Session to the Trash
 
-The two exports are not alternatives. The raw JSONL is authoritative and is
-what you hand back to the Agent that wrote it; the Markdown one is what you
-send to a person, redacted and free of tool-call plumbing. Both land in
-Prelude's own private exports directory.
+An active Session does not offer resume, capability-assisted resume, archive,
+or Trash. Before trashing, Prelude refreshes the fleet and refuses any exact or
+ambiguous live relationship. The path must canonicalize to a `.jsonl` file
+under a known Claude Code, Codex, or pi Session root.
 
-Resuming with a borrowed capability follows the same rule as forking: three of
-the eight Agent/capability pairings have no one-run syntax at all, and a
-command assembled for one of those would look right on the prompt and fail
-after the launcher had closed. Those Agents are offered nothing. Neither entry
-appears against a live Run, for the reason `Resume now` does not: it would
-start a competitor. The capability itself is chosen after the verb, in a
-picker of its own, so drawing the panel never costs a walk of every Skill
-directory.
+Session metadata is stored in Prelude's private `sessions.json`; rename, pin,
+and archive do not modify the native conversation. An archived Session attached
+to a live Run is visible until the Run exits, while retaining its archive flag.
 
-The picker lists only what the Session's Agent does not already own, because
-that is what borrowing is: a claude Session offered a one-run borrow of
-claude's own nine Skills is a nine-row question with no answer in it.
-`~/.agents/skills` is a location rather than an Agent — `missing_agents`
-reports a Skill that lives only there as missing from every Agent — so a shared
-Skill stays in the list. With nothing left to offer the action says so instead
-of opening an empty picker.
+Raw and Markdown exports are intentionally different. The raw file is copied
+byte-for-byte for the owning Agent. The Markdown transcript omits tool-call
+arguments and harness material and applies credential redaction for a person to
+read.
 
 ### Skill
 
-- Add or remove it from Favorites; this is a Prelude preference and changes no Skill copy
-- Archive it in Prelude, or restore it from `skill:is:archived`
-- Run with an owner agent
-- Prepare a one-off borrowed run
-- Install into another agent
-- Compare divergent copies with a recursive, read-only Diff
-- Replace one divergent copy from another only after showing that Diff; the old target moves to the Trash
-- Read the instructions
-- Open `SKILL.md` in the editor
-- Open all copies, only where there is more than one
-- Delete a copy, recoverably
+Skills are merged by frontmatter/folder name across five roots: Claude Code,
+shared `~/.agents`, Codex, pi, and OpenCode. A Skill row may offer:
 
-Replacement re-hashes source and target and refuses if either changed after
-the comparison. A source with credential-like material is never copied.
-Agent choices use a submenu. A submenu with one possible target is collapsed
-into a direct action.
+- run through an Agent that owns a copy
+- hand over the bare `/name` command
+- hand over `Read <SKILL.md> and follow it.` for any Agent
+- prepare a supported one-run loan to an installed Agent that lacks it
+- copy the complete tree permanently into another supported Agent
+- compare divergent copies with `diff -ru`
+- replace one divergent copy from another after a fresh hash check, Diff, and
+  confirmation; the old copy goes to the Trash
+- page the frontmatter description
+- hand over an editor command for `SKILL.md`
+- open every copy when more than one directory exists
+- delete one named Agent copy to the Trash
+- archive or restore the merged Skill in Prelude
+- add or remove it from Favorites
 
-A Skill merged across four Agents is four directories behind one row, and
-`dir` is only ever the first of them. `Open all copies` is that target made
-explicit, so it appears only where there is more than one — with a single copy
-`Open` already is it, and a panel whose fifth row repeats its fourth teaches
-you not to read it. Quick Look states the same thing as data: a modification
-time per copy, so a divergence says which way round to replace, and a warning
-line for any symlink that is broken or resolves outside the Skill.
+One-run Skill borrowing currently exists for Claude Code and pi. Codex and
+OpenCode can still be pointed at the Skill file; all four registry Agents can
+receive a permanent Skill copy.
 
-Archive changes only Prelude's view. Every copy stays in its native Agent
-directory, Favorites are retained, and restoring removes only the archive
-flag. Archived Skills leave Home, root search, slash invocation and ordinary
-capability pickers; `skill:is:archived` is the recovery surface and
-`skill:is:all` shows both states.
+Full-tree identity includes scripts, references, and symlinks while excluding
+VCS/cache metadata. A missing hash produces `unknown`; matching public hashes
+produce `identical`; different hashes produce `divergent`; redacted private
+content prevents an equality claim. Sensitive or incompletely read sources are
+not copied, lent, or used for replacement.
+
+Archive is a Prelude view overlay. It preserves every native copy and every
+Favorite, removes the Skill from ordinary inventory and slash invocation, and
+is reversible from `skill:is:archived`.
 
 ### MCP server
 
-At a shell, Enter shows what the server exposes. It can be added to or removed
-from Favorites without changing any owner definition. Opening the owning config is
-not the server's primary purpose.
+MCP inventory currently comes from Claude Code and Codex owner CLIs. Enter runs
+the owner's `mcp get` inside Prelude. Conditional alternatives include:
 
-Alternatives are:
+- show cached tools
+- refresh owner-reported status; Claude is labelled `Test connection now`
+- refresh stdio tool inventory with an explicit MCP handshake
+- prepare a supported one-run borrow for another Agent
+- hand over an owner-CLI install command for another Agent
+- compare redacted owner variants and their structural public-definition Diff
+- prepare a remove-and-install replacement command after showing that comparison
+- hand over a login command for auth/failure states
+- open the owner configuration when a path exists
+- copy the server name
+- hand over the owner-CLI remove command
+- archive or restore all variants sharing the normalized capability id
+- add or remove it from Favorites
 
-- Archive it in Prelude, or restore it from `mcp:is:archived`
-- Show cached actual tools when the background MCP handshake succeeded
-- Test Claude connection health now, or refresh Codex's owner-reported status
-- Refresh an enabled stdio tool inventory explicitly
-- Show owner-reported configuration details
-- Prepare one-off use with another supported agent
-- Insert an install command for review
-- Compare structurally redacted definitions when several Agents own the same server
-- Prepare a remove-and-install replacement command only after showing that comparison
-- Insert a login command when authentication is required
-- Open the owning configuration when one exists
-- Copy the server name
-- Insert a remove command
+Claude Code and Codex have one-run and permanent MCP syntax in the current
+registry. pi and OpenCode do not. An owner-account server marked non-portable
+has no borrow/install/replacement target. Sensitive definitions are never
+inlined into a command: Claude may receive a private `0600` staged file; a
+target that only accepts an unsafe inline form is refused.
 
-Complete MCP definitions are never retained in an Item or cache. Definition
-fingerprints omit env/header values and credential-bearing arguments. A
-replacement command is inserted for review, never run automatically, and is
-refused when the source cannot be represented without private fields.
-Account-hosted servers without a transferable local definition offer no
-borrow, install or replacement action. HTTP/hosted tool inventory is labelled
-unsupported when owner authentication is unavailable. Current Claude and Codex
-CLI help exposes no server-level Enable/Disable verb, so Prelude does not invent
-one.
+Complete MCP definitions are resolved from the owner CLI only on the explicit
+action that needs them. Ordinary Items, list caches, and Control JSON retain
+transport, status, bounded tools, a redacted public shape, and a semantic
+fingerprint—not env/header values or credential-bearing arguments.
 
-MCP archive is not Disable under another name: every Agent definition and
-connection remains untouched. Variants sharing one normalized capability id
-archive together, Favorites survive, `mcp:is:archived` restores them and
-`mcp:is:all` includes both archived and ordinary rows.
+Only enabled stdio servers are started for background tool inventory. HTTP and
+hosted servers report `unsupported` when Prelude cannot reuse owner auth. The
+current Claude/Codex CLI syntax has no verified server-level Enable/Disable
+verb, so Prelude offers none.
 
-### File and config
+MCP archive is not Disable: it edits only
+`$XDG_DATA_HOME/prelude/capabilities.json`. Native definitions and connections
+remain unchanged. Restore from `mcp:is:archived`.
 
-- Insert the full path
-- Open with another application
-- Open in the editor
-- Reveal in Finder
-- Copy the path
-- Change the default application for the extension
-- Create a Quicklink
-- Move to the Trash
+### Prelude setting
 
-Config rows omit deletion. Files always go to the Trash rather than being
-unlinked, and protected paths are refused after canonicalization.
+`set:` rows show the effective value and its source. Enter is specific to the
+row: add a root, rebuild the index, prompt for a key/chord/directory/height,
+toggle Quick Look or Enter mode, or open a list-backed file.
 
-### Application
+The action panel may additionally:
 
-- Reveal in Finder
-- Copy the application path
-- Insert the `open` command
-- Create a Quicklink
-- Move the application to the Trash
+- remove and inspect search roots
+- show index status
+- reset scalar preferences to their actual defaults
+- start or restart the global panel
+- create/open the owning settings file
+- hand over an editor command, reveal the file, or copy its path
 
-There is no `cd into the app`: entering an application bundle is not a normal
-launcher task.
+Resetting the global hotkey means `Cmd+Shift+Space`; resetting the panel
+directory means `$HOME`. `reset all` affects only key, height, Quick Look, and
+Enter mode. It never removes roots, snippets, Quicklinks, Favorites, or
+open-with rules. A valid environment override remains effective over a saved
+value and is named on the row.
 
-### Port and process
+### File, indexed file, and Config
 
-- Inspect the process or listener
-- Copy the PID
-- Kill the process
+File rows may offer:
 
-The kill is red, last, and confirmed. There is no harmlessly-labelled generic
-runner that reaches the same kill command.
+- hand over the full path
+- open once with another application
+- hand over an `$EDITOR` command
+- reveal in Finder
+- copy a real Finder file object
+- copy the path as text
+- remember an application per extension
+- create/manage a Quicklink
+- move the file to the Trash
 
-### Container
+Config rows use the same open actions but omit Trash. The default opens through
+Launch Services; `$EDITOR` is an explicit command-producing alternative.
 
-- Insert the follow-logs command
-- Insert the restart command
-- Copy the container name
-- Insert the stop command
+### Folder, application, and link
 
-The labels are explicit because these commands return to the prompt for review.
+- Folder: default opens Finder; alternatives copy a Finder object, hand over
+  `cd`, copy the path, and create/manage a Quicklink.
+- Application: default launches it; alternatives reveal it, copy the app or its
+  path, hand over an `open` command, create/manage a Quicklink, and move the app
+  to the Trash.
+- Link: default opens the browser; alternatives hand over/copy the URL and
+  create/manage a Quicklink.
 
-### Command rows
+Quicklink removal removes only the keyword. The target remains untouched.
+Prelude-created fixed entries can be removed directly; hand-written templates
+are edited in `quicklinks.toml`.
 
-History, scripts, PATH commands, snippets, system commands and git commands
-may offer:
+### Port, process, and container
 
-- Run now
-- Run and show output inside Prelude
-- Copy the command
+Ports and processes offer inspection, PID copy, and process termination.
+Termination runs `kill` directly and confirms first.
 
-Only commands whose output belongs in a small Prelude window get the second
-entry. Agent TUIs, SSH and interactive containers do not.
+A running Docker container offers command text for:
 
-### Link, directory and results
+- `docker logs -f`
+- `docker restart`
+- `docker stop`
 
-These stay intentionally short:
+It also copies the container name. These commands are handed over rather than
+run automatically.
 
-- Link: Enter opens the default browser directly; the panel inserts or copies the URL.
-- Directory: Enter opens Finder; the panel copies the Finder object, inserts `cd`, or copies the path.
-- Files, folders, links, configs and applications can create a Quicklink.
-- Files, folders and applications can be copied as real Finder objects, separately from copying path text.
-- Calculator: insert or copy the result.
-- Translation: insert the translation or copy its source.
-- Clipboard text: copy or insert it, and translate it locally.
-- Clipboard files/images: insert their path(s), restore the original pasteboard object, open or reveal it.
+### Command-like rows
 
-A two-line action panel is an honest result, not a gap to fill.
+History, project scripts, `$PATH`, snippets, system commands, and Git rows can
+offer `Run and show output` inside Prelude. The zsh surface may additionally
+offer `Run now`; the global panel suppresses that row because “insert” and
+“run” are identical clipboard bytes there.
 
-### Search commands and Quicklink management
+SSH and interactive Agent commands do not receive an output-in-Prelude action.
+Snippets expand `{{name}}` to visible `<name>` placeholders before handoff.
 
-A search provider without an argument is a `Search` command rather than a
-half-formed link. Enter keeps the launcher open and fills its alias (`g `,
-`b `, and so on) into the query; its panel opens the provider configuration.
-Scope commands behave the same way with `f:`, `c:` and the other scopes, but
-need no action-panel entries.
+### Clipboard and computed results
 
-A stable object without a quicklink offers `Create Quicklink…`. This includes
-an existing local path pasted directly into the query: it is resolved into the
-same File, Directory or Application Item used by `f:`, so Quick Look and the
-action panel do not need a separate path-shaped exception. A resolved
-quicklink instead offers `Edit Quicklink Definition`, and action-created
-entries offer `Remove Quicklink…` before any action that removes the target.
-Removing the name leaves the file, folder, application or URL untouched.
-Hand-written template definitions are edited in the config rather than
-rewritten by Prelude.
+- Text clips: hand back the full text; alternatives restore/copy it or translate
+  it to English/Chinese.
+- Finder clips: restore the original file-list pasteboard object; alternatives
+  open/reveal the first file and copy paths as text.
+- Image clips: restore the original image; alternatives open/reveal its private
+  payload and copy the payload path.
+- Translation: copy the translated result by default; the action panel can copy
+  the original.
+- Calculator/conversion: copy the result by default; the opposite inserts or
+  copies it according to the surface, with no extra panel rows.
 
-## Implementation
+## Safety boundaries
 
-| File | Responsibility |
+- External objects are passed to `/usr/bin/open` as separate arguments, never
+  assembled into an `open …` shell line for their default action.
+- Protected roots, `$HOME`, system trees, and container directories are refused
+  by `paths::is_protected` before Trash operations.
+- Skill deletion accepts only a canonical direct child of one of the five known
+  Skill roots.
+- Session Trash accepts only an inactive canonical native JSONL under a known
+  Session root and refreshes live relationships immediately before moving it.
+- Skill replacement shows Diff, hashes source and target again, refuses changed
+  or sensitive sources, trashes the old target, and removes a failed half-copy.
+- Process/Run termination confirms with Cancel selected first.
+- Other recoverable removal actions implement their own confirmation and move
+  to the Trash; Docker stop and MCP remove are only handed-over commands.
+
+## Implementation map
+
+| Code | Responsibility |
 |---|---|
-| `defaults.rs` | Enter and the secondary action for each host |
-| `actions.rs::actions_for_host` | contextual alternatives and their order |
-| `actions.rs::panel` | modal loop, submenus, header and stay/close behavior |
-| `actions.rs::is_destructive` | danger styling and last-position invariant |
-| `ui.rs::confirm` | confirmation with Cancel first |
-| `preview.rs` | full-area Quick Look text and image rendering; reusable detail text for action views |
+| `defaults.rs::on_enter` | per-Kind Enter decision |
+| `defaults.rs::on_secondary` | default opposite, including surface suppression |
+| `actions.rs::actions_for` | contextual alternatives and order |
+| `actions.rs::panel` | modal loop, submenus, stay/close behavior |
+| `actions.rs::apply` | action execution and handoff |
+| `actions.rs::is_destructive` | red styling and last-position rule |
+| `actions.rs::needs_confirming` plus action-specific guards | confirmations |
+| `ui.rs::perform` | defaults that act or emit `INSERT`/`RUN` |
+| `panel.rs` | clipboard collapse for the global surface |
+| `preview.rs` | Quick Look and reusable detail text |
 
-`prelude _actions '<row json>'` prints a shell-host panel without opening fzf.
-Tests pin the important invariants and representative category menus.
+`prelude _actions '<rendered row>'` prints the current panel without launching
+fzf. Tests assert that Enter is not repeated, destructive actions remain last,
+and clipboard-only handoff does not expose a duplicate shell-run alternative.

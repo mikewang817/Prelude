@@ -294,7 +294,10 @@ pub fn ask(text: &str, wait: u64, no_wait: bool) -> i32 {
         return 2;
     }
     sweep();
-    post(&format!("{} asks", m.label()), text);
+    // The notification is another rendering of the stored message. Use the
+    // cleaned text rather than the caller's original so a credential-like
+    // line cannot bypass the bus filter on its way to Notification Center.
+    post(&format!("{} asks", m.label()), &m.text);
 
     if no_wait {
         eprintln!("prelude: asked — collect the answer with  prelude answer-of {}", m.id);
@@ -356,7 +359,7 @@ pub fn tell(text: &str) -> i32 {
         ..Default::default()
     };
     let _ = save(&m);
-    post(&m.label(), text);
+    post(&m.label(), &m.text);
     0
 }
 

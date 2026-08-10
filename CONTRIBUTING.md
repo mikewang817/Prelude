@@ -1,78 +1,132 @@
 # Contributing
 
-Thanks for looking. Bug reports, especially ones with a screenshot of the
-list rendering wrong, are genuinely the most valuable thing you can send.
+Bug reports—especially a screenshot plus the query and terminal width—are very
+useful. Prelude is a latency-sensitive launcher, so behavioral changes should
+include both tests and a gather measurement.
 
 ## Developer Certificate of Origin
 
 This project uses the [Developer Certificate of Origin](https://developercertificate.org/)
-rather than a Contributor License Agreement. Sign off your commits:
+rather than a Contributor License Agreement. Sign off commits:
 
 ```sh
 git commit -s -m "your message"
 ```
 
-That adds a `Signed-off-by:` line, which certifies you wrote the patch or
-otherwise have the right to submit it under this project's license. No
-paperwork, no copyright assignment — you keep the copyright to your work.
+The `Signed-off-by:` line certifies that you wrote the patch or otherwise have
+the right to submit it. Contributions remain under Apache-2.0; contributors
+keep their copyright.
 
-**What this means for both of us.** Contributions land under Apache-2.0 and
-stay there. The project cannot relicense your code or move it into a
-proprietary component without asking you first. If that ever becomes
-necessary, contributors will be asked individually.
-
-## Getting set up
+## Build and check
 
 ```sh
-cargo build --release
-cargo test
-cargo clippy --release      # expected to be warning-free
+cargo build --release --locked
+cargo test --locked
+cargo clippy --release --all-targets --locked -- -D warnings
+git diff --check
+./target/release/prelude bench
 ```
 
-`prelude doctor` reports what it can see on your machine, and
-`prelude bench` measures candidate-gathering.
+`bench` must remain below the 40 ms gather budget. Internal commands such as
+`_dump`, `_dump-root`, `_dump-all`, `_dynamic`, `_footer`, `_preview`, and
+`_actions` make launcher behavior testable without driving an fzf terminal.
 
-## What matters in this codebase
+For global-panel changes, a release build is not enough: the long-lived panel
+parent keeps running the binary it started with. Restart it before manual use:
 
-**Latency is the product.** A launcher that takes 250ms to appear feels
-broken. `prelude bench` must stay under 40ms, and startup matters just as
-much as gathering — fzf re-invokes the binary on *every keystroke* to decide
-what to show, so anything added to process startup is paid hundreds of times
-per session. Be sceptical of new dependencies for this reason.
+```sh
+prelude global stop
+./target/release/prelude global start
+```
 
-**Sources must degrade to nothing.** A source that shells out and fails, or
-finds nothing, returns an empty list. It never blocks, never panics, never
-prints. Anything slower than ~25ms belongs behind the cache tier rather than
-in the hot path.
+## Product rules
 
-**Never execute without the user seeing it.** Enter inserts, it does not run.
-This is not a preference, it is the safety property that makes the whole
-thing bindable to a key you press all day. New actions default to inserting;
-running is opt-in and labelled.
+### Latency is the product
 
-**Never index or transmit credentials.** `secrets.rs` filters history and
-clipboard entries. If you add a source that reads user data, route it
-through there.
+The initial gather runs once when Prelude opens, and fzf starts Prelude helper
+processes on every query change. Startup cost and per-keystroke helper cost both
+matter.
 
-## Rendering, which is fiddlier than it looks
+- Be skeptical of new dependencies.
+- Start subprocess-backed fast sources together and optimize the current slowest
+  one rather than adding serial work.
+- Anything too slow or network-dependent belongs behind a cache or an explicit
+  action.
+- A source that fails degrades to an empty or previous cached result; it must not
+  panic or print into the launcher.
+- `is_special` recognizes query intent only. Evaluation belongs in the dynamic
+  helper, not in the recognition path.
 
-Three traps that have each already caused a bug:
+### Commands are handed over; objects act
 
-- **Column widths must be constants, not measurements.** The per-keystroke
-  helper renders in a *separate process*. If both sides measure their own
-  widths they drift apart and every computed row lands in the wrong column.
-- **Display width is not character count.** CJK characters are two columns
-  wide, and East Asian *Ambiguous* characters (`·` `—` `“”` `→`) are one or
-  two depending on the terminal. Use `width::dwidth`, never `.len()` or
-  `.chars().count()`.
-- **fzf matches against displayed text.** A row computed *from* the query can
-  therefore never fuzzy-match it. That is why `is_special()` exists and why
-  it must stay pure pattern-matching — it runs on every keystroke, so it must
-  not evaluate anything.
+The default behavior is per Kind:
+
+- shell commands are inserted into the zsh prompt, or copied from the global
+  panel
+- files, folders, applications, and URLs act directly through macOS Launch
+  Services
+- explicit `Run now` can submit a command only from the zsh surface
+- explicit `Run and show output` runs inside Prelude
+
+Do not reduce this to “Enter always inserts” or “Enter always runs.” Add or
+change defaults in `defaults.rs`, contextual alternatives in `actions.rs`, and
+keep [docs/ACTIONS.md](docs/ACTIONS.md) synchronized.
+
+### Never guess Agent facts
+
+`agent.rs` is the only built-in Agent registry. Native Session files, Agent CLI
+output, and live processes are authoritative. Prelude may derive stable ids,
+relationships, redacted fingerprints, and local archive/Favorite overlays; it
+must not invent a model, capability, state, token count, cost, or supported CLI
+verb.
+
+Read [docs/AGENT-CONTROL-PLANE.md](docs/AGENT-CONTROL-PLANE.md) before changing
+Agent, Run, Session, Skill, MCP, Config, Home, bus, or Agent Doctor behavior.
+Update that file in the same commit.
+
+### Never retain credentials
+
+`secrets.rs` filters history, clipboard text, messages, tags, transcripts, Skill
+material, and configuration evidence. Complete MCP definitions may be resolved
+for an explicit action but must not survive in an Item, ordinary cache, preview,
+or Control JSON.
+
+Private staging belongs under Prelude's XDG directories with restrictive
+permissions. Destructive native-file operations canonicalize their ownership
+boundary, confirm with Cancel first, and move to Trash.
+
+## Rendering
+
+Three invariants are easy to break:
+
+- **Compute layout once and pass it down.** The initial launcher and
+  per-keystroke helper are separate processes. Shared title/column widths must
+  be computed from the gathered catalogue and passed to rendering; do not let
+  each process derive a different layout. `f:` is the deliberate width-derived
+  filename/parent exception.
+- **Display width is not character count.** CJK is two columns, and East Asian
+  Ambiguous characters depend on the terminal. Use `width::dwidth` and the
+  width helpers rather than `.len()` or `.chars().count()`.
+- **fzf matches displayed text.** Computed and scoped rows cannot fuzzy-match
+  the syntax that produced them. Their intent must be recognized and fzf search
+  disabled while Prelude supplies the rows.
+
+## Documentation
+
+The user-facing reference is intentionally code-shaped:
+
+- `README.md`: product boundary and installation
+- `docs/SEARCH.md`: `compute.rs`, scope/source behavior, and cache limits
+- `docs/ACTIONS.md`: `defaults.rs`, `actions.rs`, and surface handoff
+- `docs/GLOBAL-HOTKEY.md`: `global.rs`, `panel.rs`, and `install.sh`
+- `docs/AGENT-CONTROL-PLANE.md`: Agent registry, graph, sources, bus, and Doctor
+
+When behavior changes, update the corresponding document and generated text
+such as `prelude --help` or `prelude init agent`. Historical implementation
+plans do not substitute for describing the current code.
 
 ## Platform
 
-macOS only at present. Ports, processes, apps, clipboard, system commands and
-translation all use macOS-specific interfaces. Linux support would be welcome;
-it means adding an implementation behind each of those sources rather than
-changing the core.
+Prelude currently supports macOS only. Applications, clipboard, Finder tags,
+processes, ports, Launch Services, the Ghostty panel, and translation use
+macOS-specific interfaces. The inline shell integration is zsh-specific.

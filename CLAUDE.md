@@ -17,8 +17,8 @@ cargo clippy --release     # expected warning-free
 ```
 
 `_surface`, `_panel`, `_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`,
-`_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`,
-`_lend-mcp`, `_actions` are internal entry points. They
+`_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_refresh-path`,
+`_copy-skill`, `_rm-skill`, `_lend-skill`, `_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
 
@@ -51,9 +51,9 @@ they are sitting in.
 
 ## The launcher panel
 
-`docs/GLOBAL-HOTKEY.md` is the acceptance record. The global launcher is a
-**Ghostty quick terminal**: a hidden, dedicated Ghostty instance configured by
-`~/.config/prelude/quick-terminal.ghostty`, hosting one long-lived
+`docs/GLOBAL-HOTKEY.md` is the current implementation record. The global
+launcher is a **Ghostty quick terminal**: a hidden, dedicated Ghostty instance
+configured by `~/.config/prelude/quick-terminal.ghostty`, hosting one long-lived
 `prelude _panel` loop. Ghostty registers the chord itself with a `global:`
 keybind, so nothing of Prelude's runs when the key is pressed. On macOS that
 binding is an Accessibility event tap: installation opens the exact permission
@@ -87,8 +87,9 @@ login and executes whatever the binary held then. Each press *does* spawn the
 new binary as its child — so fzf, the rows and the footer all update, and it
 looks like the build took — but the delivery decision is made by the parent,
 which is still old. That failure mode reads as "the change did nothing", and
-it lies in the most convincing possible way. Run `prelude global stop && prelude
-global start` after any build you intend to press the key against. The Ghostty
+it lies in the most convincing possible way. Run `prelude global stop &&
+./target/release/prelude global start` after any build you intend to press the
+key against. The Ghostty
 process remains visible to launchd; `initial-window = false` means it owns no
 surface and starts no `prelude _panel` child until the first press.
 
@@ -159,11 +160,10 @@ capability scopes, slash invocation and Session borrow pickers. Per-keystroke
 rules read the decorated `archived` field and never the metadata file.
 
 `docs/AGENT-CONTROL-PLANE.md` is the implementation source of truth. Read it
-before changing Agent, Run, Session, Task, Skill, MCP, Config, Home, messaging
-or Agent doctor behaviour. Work from its current milestone, update acceptance
-criteria and progress evidence in the same commit, and never call a milestone
-complete while it still has unchecked criteria. A conversation summary is not
-a substitute for updating that file.
+before changing Agent, Run, Session, Skill, MCP, Config, Home, messaging or
+Agent doctor behaviour, and update its current behavior, support matrix and
+limitations in the same commit. A conversation summary is not a substitute for
+updating that file.
 
 ## Prelude's own settings
 
@@ -553,9 +553,10 @@ Forking uses each native CLI (`claude --fork-session`, `codex fork`, `pi
 Session. The explicit raw export stays under Prelude's 0700 data directory.
 
 **A doctor reports; `--repair` re-verifies before it acts.** `doctor.rs`
-offers exactly two repairs, both on Prelude's own records, each confirmed
-separately with Cancel first. A report is printed, read, and then answered one
-question at a time, so minutes pass between seeing something and acting on it
+offers one closed repair class: moving a Prelude-owned staging entry to the
+Trash. Each finding is confirmed separately with Cancel first. A report is
+printed, read, and then answered one question at a time, so minutes pass
+between seeing something and acting on it
 — and staging names are deterministic (`borrow/<server>.json`,
 `borrow/<skill>/`), so a borrow staged *while the confirmation is on screen*
 wears the name the question is about. Every `Repair` therefore carries the

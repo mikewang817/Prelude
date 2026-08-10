@@ -1,7 +1,8 @@
 //! Prelude — a general launcher in the terminal.
 //!
-//! One hotkey, fuzzy search across everything you might want to run, and it
-//! *types the command for you* rather than running it.
+//! One launcher over shell commands, macOS objects, and local coding agents.
+//! Commands are handed back for review; files, folders, applications, and URLs
+//! act directly through Launch Services.
 
 mod actions;
 mod agent;
@@ -318,8 +319,8 @@ const HELP: &str = "\
 prelude — a general launcher in the terminal, and a message bus for agents
 
 HUMANS
-  prelude                search · Ctrl-R puts the result on your prompt,
-                         the global panel puts it on the clipboard
+  prelude                search · commands go to the Ctrl-R prompt or the
+                         global panel's clipboard; macOS objects act directly
   prelude reply          answer the oldest question an agent is blocked on
   prelude fleet          every agent running on this machine, and its state
   prelude fleet --status one short line for a status bar
@@ -1831,6 +1832,12 @@ mod tests {
                 "{} got a generic secondary row",
                 it.title
             );
+            if it.get("setting") == "hotkey" {
+                assert!(
+                    acts.iter().any(|(_, label, ..)| label == "Reset to Cmd+Shift+Space"),
+                    "the action label must name the same default settings::reset applies"
+                );
+            }
         }
     }
 

@@ -1,228 +1,272 @@
 # Search model
 
-Prelude has a small home and a large catalogue. They are deliberately not
-the same list.
+This document describes the query behavior implemented in `src/compute.rs`,
+`src/cache.rs`, and the source modules under `src/sources/`.
 
-## Empty query: agent home
+Prelude does not send its complete catalogue to fzf for every query. It builds
+three files when the launcher opens:
 
-The home is the agent inventory: the things this launcher exists to manage,
-on one screen, because looking at it *is* how you manage it.
+- `home.txt`: the empty-query Agent home
+- `list.txt`: the small root-search catalogue
+- `search-items.json`: the complete gathered snapshot used by explicit scopes
 
-- questions waiting for a person (`Msg`)
-- installed agents, as launch entries (`Agent`)
-- running agents (`Run`)
-- their non-archived skills (`Skill`) and MCP servers (`Mcp`)
-- the conversations you have had with them (`Session`)
+The per-keystroke helper filters those files. It does not gather sources again.
 
-History, files, applications, `$PATH`, clipboard and machine objects are still
-gathered at startup, but are not rendered into the home feed — that is what
-stops the first screen being a list of two thousand files.
+## Empty query: Agent home
 
-This was briefly an attention list instead, where healthy Skills and servers
-were pushed behind `/name` and `mcp:` so that only exceptions reached the home.
-It reads well as a principle and was wrong in practice: a launcher you open to
-see what you have is not improved by hiding what you have, and the panel went
-quiet exactly when nothing was broken, which is most of the time.
+The home contains, in Kind order:
 
-Sessions are the one kind counted rather than filtered. There are hundreds of
-them, so `gather` puts only the newest `sessions::IN_MAIN_LIST` in the list at
-all and `s:` owns the rest. Archived Skills and MCP servers are also absent by
-design, but remain in the complete snapshot for `skill:is:archived` and
-`mcp:is:archived` to recover.
+1. unanswered questions posted with `prelude ask`
+2. installed Agent launch rows
+3. live Agent Runs
+4. non-archived Skills
+5. non-archived MCP servers
+6. up to the 15 newest visible Sessions
 
-### Home order
+Files, applications, commands, history, clipboard records, ports, processes,
+containers, settings, and search commands are gathered but do not appear on an
+empty query.
 
-`cache::by_rank`, exactly as everywhere else: the kind band decides and
-frecency orders within it. A question blocking somebody leads, then the
-agents, what they are running, Skills, MCP, and the recent conversations
-underneath. Agent, Skill and MCP favourites receive a bonus only after source
-rank and frecency and still cannot cross their kind band. `home_items` is a
-filter and nothing more — it leaves the order it was handed alone — because
-one ordering rule for the launcher was enough.
+The list is already sorted before `home_items` filters it. Kind decides the
+band; source rank, Favorites, and frecency only reorder objects inside the same
+Kind. A Favorite cannot lift a Skill above an Agent or an MCP server above a
+Run.
 
-## Ordinary query: root commands
+Archived Sessions normally leave the home. If an archived Session is attached
+to a live Run, it becomes visible while that Run exists; the archive flag is
+not cleared. Archived Skills and MCP servers remain hidden until explicitly
+requested.
 
-The first non-whitespace character searches a small command layer: agent-home
-items, search providers, scope commands and fixed Quicklinks. Agent management
-is discoverable by ordinary names — Agent Control Center, Running Agents, Past
-Conversations, Skills, MCP Servers and Agent Config — and selecting one fills
-its prefix into the same box. Prefixes are accelerators, not prerequisite
-knowledge. It does not
-expose the complete gathered catalogue to fzf. An exact `f` therefore shows
-one `Search Files` command, whose Enter completion is `f:`; it does not fuzzy
-match every file, command and history row containing the letter.
+## Ordinary root search
 
-Large sources require their scope (`app:Zed`, `cmd:cargo`, `proj:dev`). This
-keeps one-letter root queries useful and makes the transition from command to
-its results explicit. Clearing the query reloads the agent home.
+Once a non-special query is typed, fzf searches a smaller root catalogue:
+
+- unanswered questions
+- Agent, Run, Skill, and MCP inventory rows
+- search-provider commands
+- scope commands such as `Past Conversations` and `Search Files`
+- fixed Quicklinks
+
+Session and Config objects themselves are not in root search; their visible
+scope commands lead to `s:` and `cfg:`. Large sources such as files, history,
+applications, and `$PATH` commands also require their scope. For example, exact
+`f` produces the `Search Files` command; Enter changes the query to `f:` rather
+than matching every file containing the letter.
+
+Clearing the query returns to the Agent home. Type `:` to list every scope.
 
 ## Scopes
 
-An explicit scope disables fzf's search and lets Prelude filter the cached
-items itself. That matters because `c: git` cannot fuzzy-match a clipboard
-row whose displayed text does not contain `c:`.
-
-| Prefix | Contents |
+| Prefix | Items selected from the cached snapshot |
 |---|---|
-| `a:` | agents, running agents, skills, MCP and agent config |
-| `r:` | running agents, classified live |
-| `s:` | all conversation sessions |
-| `skill:` | non-archived installed Skills; `/` remains the invocation accelerator |
-| `f:` | current-project files and the indexed roots; `set:` decides which roots |
-| `c:` | text, Finder files and images, strictly newest first |
-| `h:` | shell history |
-| `app:` | applications |
-| `cmd:` | `$PATH` and system commands |
-| `dir:` | zoxide and recent `cd` targets |
-| `proj:` | current-project scripts, files and Git rows |
-| `ssh:` | SSH hosts |
-| `snip:` | snippets |
-| `port:` | listening TCP ports |
-| `proc:` | processes |
-| `docker:` | running containers |
-| `mcp:` | non-archived MCP servers |
-| `cfg:` | agent configuration |
-| `set:` | Prelude's own settings, each with its current value |
+| `a:` | questions, Agents, Runs, Skills, MCP servers, and Agent Config |
+| `r:` | live Runs only |
+| `s:` | Claude Code, Codex, and pi Sessions |
+| `skill:` | non-archived Skills merged across Agent directories |
+| `f:` | current-project files plus the explicit file index |
+| `c:` | clipboard text, Finder file lists, and images |
+| `h:` | up to 3,000 recent unique non-secret shell-history commands |
+| `app:` | installed macOS applications |
+| `cmd:` | `$PATH` executables and built-in system commands |
+| `dir:` | zoxide results and directories recovered from shell history |
+| `proj:` | current-project scripts, project files, and Git rows |
+| `ssh:` | hosts from `~/.ssh/config` |
+| `snip:` | snippets from `snippets.toml` |
+| `port:` | cached listening TCP ports |
+| `proc:` | processes with CPU and memory fields |
+| `docker:` | running Docker containers |
+| `mcp:` | non-archived Claude/Codex MCP inventory rows |
+| `cfg:` | existing Agent settings and instruction files |
+| `set:` | Prelude settings with their effective values and sources |
 
-The bare prefix is useful: `c:` lists recent clipboard entries and `f:` lists
-files. `:` produces searchable scope commands; Enter on one fills its prefix
-into the same search box. `@` lists agent-question commands before the
-question exists.
+A bare prefix lists the scope. Scoped queries disable fzf's own fuzzy filter;
+Prelude applies the term against the cached Items so syntax such as `c:` is not
+required to appear in a row's displayed text.
 
-The explicit `prelude index` rebuild reads each indexed file's Finder tags
-through Foundation and stores bounded, credential-filtered names beside its
-path. Ordinary `f:` words match filename, parent path or tag. A `tag:` word
-matches metadata only (`f:tag:work`), and quotes keep a multi-word name intact
-(`f:tag:"Project Alpha"`). No Spotlight or metadata process runs in the
-per-keystroke helper; an old path-only index remains readable until rebuilt.
+### Agent filters
 
-`/` has the two states a provider has, and for the same reason. While the name
-is *incomplete* it browses: `/cnipa-oo` lists every Skill whose name contains
-that, as Skill rows. The moment it is a name — `/cnipa-ooa`, with or without
-arguments after it — the query has stopped describing a search and started
-being an invocation, so the single row is the run that invokes it and the
-Skill row is gone. That is deliberate; nothing else in the launcher shows two
-rows for one intent. A Skill's own row — with its copies, its integrity and
-its `^K` panel — is reached by `skill:`, `/`, `a:`, or ordinary search while
-it is not archived. Archive also removes slash invocation: putting a Skill
-away but continuing to offer `/name` would preserve the most consequential
-route and hide only its label. `skill:is:archived` is where it is restored.
-`/` never lists MCP servers at all: they are not invoked by name, and `mcp:`
-is their scope.
-
-Agent sessions intentionally do not appear under `a:`. Hundreds of old
-conversations turned the agent overview into a session browser; `s:` already
-has that job. Archived Skills and MCP servers also stay out of `a:`; their
-kind-specific archive scopes are the explicit recovery surface.
-
-Control filters are explicit words inside `a:`:
+`a:` accepts these structured words:
 
 | Query | Meaning |
 |---|---|
-| `a:waiting` | anything waiting — a run gone quiet, or a question blocked on you |
-| `a:working`, `a:dead` | the rest of a Run's own state vocabulary |
-| `a:claude Prelude` | an agent name and a project together |
-| `a:agent:claude`, `a:project:Prelude` | the exact forms; a project is never widened into a substring |
-| `a:using deploy` | runs that explicitly loaded that Skill or MCP server |
-| `a:without deploy` | runs that did not |
+| `a:waiting` | waiting Runs and unanswered questions |
+| `a:working` | working Runs |
+| `a:dead` | dead Runs if one exists in the supplied snapshot; the live source normally drops exited processes |
+| `a:claude Prelude` | free-text Agent/project search |
+| `a:agent:claude` | exact Agent filter |
+| `a:project:Prelude` | exact project name or full path |
+| `a:state:waiting` | explicit Run-state filter |
+| `a:using deploy` | Runs that explicitly loaded the named Skill or MCP capability |
+| `a:without deploy` | Runs that loaded none of the named capabilities |
 
-`using` and `without` read the capability a run *confirmed* — the flags it was
-started with — and never the installed inventory: "claude has forty skills"
-and "this run loaded one" are different facts. Only a `Run` can answer them,
-so both filters restrict the result to runs; letting `without` fall through to
-skills, servers and agents would return the whole scope minus one row and call
-it an answer. Two `using` words are *and*ed, because two capabilities are two
-independent facts about one run; `without` is the negation of that, so a run
-is kept only when it loaded none of them. `state:`, `agent:` and `project:`
-are *or*s within themselves — one run cannot be in two projects.
+`using` and `without` inspect capability names extracted from that Run's launch
+arguments. They do not mean “installed for this Agent.” Multiple `using` values
+are ANDed; repeated values inside `agent:`, `project:`, or `state:` are ORed.
+Capability names with spaces can be quoted:
 
-A capability name may contain spaces, so the value is quote-aware exactly as
-`s:` is: `a:using "claude.ai Google Drive"` and `a:using:"claude.ai Google
-Drive"` both hold together, while unquoted the first word goes to the keyword
-and the rest become needles. A Skill name is an identifier and never needs
-this; an MCP server's name is whatever its owner called it, and several of the
-common ones have spaces.
+```text
+a:using "claude.ai Google Drive"
+a:using:"claude.ai Google Drive"
+```
 
-`project:` reads all three places a project is written down: the `project`
-field a Run carries, its working directory, and the `projects` array
-an Agent carries one entry of per live run. Reading only the first two hid the
-agent working in the very project asked about while listing its run.
+Sessions are deliberately excluded from `a:` and remain under `s:`. Archived
+Skills and MCP servers are also excluded. Unknown filter-shaped words are kept
+as literal search needles, which visibly collapses the result instead of
+silently widening it.
 
-A filter-shaped word that named nothing — `a:using` with nothing after it,
-`a:agent:`, `a:state:banana` — is searched for literally, on `s:`'s rule: a
-list that visibly collapses is a question you can see went wrong, while a
-filter that quietly matches everything looks exactly like one that worked.
+### Session filters
 
-Every one of these filters runs against the one cached snapshot the launcher
-already wrote. No Agent CLI, no directory walk, no relationship join
-— `scoped_rows` is called from the per-keystroke helper.
-
-Session filters are explicit words inside that scope:
+Session discovery currently reads native Claude Code, Codex, and pi JSONL
+files. `s:` returns at most 80 matching rows and supports:
 
 | Query | Meaning |
 |---|---|
-| `s:is:pinned` | pinned, non-archived conversations |
-| `s:is:active` | conversations attached to a live Run |
-| `s:is:archived` | archived conversations only |
-| `s:is:all` | include archived conversations in ordinary text search |
+| `s:is:pinned` | pinned visible Sessions |
+| `s:is:active` | Sessions linked to live Runs, including archived ones |
+| `s:is:archived` | Sessions carrying the archive flag, even if active |
+| `s:is:all` | include archived Sessions in ordinary text search |
+| `s:agent:codex` | exact Agent |
+| `s:project:Prelude` | exact directory basename or full path |
+| `s:since:30m` | modified within 30 minutes |
+| `s:since:24h` | modified within 24 hours |
+| `s:since:7d` | modified within 7 days |
+| `s:since:2w` | modified within 2 weeks |
 
-Archived Sessions are excluded from bare `s:` and from the small recent set
-in the general catalogue. Renamed Sessions still match their native title.
+Filters and ordinary words can be combined. Project values are quote-aware.
+Several `agent:` or `project:` values are ORed; different filter categories are
+ANDed. A duration requires a positive number and `m`, `h`, `d`, or `w` (long
+forms such as `days` also work). Invalid forms such as `since:7` or
+`is:yesterday` are searched literally and therefore normally return nothing.
 
-Capability archive filters are parallel but live in each capability's own
-scope:
+A local Session rename does not remove the native title from search.
+
+### Capability archive filters
 
 | Query | Meaning |
 |---|---|
 | `skill:is:archived` | archived Skills only |
-| `skill:is:all` | archived and non-archived Skills |
-| `mcp:is:archived` | archived MCP server variants only |
-| `mcp:is:all` | archived and non-archived MCP server variants |
+| `skill:is:all` | archived and visible Skills |
+| `mcp:is:archived` | archived MCP capability rows only |
+| `mcp:is:all` | archived and visible MCP capability rows |
 
-Bare `skill:` and `mcp:` exclude archived rows. Archive is Prelude-only: it
-does not remove a Skill copy, disable a server or alter any Agent file. MCP
-owner variants sharing one normalized capability id archive together. An
-unknown filter such as `skill:is:unknown` is retained as a search term and
-collapses the list visibly instead of silently returning every row.
+Archive is a Prelude view overlay. It does not move Skill directories, disable
+MCP servers, or edit Agent files. MCP owner variants sharing one normalized
+capability id archive together. Archived capabilities also leave `a:`, the
+home, root search, slash invocation, and Session borrow pickers.
 
-## Local paths
+## Agent and Skill invocation
 
-An explicit existing path is an object query and does not need the file index:
-absolute paths, `~/`, `./`, `../`, `file:///` and relative values containing a
-slash are recognized. Literal text is tried before one layer of shell
-unescaping, so both a real backslash and a Finder-dragged `Mobile\ Documents`
-remain representable. A file, folder or `.app` resolves to its ordinary Item;
-that gives it Launch Services Enter behaviour, Quick Look, and Create
-Quicklink rather than emitting an `open ...` command. Bare `/` remains the
-Skill browser. Recognition in `is_special` is lexical; existence is checked by
-the dynamic helper without a subprocess.
-
-## Search providers
-
-A template Quicklink has two states:
+`@` and `/` are computed providers, not ordinary fuzzy prefixes.
 
 ```text
-g             Search Google · g <query>
-g rust async  Google: rust async · https://…
+@                     browse installed Agent question commands
+@claude explain this  run the Agent's non-interactive ask form in Prelude
+/                     browse visible Skills
+/review               run the complete Skill invocation in Prelude
+/review pull request  pass arguments after the Skill name
 ```
 
-The first is a `Search` command, not a half-formed `Link`. Enter changes the
-query to `g ` and leaves Prelude open. The second is a real `Link`; Enter opens
-it through Launch Services.
+An incomplete Skill name browses matching Skill objects. Once the name exactly
+matches, Prelude produces one `Session` start row whose answer is shown inside
+Prelude; it no longer shows a second Skill row for the same intent. Archived
+Skills are neither browsed nor invoked.
 
-Provider commands live in the root command layer, so names such as `google`
-and `baidu` find them. An exact alias is an intent and wins over fuzzy matches
-such as Gmail or Google Drive. Fixed Quicklinks also win on an exact alias and
-resolve back to their target kind.
+`@name prompt` resolves only installed Agents. An exact name wins; otherwise
+the first matching built-in name in registry order resolves. The one-off forms
+are:
 
-## Implementation constraints
+- `claude -p`
+- `codex exec --skip-git-repo-check`
+- `pi --print`
+- `opencode run`
 
-- `cache::gather` still runs once, within the 40 ms budget.
-- `ui::search` renders `home.txt` and the root-command `list.txt` with one
-  shared layout, and stores the complete gathered items as JSON for scopes.
-- Per-keystroke helpers read those files; they do not gather sources again.
-- `running` remains live because cached state is actively misleading.
-- `is_special` recognizes intent but never runs a calculation, subprocess or
-  network request.
-- Computed and scoped queries disable fzf search so their own rows cannot be
-  filtered out by the syntax that produced them.
+These explicit asks may use the Agent provider's network. They are not part of
+the per-keystroke inventory gather.
+
+## Files and Finder tags
+
+`f:` combines two sets:
+
+- files below the current project root, gathered with the project source
+- paths stored by the explicit `prelude index` command
+
+Search roots come from `~/.config/prelude/roots.txt`; when absent or empty, the
+built-ins are `~/App`, `~/Documents`, and `~/Desktop`. Adding or removing a root
+does not rebuild the index automatically.
+
+`prelude index` uses `fd`/`fdfind` when available, otherwise `find`, with a
+maximum depth of 7. It then asks Foundation for Finder tags and stores bounded,
+credential-filtered names beside each path. Ordinary terms match paths or tags;
+`tag:` matches tags only:
+
+```text
+f:invoice
+f:tag:work
+f:tag:"Project Alpha"
+```
+
+Each indexed query returns at most 60 rows. No Spotlight, `mdfind`, `mdls`, or
+Finder-tag subprocess runs on a keystroke.
+
+An explicitly typed existing local path does not require the index. Absolute,
+`~/`, `./`, `../`, `file:///`, and slash-bearing relative paths are recognized.
+Prelude tries the literal text before one layer of shell unescaping, then emits
+a File, Folder, or Application object with its normal Enter, Quick Look, and
+Quicklink behavior. Bare `/` remains the Skill browser.
+
+## Clipboard
+
+`clipd` watches `NSPasteboard.changeCount` and records type, timestamp, and a
+content fingerprint. The scope is chronological; frecency does not move an old
+clipboard row above a newer one.
+
+- text remains text and passes through the secret filter
+- Finder file lists remain file-list objects
+- PNG/TIFF data is stored as a private image payload under Prelude's data
+  directory; no OCR is performed
+
+Inside `c:`, focusing any clipboard row automatically opens a right-side
+preview. Image previews use Ghostty/Kitty's native transfer protocol when
+available, then Chafa as a fallback. `Ctrl+P` remains the ordinary manual Quick
+Look toggle outside that contextual behavior.
+
+## Providers, Quicklinks, URLs, and computed rows
+
+A template Quicklink has a command state and a result state:
+
+```text
+g             Search Google · Enter changes the query to `g `
+g rust async  real Link row · Enter opens the generated URL
+```
+
+Default templates include Google, GitHub, npm, MDN, Google Scholar, Baidu,
+Bing, and DuckDuckGo. `quicklinks.toml` may also hold fixed file, folder, app,
+and URL objects. Exact aliases outrank fuzzy root matches. Credential-looking
+URLs are refused when creating a Quicklink.
+
+Prelude also recognizes explicit `http://` and `https://` URLs, unambiguous
+hostnames, localhost/IP addresses, and `.local`/`.test` hosts. It refuses URL
+credentials and gives plausible local filenames precedence over speculative
+domains.
+
+Computed rows include:
+
+- arithmetic and time expressions
+- unit conversion such as `10kg to lb` through the system `units` command
+- currency conversion through a one-day exchange-rate cache; this is the one
+  computed search that may fetch the network
+- translation with `en: text` or `zh: text` after `prelude build-translate`
+
+Translation uses Apple's local Translation framework helper. A missing language
+must be downloaded in System Settings.
+
+## Performance contract
+
+- `cache::gather` has a 40 ms external deadline.
+- Fast subprocess sources run concurrently; a source missing the deadline falls
+  back to its previous cache while the worker refreshes that cache.
+- Session inventory, MCP status, Skill hashes, MCP tools, ports, and fleet
+  identity live behind cache tiers.
+- Run liveness and waiting state are refreshed with syscalls on each gather.
+- Scope filtering and intent recognition do not start Agent CLIs or repeat the
+  Agent/Session relationship join.

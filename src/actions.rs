@@ -297,7 +297,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
                     v.push(a("details", "Show index status", ""));
                 }
                 "hotkey" => {
-                    v.push(a("set-default", "Reset to Cmd+Space", "still checks for conflicts"));
+                    v.push(a("set-default", "Reset to Cmd+Shift+Space", "still checks for conflicts"));
                     v.push(a("set-panel-open", "Start the panel", "if it is not running"));
                     v.push(a("set-panel-restart", "Restart the panel", "picks up a rebuilt binary"));
                 }
