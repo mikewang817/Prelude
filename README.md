@@ -153,6 +153,13 @@ command has already spent, refuses to overwrite an existing one, and refuses a
 URL that looks like it carries a credential.
 
 ```sh
+prelude --version                 what you are running, and whether the panel agrees
+prelude update --check            is there a newer release
+prelude update                    verify the checksum, swap the binary, restart the panel
+prelude update --rollback         put the previous binary back
+```
+
+```sh
 prelude quicklink list
 prelude quicklink add notes ~/Documents/notes
 prelude quicklink add jira 'https://jira.example.com/issues?jql={q}' Jira
@@ -176,7 +183,15 @@ prelude quicklink check
   requires zsh.
 - Prelude's own indexes, preferences, clipboard records, capability metadata,
   and message bus stay in its XDG directories. Agent CLIs, MCP checks, web
-  searches, and currency conversion may use the network when explicitly asked.
+  searches, and currency conversion use the network only when explicitly asked.
+- The update check is the one exception, and it is stated rather than buried:
+  at most four times a day, Prelude follows GitHub's `releases/latest`
+  redirect to read a version number. It sends nothing about you, carries no
+  identifier, and is not an API call. `prelude settings set update off` stops
+  that automatic check; `notify` (the default) only tells you, `download`
+  stages a verified archive, and `apply` installs it — never mid-session, only
+  as the panel next starts. `prelude update` is a request you typed, so it
+  works under every setting including `off`.
 - Secret-looking history, clipboard text, messages, tags, MCP fields, and
   exported transcripts are filtered or redacted. Complete MCP definitions are
   not retained in ordinary Items or caches.

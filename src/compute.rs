@@ -1720,10 +1720,17 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
     items
         .iter()
         .filter(|it| {
-            matches!(
+            (matches!(
                 it.kind,
                 Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Session
-            ) && crate::archive::visible(it)
+            ) && crate::archive::visible(it))
+                // A newer release, on the rare day there is one. It is one row,
+                // it appears only while there is something to do about it, and
+                // it goes away when the update is taken — which is a different
+                // thing from the attention-list mistake this screen already
+                // made once, where healthy objects were *hidden* to leave only
+                // exceptions.
+                || it.get("update") == "available"
         })
         .cloned()
         .collect()
@@ -1743,7 +1750,9 @@ pub fn root_items(items: &[Item]) -> Vec<Item> {
             (matches!(
                 it.kind,
                 Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search
-            ) && crate::archive::visible(it)) || it.is_quicklink()
+            ) && crate::archive::visible(it))
+                || it.is_quicklink()
+                || it.get("update") == "available"
         })
         .cloned()
         .collect()

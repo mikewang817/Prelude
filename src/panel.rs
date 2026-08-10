@@ -113,6 +113,16 @@ fn once() -> (i32, After) {
 
 /// `prelude _panel` — the process the quick terminal runs.
 pub fn run() -> i32 {
+    // Nothing is on screen yet and the process about to serve keypresses is
+    // this one, so this is the only moment an update can be applied without
+    // creating the exact state it exists to prevent: a new binary and a panel
+    // still running the old one. Nothing happens here unless the `update`
+    // setting says `apply` and a verified archive is already staged.
+    if let Some(version) = crate::update::apply_staged_if_any() {
+        eprintln!("prelude: installed {version}; it takes effect on the next panel start");
+    }
+    // What is *actually* serving keypresses, recorded rather than inferred.
+    crate::update::record_panel(std::process::id());
     let mut consecutive_faults = 0;
     loop {
         let started = Instant::now();

@@ -398,6 +398,32 @@ does not ask when it is not there. Being *unsure* costs a launch 14ms —
 anything that cannot be resolved falls through to the subprocess, because
 the failure to avoid is a missing row, not a slow one.
 
+**The update check is the one source that reaches the network without being
+asked, and it says so out loud.** Every other network call in this program
+answers something the person just typed. This one does not, so it is bounded
+in every direction that can be bounded: it is a slow-tier source with a
+six-hour TTL, refreshed detached, degrading to nothing; it follows GitHub's
+`releases/latest` redirect rather than calling the JSON API, so there is no
+token, no rate limit and no parser; it sends no identifier; and
+`update = off` is a real off switch that returns before the request is
+constructed. It governs the *automatic* check only: `prelude update` is a
+request the person typed, and a setting that silently refused to answer a
+typed command would be a different kind of dishonesty. The boundary paragraph
+in the README states all of this rather than leaving it to be discovered in a
+packet capture — a privacy claim that turns out to have an exception is worse
+than one that never claimed it.
+
+**An update that does not restart the panel creates the exact state it was
+meant to end.** `update.rs` exists as much for question 1 — *is the running
+panel the binary on disk* — as for the release check, because that is the
+failure people actually hit: the panel executes what the binary held at login,
+each press spawns the new binary to draw the list, and so the rows update
+while the delivery decision stays old. `panel.rs` records its own version and
+pid at startup and `panel_is_stale` compares it; `prelude --version` and
+`global status` say so. This is why `Mode::Apply` swaps only *as the panel
+starts*: nothing is on screen, and the process about to serve keypresses is
+the new binary. Applying at any other moment is how you manufacture the bug.
+
 **Never index or transmit credentials.** `secrets.rs` filters history and
 text/file clipboard records. Route any new source that reads user data through
 it. Clipboard image bytes stay as private 0600 files under Prelude's own data

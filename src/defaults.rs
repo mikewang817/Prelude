@@ -290,6 +290,12 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
                     "Turn Quick Look on"
                 }
             }
+            "update" => match item.fields.first().map(String::as_str) {
+                Some("off") => "Start checking for updates",
+                Some("notify") => "Also stage them, verified",
+                Some("download") => "Also install them at panel start",
+                _ => "Stop checking for updates",
+            },
             "enter" => {
                 if item.fields.first().map(String::as_str) == Some("per kind") {
                     "Switch to insert-everything"

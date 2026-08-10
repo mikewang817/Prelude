@@ -101,6 +101,9 @@ pub fn write_cached_if_changed(name: &str, items: &[Item]) {
 fn refresh_ttl(name: &str) -> u64 {
     match name {
         "mcp-tools" => 300,
+        // Four times a day is often enough to hear about a release and rare
+        // enough that nobody notices the request.
+        "update" => 21_600,
         "mcp" => 60,
         "skill-hashes" => 30,
         _ => 5,
@@ -143,6 +146,10 @@ const SLOW: &[Source] = &[
     // MCP initialize + tools/list can start local server processes. It is a
     // background inventory, never part of health gather or a keypress.
     ("mcp-tools", crate::mcp_tools::inventory),
+    // One redirect to GitHub, at most four times a day, and only when the
+    // `update` setting is anything but `off`. Degrades to nothing like every
+    // other source here.
+    ("update", crate::update::check),
     // ps with full command lines plus a bulk lsof for their working
     // directories: ~95ms, and worth having only for completeness.
     ("fleet", crate::sources::running::fleet),
@@ -208,6 +215,7 @@ pub fn gather() -> Vec<Item> {
         }
     }
     items.extend(read_cached("ports"));
+    items.extend(read_cached("update"));
     // Sessions are numerous enough to swamp the list; only the newest
     // few go in, and `s:` searches the rest.
     items.extend(

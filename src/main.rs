@@ -41,6 +41,7 @@ mod sources;
 mod translate_build;
 mod tty;
 mod ui;
+mod update;
 mod width;
 
 use std::process::ExitCode;
@@ -139,6 +140,16 @@ fn main() -> ExitCode {
             )
         }
         ["settings", rest @ ..] => settings::dispatch(rest),
+        // Knowing which binary you are is step zero; there was no way to ask.
+        ["--version"] | ["-V"] | ["version"] => {
+            println!("prelude {} ({})", update::VERSION,
+                     update::target().unwrap_or("unsupported architecture"));
+            if let Some(running) = update::panel_is_stale() {
+                println!("panel {running} — run:  prelude global start");
+            }
+            0
+        }
+        ["update", rest @ ..] => update::dispatch(rest),
         // `ql` because that is the scope prefix; one word for one concept.
         ["quicklink", rest @ ..] | ["quicklinks", rest @ ..] | ["ql", rest @ ..] => {
             compute::quicklink_cli(rest)

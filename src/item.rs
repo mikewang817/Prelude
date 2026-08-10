@@ -149,6 +149,17 @@ impl Kind {
     /// below the agent cluster, which is what the launcher is for.
     pub const QUICKLINK: i64 = 460;
 
+    /// A newer release. Below a question an agent is blocked on, because
+    /// nothing outranks that, and above everything else.
+    ///
+    /// It was first put below the agent cluster on the reasoning that the
+    /// launcher is not what you opened the launcher for — which is true, and
+    /// produced a notice on line 31, under ten sessions. A notification you
+    /// have to scroll to is not one. This row exists only while there is
+    /// something to do about it, appears once per release, and leaves when the
+    /// update is taken; on that basis it can lead.
+    pub const UPDATE: i64 = 1005;
+
     /// The label shown for a Quicklink row, regardless of its target's kind.
     pub const QUICKLINK_STYLE: (&'static str, &'static str) =
         (crate::ansi::BRIGHT_CYAN, "quicklink");
@@ -269,6 +280,9 @@ impl Item {
     /// banded by the fact that somebody named it — both shapes of one, since
     /// a template is every bit as much a keyword the person chose.
     pub fn band(&self) -> i64 {
+        if self.get("update") == "available" {
+            return Kind::UPDATE;
+        }
         if self.is_quicklink() { Kind::QUICKLINK } else { self.kind.priority() }
     }
 
@@ -288,6 +302,9 @@ impl Item {
     /// they behave alike on Enter is a coincidence of both needing an
     /// argument, and it is not what the column was being asked.
     pub fn style(&self) -> (&'static str, &'static str) {
+        if self.get("update") == "available" {
+            return (crate::ansi::YELLOW, "update");
+        }
         if self.is_quicklink() { Kind::QUICKLINK_STYLE } else { self.kind.style() }
     }
 

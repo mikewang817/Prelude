@@ -29,7 +29,8 @@ const DEFAULT_KEY: &str = "^R";
 const DEFAULT_HEIGHT: &str = "90%";
 const DEFAULT_PREVIEW: bool = true;
 const DEFAULT_CLASSIC_ENTER: bool = false;
-const PREF_KEYS: &[&str] = &["key", "height", "preview", "classic_enter"];
+const DEFAULT_UPDATE: &str = "notify";
+const PREF_KEYS: &[&str] = &["key", "height", "preview", "classic_enter", "update"];
 
 // ---------------------------------------------------------------------------
 // settings.toml — the preferences that had nowhere else to live
@@ -45,6 +46,7 @@ struct Prefs {
     height: Option<String>,
     preview: Option<bool>,
     classic_enter: Option<bool>,
+    update: Option<String>,
     present: std::collections::BTreeSet<String>,
 }
 
@@ -69,6 +71,7 @@ fn prefs() -> &'static Prefs {
             height: get("height").and_then(|v| validate_pref("height", &v).ok()),
             preview: flag("preview"),
             classic_enter: flag("classic_enter"),
+            update: get("update").and_then(|v| validate_pref("update", &v).ok()),
             present: root
                 .into_iter()
                 .flat_map(|table| table.keys().cloned())
@@ -98,6 +101,7 @@ fn canonical_key(key: &str) -> Option<&'static str> {
         "height" | "inline_height" => Some("height"),
         "preview" | "quicklook" | "quick_look" => Some("preview"),
         "enter" | "classic_enter" => Some("classic_enter"),
+        "update" | "updates" | "auto_update" => Some("update"),
         "hotkey" | "global_hotkey" => Some("hotkey"),
         "paneldir" | "panel_directory" | "directory" => Some("paneldir"),
         "roots" | "search_roots" => Some("roots"),
@@ -140,6 +144,10 @@ fn validate_pref(key: &str, value: &str) -> Result<String, String> {
             }
             Ok(if percent { format!("{n}%") } else { n.to_string() })
         }
+        "update" => match value.trim().to_ascii_lowercase().as_str() {
+            v @ ("off" | "notify" | "download" | "apply") => Ok(v.to_string()),
+            _ => Err("update is off, notify, download or apply".into()),
+        },
         "preview" | "classic_enter" => parse_bool(value)
             .map(|v| v.to_string())
             .ok_or_else(|| format!("{key} is on or off (also true/false, yes/no or 1/0)")),
@@ -176,6 +184,25 @@ pub fn preview_enabled() -> bool {
         return false;
     }
     prefs().preview.unwrap_or(DEFAULT_PREVIEW)
+}
+
+/// What to do about a newer release. `off` is the only value that makes no
+/// network request; see `update::Mode`.
+pub fn update_mode() -> String {
+    if let Some(v) = env("PRELUDE_UPDATE").and_then(|v| validate_pref("update", &v).ok()) {
+        return v;
+    }
+    prefs().update.clone().unwrap_or_else(|| DEFAULT_UPDATE.to_string())
+}
+
+/// Exposed so the decision can be tested without a settings file.
+pub fn parse_update_mode(value: &str) -> crate::update::Mode {
+    match validate_pref("update", value).unwrap_or_default().as_str() {
+        "off" => crate::update::Mode::Off,
+        "download" => crate::update::Mode::Download,
+        "apply" => crate::update::Mode::Apply,
+        _ => crate::update::Mode::Notify,
+    }
 }
 
 /// The pre-2024 default: Enter inserts everything, whatever kind it is.
@@ -738,6 +765,20 @@ pub fn items() -> Vec<Item> {
         EDIT_TOGGLE,
         ("classic_enter", "per kind", "PRELUDE_CLASSIC_ENTER"),
     ));
+    // The one setting that decides whether Prelude reaches the network without
+    // being asked, so its current value is on the row rather than in a manual.
+    let version_note = match crate::update::panel_is_stale() {
+        Some(running) => format!("running {running} · binary is {}", crate::update::VERSION),
+        None => format!("you have {}", crate::update::VERSION),
+    };
+    v.push(preference_row(
+        "update",
+        "Updates",
+        update_mode(),
+        &version_note,
+        EDIT_TOGGLE,
+        ("update", DEFAULT_UPDATE, "PRELUDE_UPDATE"),
+    ));
 
     let openwith = config.join("open.toml");
     let n = count_of(&openwith, Some("apps"));
@@ -961,6 +1002,32 @@ pub fn remove_root_interactively() -> i32 {
 }
 
 fn toggle(it: &Item) -> i32 {
+    // Four values rather than two, so it cycles. `off` is deliberately last:
+    // reaching it takes an explicit walk rather than one stray keypress.
+    if it.get("setting") == "update" {
+        let next = match update_mode().as_str() {
+            "notify" => "download",
+            "download" => "apply",
+            "apply" => "off",
+            _ => "notify",
+        };
+        if let Err(e) = write_pref("update", next) {
+            crate::ui::note(&e);
+            return 2;
+        }
+        let said = match next {
+            "off" => "updates: never checked".to_string(),
+            "notify" => "updates: tell me".to_string(),
+            "download" => "updates: verify and stage them".to_string(),
+            _ => "updates: install as the panel next starts".to_string(),
+        };
+        crate::ui::note(&if env("PRELUDE_UPDATE").is_some() {
+            format!("{said} — but $PRELUDE_UPDATE is set and remains effective")
+        } else {
+            said
+        });
+        return 0;
+    }
     let (key, now) = match it.get("setting") {
         "preview" => ("preview", !preview_enabled()),
         "enter" => ("classic_enter", !classic_enter()),
@@ -1028,6 +1095,7 @@ fn override_for(key: &str) -> Option<&'static str> {
             Some("PRELUDE_HEIGHT")
         }
         "preview" if env("PRELUDE_NO_PREVIEW").is_some() => Some("PRELUDE_NO_PREVIEW"),
+        "update" if env("PRELUDE_UPDATE").is_some() => Some("PRELUDE_UPDATE"),
         "classic_enter" if env("PRELUDE_CLASSIC_ENTER").is_some() => {
             Some("PRELUDE_CLASSIC_ENTER")
         }
@@ -1040,7 +1108,7 @@ fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
     match key {
         "hotkey" => crate::global::set_hotkey(raw_value),
         "paneldir" => crate::global::set_directory(raw_value),
-        key @ ("key" | "height" | "preview" | "classic_enter") => {
+        key @ ("key" | "height" | "preview" | "classic_enter" | "update") => {
             let value = validate_pref(key, raw_value)?;
             write_pref(key, &value)?;
             let shown = match (key, value.as_str()) {
@@ -1076,7 +1144,7 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
                 .iter()
                 .filter_map(|key| override_for(key).map(|variable| format!("${variable}")))
                 .collect();
-            let message = "key, height, Quick Look and Enter restored to defaults";
+            let message = "key, height, Quick Look, Enter and Updates restored to defaults";
             Ok(if variables.is_empty() {
                 message.into()
             } else {
@@ -1085,12 +1153,13 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
         }
         "hotkey" => crate::global::set_hotkey("cmd+shift+space"),
         "paneldir" => crate::global::set_directory_default(),
-        key @ ("key" | "height" | "preview" | "classic_enter") => {
+        key @ ("key" | "height" | "preview" | "classic_enter" | "update") => {
             remove_pref(key)?;
             let default = match key {
                 "key" => DEFAULT_KEY,
                 "height" => DEFAULT_HEIGHT,
                 "preview" => "on",
+                "update" => DEFAULT_UPDATE,
                 _ => "per kind",
             };
             let shown = format!("{key} restored to {default}");
