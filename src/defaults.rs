@@ -278,6 +278,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
     if d == Default_::Act(Verb::EditSetting) {
         return match item.get("setting") {
             "roots" => "Add a folder…",
+            "index" => "Rebuild the index",
             "hotkey" => "Change the chord…",
             "paneldir" => "Change the directory…",
             "key" => "Change the key…",

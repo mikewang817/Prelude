@@ -492,9 +492,11 @@ Open it  Enter   ·   Actions  Ctrl+K   ·   Preview  Ctrl+P
 
 Quick Look is not a permanent second column. The list uses the full window;
 `Ctrl+P` replaces only the result area with the selected item's detail, and
-pressing it again returns to the list. This keeps long rows searchable and
-gives images enough room without sacrificing half the launcher when no
-preview is needed.
+pressing it again returns to the list. The deliberate exception is `c:`: every
+clipboard row gets the otherwise-empty right 55%, behind a coloured divider —
+pixels for images, full text or Finder-object details for everything else. The
+pane disappears when you leave the scope. Everywhere else no preview space is
+reserved until it is asked for.
 
 `^O` (run here), `^X` (run in the shell) and `^Y` (copy) remain compatibility
 shortcuts for anyone who learned them. Their useful item-specific equivalents
@@ -555,11 +557,19 @@ rules that keep computed rows from being filtered out by fzf.
 | **MCP / config** | `mcp:` / `cfg:` | Agent integrations and settings |
 | **Prelude settings** | `set:` | Search roots, hotkey, keys and rules |
 
+`f:` is laid out as filename, kind and parent directory. It gives the filename
+up to 38% of the usable width (capped only on very wide terminals), never
+repeats that name inside the path, and shortens an oversized parent through its
+middle — `~/App/a-long.../src/deep/parent` — so both where it starts and the
+directory nearest the file survive.
+
 Clipboard history is chronological rather than frecent: the thing copied most
 recently is always first. Text is retained as text; one or several files remain
 Finder file objects; screenshots and copied bitmap data remain images. Enter
 inserts text or shell-quoted paths, while `Ctrl+K` can restore the original
-file/image object to the system clipboard. `Ctrl+P` renders images in place.
+file/image object to the system clipboard. In `c:`, every row previews
+immediately on the right; byte-identical image records are merged with the
+newest occurrence retained. `Ctrl+P` remains the explicit Quick Look control.
 
 Plus rows computed from what you type: web addresses, arithmetic, unit and
 currency conversion, date arithmetic, on-device translation, and quicklinks.
@@ -579,10 +589,16 @@ localhost:3000     →  opens the browser    github.com    →  opens the browse
 
 A quicklink gives a stable object a short keyword without turning it into a
 shell command. Select a file, folder, URL, config or application, then choose
-`Ctrl+K → Create Quicklink…` and edit the suggested keyword:
+`Ctrl+K → Create Quicklink…` and edit the suggested keyword. A local object
+does not need to be indexed first: paste an absolute, `~/`, `./`, `../` or
+slash-bearing relative path directly into Prelude. It becomes a real file,
+folder or application row, so `Ctrl+P` shows Quick Look and `Ctrl+K` can create
+the Quicklink. Shell-escaped spaces from completion or Finder dragging are
+accepted.
 
 ```text
-README.md → preadme
+/Users/me/Notes/README.md → Ctrl+P / Ctrl+K → preadme
+README.md                 → preadme
 ```
 
 From then on, typing `preadme` resolves back to a file row. Enter uses the
@@ -899,43 +915,45 @@ each carrying its current value:
 
 ```
 ⌕ set:
-▸ Search roots            · 3 folders · 53,409 files · indexed 2d ago  setting
-  Global hotkey           · cmd+shift+space                            setting
-  Panel directory         · ~                                          setting
-  Launcher key at a shell · ^R                                         setting
-  Inline height           · 90%                                        setting
-  Quick Look              · on                                         setting
-  What Enter does         · per kind                                   setting
+▸ Search roots            · 3 folders · all available                  setting
+  File index              · 53,409 files · built 2d ago                setting
+  Global hotkey           · cmd+shift+space · panel installed          setting
+  Panel directory         · ~ · default                                setting
+  Launcher key at a shell · ^R · default                               setting
+  Inline height           · 90% · saved                                setting
+  Quick Look              · on · default                               setting
+  What Enter does         · per kind · default                         setting
   Open-with rules         · 4 extensions                               setting
   Snippets                · 5 saved                                    setting
   Quicklinks              · 11 keywords                                setting
   Favorites               · 3 promoted                                 setting
 ```
 
-The value on the row is the point. A setting you cannot see the value of is
-one you change by trial, and most of these were previously invisible: four
-existed only as environment variables that had to be exported before the
-`eval` line in `.zshrc`, and `roots.txt` — which decides what `f:` can find at
-all — was documented in a README, defaulted from a hard-coded list, and had to
-be created by hand.
+The value on the row is the point. It also says where that value came from:
+`default`, `saved`, or the name of the environment variable currently
+winning. A setting you cannot see the value or source of is one you change by
+trial. Four of these previously existed only as variables that had to be
+exported before the `eval` line in `.zshrc`, and `roots.txt` — which decides
+what `f:` can find at all — was documented in a README, defaulted from a
+hard-coded list, and had to be created by hand.
 
 Enter changes the setting; `^K` holds everything else, and never repeats
-Enter. **Search roots** is the one worth knowing:
+Enter. **Search roots** and **File index** are separate on purpose:
 
 ```
- Search roots · setting
- Default: Add a folder… · Enter
+ Search roots · setting                 File index · setting
+ Default: Add a folder… · Enter         Default: Rebuild the index · Enter
 
- Action › Remove a folder…            leaves the folder alone
-          Rebuild the index now       runs prelude index here
-          Show every root
-          Open the file               ~/.config/prelude/roots.txt
+ Action › Remove a folder…              Action › Show index status
+          Show every root                        Open the index file
+          Open roots.txt                         Reveal it in Finder
 ```
 
-The row says `indexed 2d ago`, and says **roots changed — run Rebuild** when
-you have added a folder the index does not know about yet. That silence was
-the actual bug: you add a folder, `f:` keeps answering from the old set, and
-nothing anywhere tells you the index is why.
+Adding or removing a root is immediate and cheap; rebuilding can walk for a
+minute, so it is never hidden as a side effect. The index row says **stale —
+rebuild before relying on f:** when the current index no longer reflects the
+roots. That silence was the actual bug: you add a folder, `f:` keeps answering
+from the old set, and nothing anywhere tells you the index is why.
 
 Paths are accepted the way they arrive: `~/work`, an absolute path, or the
 shell-escaped form the clipboard gives you when the folder has a space in it
@@ -951,18 +969,27 @@ Everything is also a plain command, on the same code path:
 
 ```sh
 prelude settings                      # the table above
-prelude settings --json               # …as fields
+prelude settings --json               # stable key/value/source records
+prelude settings get height           # one effective value · --json for its provenance
+prelude settings set height 75%        # validated before it can break fzf
+prelude settings set preview off       # on/off, true/false, yes/no and 1/0
+prelude settings set hotkey cmd+shift+space
+prelude settings reset height          # remove the saved value; use the default again
+prelude settings check                 # bad values, missing roots and a stale index
+prelude settings path quicklinks       # print the authoritative file
 prelude settings roots                # each root, and whether it still exists
 prelude settings add-root ~/work
 prelude settings remove-root ~/work
-prelude settings set key '^T'         # also height, preview, classic_enter
 ```
 
 Six settings own a file each and are edited by the code that owns it, so a
 chord typed here goes through the same validation and the same panel restart
 as `prelude global hotkey`. The four that had only an environment variable get
 `settings.toml` — and the variable still wins wherever it is exported, because
-a variable is a per-invocation instruction and a file is a standing one.
+a variable is a per-invocation instruction and a file is a standing one. A set
+or reset says when a variable is masking the change instead of reporting a
+success that will appear to do nothing. Edits preserve comments and unknown
+future keys in `settings.toml`.
 
 ## It learns
 
@@ -1040,9 +1067,13 @@ run for themselves.
 | `prelude global hotkey CHORD` | inspect or change the validated global chord |
 | `prelude global directory [PATH]` | where the panel stands · `--default` for `$HOME` |
 | `prelude global start\|stop\|uninstall` | manage or remove the panel instance |
-| `prelude settings [--json]` | every preference and its current value |
+| `prelude settings [--json]` | every preference, effective value and source |
+| `prelude settings get KEY [--json]` | one effective setting and its provenance |
+| `prelude settings set KEY VALUE` | validated `key`, `height`, `preview`, `enter`, `hotkey`, `paneldir` |
+| `prelude settings reset KEY\|all` | restore a scalar default without touching list files |
+| `prelude settings check [--json]` | invalid values, missing roots and stale index |
+| `prelude settings path [KEY]` | authoritative file behind a setting |
 | `prelude settings add-root PATH` | what `f:` indexes · `remove-root` · `roots` |
-| `prelude settings set KEY VALUE` | `key`, `height`, `preview`, `classic_enter` |
 
 **Your agents**
 
@@ -1128,8 +1159,9 @@ fine for casual text but unreliable for legal or technical register.
 clipboard, the system commands and translation all use macOS-specific
 interfaces. Clipboard history reads `NSPasteboard`, so copied Finder objects
 remain real files and images rather than being flattened into path text.
-Images use Chafa when available, then Ghostty/Kitty or iTerm's native inline
-protocol. Linux support is welcome but not present.
+Images use Ghostty/Kitty or iTerm's native inline protocol first, so moving
+between clipboard rows transfers a file path rather than re-encoding the image;
+Chafa is the fallback. Linux support is welcome but not present.
 
 ## Notes on the awkward parts
 

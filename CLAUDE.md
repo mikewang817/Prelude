@@ -16,7 +16,7 @@ cargo clippy --release     # expected warning-free
 ./target/release/prelude _dump-all   # complete catalogue behind scopes
 ```
 
-`_dump`, `_dump-root`, `_dump-all`, `_footer`, `_preview`, `_bind`, `_dynamic`,
+`_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`, `_bind`, `_dynamic`,
 `_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_copy-skill`, `_lend-skill`,
 `_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
@@ -158,11 +158,15 @@ be able to override the broader. `toggle` says so when it is writing a file the
 environment is already overriding, because a setting that visibly does nothing
 is worse than one that refuses.
 
-The value goes **on the row**. A setting you cannot see the value of is one you
-change by trial, and most of these were previously invisible in exactly that
-way. `^K` holds the mutations and never repeats Enter — a test walks every
-setting and asserts it, because each of these rows has an obvious primary and
-listing it twice is the natural mistake.
+The effective value goes **on the row**, together with whether it is a default,
+a saved value, or an environment override. A setting you cannot see the value
+or source of is one you change by trial. Invalid file or environment values are
+ignored at runtime, called out on the row and by `prelude settings check`, and
+`set` validates before writing; resetting removes only the scalar override and
+never a list file. `^K` holds the mutations and never repeats Enter — a test
+walks every setting and asserts it, because each of these rows has an obvious
+primary and listing it twice is the natural mistake. Keep the settings form in
+its explicit rank order rather than letting frecency scatter related controls.
 
 A pasted path is tried literally first and then unescaped, because a path with
 a space in it reaches the clipboard already escaped — shell completion and
@@ -171,7 +175,12 @@ dragging a folder into a terminal both write `Mobile\ Documents`, and
 answered `is not there` about a folder plainly on screen, which is the worst
 available wording: it names the one thing that was not wrong. Keep the literal
 reading first so a directory whose name really contains a backslash is not
-taken away by the convenience.
+taken away by the convenience. `settings::readings_of` is shared by settings
+and computed local-path rows so the two surfaces cannot disagree. Path intent
+is lexical in `is_special`; only `dynamic_rows_with` touches the filesystem.
+An existing absolute, `~/`, `./`, `../`, `file:///` or slash-bearing relative
+path becomes a File, Folder or Application object, with ordinary Quick Look and
+Quicklink actions. Bare `/` remains the Skill browser.
 
 `prelude settings add-root` and its neighbours exist so the guards can be
 exercised without standing up fzf, which is the same reason `_dump` and the
@@ -180,10 +189,13 @@ is not tidiness: indexing `~` is seven levels of `fd` through `~/Library`,
 which macOS protects as other applications' data, and the dialog that results
 names the terminal rather than Prelude.
 
-Nothing here may read the file index to draw a row. Its size is recorded beside
-it when it is built; an index from an older build has no record, so the first
-reader counts it once and writes the number down rather than re-reading a
-megabyte on every gather.
+Search roots and the file index are separate rows: root edits are immediate,
+while rebuilding is an explicit operation that may take a minute. Nothing here
+may read the file index to draw a row. Its size is recorded beside it when it
+is built; an index from an older build has no record, so the first reader counts
+it once and writes the number down rather than re-reading a megabyte on every
+gather. Settings gather may use file checks and stats, never `pgrep` or another
+subprocess; live panel status belongs to explicit `prelude global status`.
 
 ## The rules that matter
 
@@ -221,6 +233,14 @@ per-item, and they are opposites — where one acts, the other hands you text.
 A test asserts they never coincide. Ctrl+P is different: Quick Look replaces
 the result area until Ctrl+P is pressed again, without selecting or acting on
 anything. The preview is hidden by default and never owns a permanent column.
+Clipboard rows are the deliberate contextual exception: while any real row is
+focused inside `c:`, the otherwise-unused right side becomes a 55% preview —
+pixels for images, full content and metadata for everything else — and it
+disappears only when leaving the scope. The preview label is the state marker;
+do not add a second focus helper or a subprocess to decide it. Hiding must put
+`hidden` in `change-preview-window` itself — changing the window after
+`hide-preview` shows it again, which is how text rows acquired a 99%-high
+horizontal pane.
 
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
@@ -344,9 +364,15 @@ fuzzy matches. `{}` in a binding is the *transformed* text, so bindings use
 
 **Layout must be computed once and passed down.** The per-keystroke helper
 runs in a separate process. If both sides measure their own widths they drift,
-and computed rows land in a different column. Quick Look is hidden and
-replaces the result area instead of splitting it, so rows are always measured
-against the full terminal width.
+and computed rows land in a different column. Ordinary Quick Look is hidden
+and replaces the result area, so rows are always measured against the full
+terminal width. The contextual `c:` image pane still uses those full-width
+rows and lets fzf clip the left list; do not introduce a second layout for that
+transient pane. `f:` is the explicit stable exception to the catalogue table:
+it is always filename, kind, parent path, with a width-derived (not
+result-derived) filename column so filtering cannot make it jump. The parent
+never repeats the filename and loses its middle as `...` before either useful
+end is discarded.
 
 **Clipboard is typeful and strictly chronological.** `pbpaste` sees only
 text, so `clipd` keeps one sleeping JXA/AppKit process and watches
@@ -354,9 +380,21 @@ text, so `clipd` keeps one sleeping JXA/AppKit process and watches
 PNG/TIFF data rather than flattening them into strings. Clipboard timestamps
 are source ranks at a scale wider than the whole frecency bonus: selecting an
 old clipping must never move it above something copied later. Image payloads
-are private, bounded, and removed when their history rows age out. Bump the
-pidfile protocol version whenever an old daemon cannot produce the new record
-format, or upgrades will leave obsolete watchers alive indefinitely.
+are private, bounded, and removed when their history rows age out. Some
+screenshot tools bump `NSPasteboard.changeCount` several times while publishing
+one image; clipd v3 records a private content fingerprint, migrates old rows
+behind the daemon boundary, keeps only the newest byte-identical occurrence and
+removes superseded payloads. Never hash those images on gather. A Ghostty or
+Kitty preview uses the native `t=f` path transfer before Chafa, with one fixed
+Prelude image id deleted before every render; this keeps an arrow press to a
+path-sized terminal message and stops graphics placements overlapping after
+fzf clears its text cells. A placement supplies only its limiting `c` or `r`,
+never both — Kitty stretches into a box when both are given, while one lets the
+terminal derive the other dimension with the original aspect ratio. Chafa is
+the fallback and replaces the preview helper with `exec`, so cancellation kills
+the renderer rather than orphaning it.
+Bump the pidfile protocol version whenever an old daemon cannot produce the new
+record format, or upgrades will leave obsolete watchers alive indefinitely.
 
 **Kind decides the band; frecency only orders things inside it.** The two
 questions — *what kind of thing is this* and *how much do you use this one* —

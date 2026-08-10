@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const DAEMON_VERSION: &str = "2";
+// v3 adds content identities to image records. An old watcher cannot dedupe
+// the multiple changeCount bumps some screenshot tools emit for one image.
+const DAEMON_VERSION: &str = "3";
 const MAX_HISTORY: usize = 500;
 const MAX_IMAGES: usize = 100;
 
@@ -48,6 +50,13 @@ pub fn ensure_running() {
         }
         let _ = unsafe { kill(pid, 15) };
     }
+    // Do the one-time v3 migration before gather takes its snapshot. Leaving
+    // it solely to the detached watcher makes the first c: opened after an
+    // upgrade race the rewrite and show the old triplicates once more.
+    let _ = std::fs::create_dir_all(paths::data());
+    let _ = std::fs::create_dir_all(assets_dir());
+    private_dir(&assets_dir());
+    migrate_image_fingerprints();
     crate::cache::spawn_self(&["clipd"]);
 }
 
@@ -73,6 +82,7 @@ pub fn watch() -> i32 {
     let _ = std::fs::create_dir_all(paths::data());
     let _ = std::fs::create_dir_all(assets_dir());
     private_dir(&assets_dir());
+    migrate_image_fingerprints();
     let _ = std::fs::write(
         pidfile(),
         format!("{} {DAEMON_VERSION}\n", std::process::id()),
@@ -143,7 +153,7 @@ fn watch_macos() -> i32 {
     }
 }
 
-fn record(value: serde_json::Value) {
+fn record(mut value: serde_json::Value) {
     let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     match kind {
         "text" => {
@@ -171,10 +181,136 @@ fn record(value: serde_json::Value) {
                 return;
             }
             private_file(&real);
+            let Some(fingerprint) = image_fingerprint(&real) else {
+                let _ = std::fs::remove_file(real);
+                return;
+            };
+            value["fingerprint"] = serde_json::Value::String(fingerprint.clone());
+            // Keep the newest occurrence, just as the read side does for text
+            // and Finder objects. Some screenshot tools bump changeCount two
+            // or three times while publishing one pasteboard image.
+            remove_older_image(&fingerprint);
         }
         _ => return,
     }
     append_line(&value.to_string());
+}
+
+fn image_fingerprint(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(crate::capability::fingerprint(&bytes))
+}
+
+fn remove_older_image(fingerprint: &str) {
+    let path = history_path();
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+    for line in text.lines() {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok();
+        let duplicate = value.as_ref().is_some_and(|value| {
+            value.get("kind").and_then(|v| v.as_str()) == Some("image")
+                && value.get("fingerprint").and_then(|v| v.as_str()) == Some(fingerprint)
+        });
+        if duplicate {
+            if let Some(path) = value
+                .as_ref()
+                .and_then(|value| value.get("path"))
+                .and_then(|path| path.as_str())
+            {
+                removed.push(path.to_string());
+            }
+        } else {
+            kept.push(line);
+        }
+    }
+    if removed.is_empty() {
+        return;
+    }
+    let bytes = if kept.is_empty() {
+        Vec::new()
+    } else {
+        format!("{}\n", kept.join("\n")).into_bytes()
+    };
+    if crate::cache::write_atomic(&path, &bytes).is_err() {
+        return;
+    }
+    private_file(&path);
+    for old in removed {
+        if let Some(path) = private_asset(&old) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Upgrade old image rows once, behind the daemon boundary rather than on
+/// gather. The newest byte-identical image survives and receives the rank its
+/// latest pasteboard change earned; old private payloads are removed.
+fn migrate_image_fingerprints() {
+    migrate_image_fingerprints_at(&history_path(), &assets_dir());
+}
+
+fn migrate_image_fingerprints_at(path: &Path, assets: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = false;
+    for line in text.lines().rev() {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            kept.push(line.to_string());
+            continue;
+        };
+        if value.get("kind").and_then(|v| v.as_str()) != Some("image") {
+            kept.push(line.to_string());
+            continue;
+        }
+        let Some(raw_path) = value
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            kept.push(line.to_string());
+            continue;
+        };
+        let fingerprint = value
+            .get("fingerprint")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| private_asset_in(&raw_path, assets).and_then(|path| image_fingerprint(&path)));
+        let Some(fingerprint) = fingerprint else {
+            kept.push(line.to_string());
+            continue;
+        };
+        if !seen.insert(fingerprint.clone()) {
+            removed.push(raw_path);
+            changed = true;
+            continue;
+        }
+        if value.get("fingerprint").and_then(|v| v.as_str()) != Some(&fingerprint) {
+            value["fingerprint"] = serde_json::Value::String(fingerprint);
+            changed = true;
+        }
+        kept.push(value.to_string());
+    }
+    if !changed {
+        return;
+    }
+    kept.reverse();
+    let bytes = if kept.is_empty() {
+        Vec::new()
+    } else {
+        format!("{}\n", kept.join("\n")).into_bytes()
+    };
+    if crate::cache::write_atomic(path, &bytes).is_err() {
+        return;
+    }
+    private_file(path);
+    for old in removed {
+        if let Some(path) = private_asset_in(&old, assets) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn append_line(line: &str) {
@@ -227,10 +363,14 @@ fn trim(path: &Path) {
     }
 }
 
-pub(crate) fn private_asset(path: &str) -> Option<PathBuf> {
+fn private_asset_in(path: &str, root: &Path) -> Option<PathBuf> {
     let asset = Path::new(path).canonicalize().ok()?;
-    let root = assets_dir().canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
     (asset.parent() == Some(root.as_path())).then_some(asset)
+}
+
+pub(crate) fn private_asset(path: &str) -> Option<PathBuf> {
+    private_asset_in(path, &assets_dir())
 }
 
 #[cfg(unix)]
@@ -408,3 +548,63 @@ if (!pb.writeObjects(values)) throw Error('copy failed')
 
 #[cfg(not(target_os = "macos"))]
 const COPY_IMAGE_JXA: &str = "";
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_image_fingerprints_at;
+
+    #[test]
+    fn image_migration_keeps_only_the_newest_byte_identical_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "prelude-clipboard-dedupe-{}-{}",
+            std::process::id(),
+            crate::frecency::now() as u64
+        ));
+        let assets = root.join("clipboard");
+        let history = root.join("clipboard.jsonl");
+        std::fs::create_dir_all(&assets).unwrap();
+        let old = assets.join("old.png");
+        let middle = assets.join("middle.png");
+        let newest = assets.join("newest.png");
+        let different = assets.join("different.png");
+        for path in [&old, &middle, &newest] {
+            std::fs::write(path, b"same pixels").unwrap();
+        }
+        std::fs::write(&different, b"different pixels").unwrap();
+        let image = |ts: u64, path: &std::path::Path| {
+            serde_json::json!({"ts":ts,"kind":"image","path":path}).to_string()
+        };
+        std::fs::write(
+            &history,
+            [
+                image(1, &old),
+                image(2, &middle),
+                serde_json::json!({"ts":3,"kind":"text","t":"between"}).to_string(),
+                image(4, &newest),
+                image(5, &different),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        migrate_image_fingerprints_at(&history, &assets);
+
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&history)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let images: Vec<&serde_json::Value> = records
+            .iter()
+            .filter(|record| record.get("kind").and_then(|v| v.as_str()) == Some("image"))
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].get("path").and_then(|v| v.as_str()), newest.to_str());
+        assert_eq!(images[1].get("path").and_then(|v| v.as_str()), different.to_str());
+        assert!(images.iter().all(|image| image.get("fingerprint").is_some()));
+        assert!(!old.exists() && !middle.exists());
+        assert!(newest.exists() && different.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

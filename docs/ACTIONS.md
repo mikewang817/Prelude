@@ -166,14 +166,19 @@ A custom answer remains Enter's default.
 
 - Enter changes the setting, named for what that means: `Add a folder…`,
   `Change the chord…`, `Turn Quick Look off`, `Open the file`
-- Search roots additionally: remove a folder, rebuild the index, show every
-  root and whether it still exists
+- Search roots additionally: remove a folder and show every root and whether
+  it still exists
+- File index is a separate row whose Enter rebuilds it; its panel shows status
+  and reaches the index file
+- Scalar settings can be reset to their documented default; a reset never
+  removes roots, snippets, Quicklinks, favorites or open-with rules
 - The global chord additionally: start the panel, restart it after a rebuild
 - Anything file-backed: open it, open it in `$EDITOR`, reveal it, copy its path
 
-The row states the current value, so the panel does not have to. Nothing here
-repeats Enter — the settings are the rows most likely to break that rule,
-because each one has an obvious primary, so a test walks all of them.
+The row states the effective value and whether it is a default, saved value or
+environment override, so the panel does not have to. Nothing here repeats
+Enter — the settings are the rows most likely to break that rule, because each
+one has an obvious primary, so a test walks all of them.
 
 ### Session
 
@@ -355,7 +360,10 @@ half-formed link. Enter keeps the launcher open and fills its alias (`g `,
 Scope commands behave the same way with `f:`, `c:` and the other scopes, but
 need no action-panel entries.
 
-A stable object without a quicklink offers `Create Quicklink…`. A resolved
+A stable object without a quicklink offers `Create Quicklink…`. This includes
+an existing local path pasted directly into the query: it is resolved into the
+same File, Directory or Application Item used by `f:`, so Quick Look and the
+action panel do not need a separate path-shaped exception. A resolved
 quicklink instead offers `Edit Quicklink Definition`, and action-created
 entries offer `Remove Quicklink…` before any action that removes the target.
 Removing the name leaves the file, folder, application or URL untouched.

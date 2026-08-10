@@ -61,6 +61,45 @@ pub fn dtrunc(s: &str, limit: usize) -> String {
     out
 }
 
+/// Keep both ends of a long value and replace its middle with three visible
+/// dots. Paths need this rather than `dtrunc`: the root says where it starts,
+/// while the final components say which folder actually contains the file.
+pub fn dtrunc_middle(s: &str, limit: usize) -> String {
+    if dwidth(s) <= limit {
+        return s.to_string();
+    }
+    if limit <= 3 {
+        return dtrunc(s, limit);
+    }
+    let available = limit - 3;
+    let left_limit = available * 2 / 5;
+    let right_limit = available - left_limit;
+
+    let mut left = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let columns = cw(ch);
+        if width + columns > left_limit {
+            break;
+        }
+        left.push(ch);
+        width += columns;
+    }
+
+    let mut right = Vec::new();
+    width = 0;
+    for ch in s.chars().rev() {
+        let columns = cw(ch);
+        if width + columns > right_limit {
+            break;
+        }
+        right.push(ch);
+        width += columns;
+    }
+    right.reverse();
+    format!("{left}...{}", right.into_iter().collect::<String>())
+}
+
 pub fn pad_to(s: &str, w: usize, right: bool) -> String {
     let gap = " ".repeat(w.saturating_sub(dwidth(s)));
     if right {

@@ -62,6 +62,16 @@ fn write_at(path: &Path, values: &BTreeSet<String>) -> Result<(), String> {
         .map_err(|error| format!("could not save favourites: {error}"))
 }
 
+/// Create the empty preference through the module that owns its format. The
+/// settings row calls this only when somebody explicitly asks to open it.
+pub fn ensure_file() -> Result<PathBuf, String> {
+    let path = file();
+    if !path.exists() {
+        write_at(&path, &BTreeSet::new())?;
+    }
+    Ok(path)
+}
+
 pub fn set(item: &Item, wanted: bool) -> Result<(), String> {
     let key = key(item).ok_or_else(|| "that object cannot be favourited".to_string())?;
     let path = file();

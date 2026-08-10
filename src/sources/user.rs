@@ -132,12 +132,16 @@ cmd = "git reset --soft HEAD~1"
 cmd = "tar -czf {{name}}.tar.gz {{folder}}"
 "#;
 
-pub fn snippets() -> Vec<Item> {
-    let p = paths::config().join("snippets.toml");
-    if !p.exists() {
-        let _ = std::fs::create_dir_all(paths::config());
-        let _ = std::fs::write(&p, SNIPPETS_DEFAULT);
+pub fn ensure_snippets_file() -> Result<std::path::PathBuf, String> {
+    let path = paths::config().join("snippets.toml");
+    if !path.exists() {
+        crate::cache::write_atomic(&path, SNIPPETS_DEFAULT.as_bytes()).map_err(|e| e.to_string())?;
     }
+    Ok(path)
+}
+
+pub fn snippets() -> Vec<Item> {
+    let p = ensure_snippets_file().unwrap_or_else(|_| paths::config().join("snippets.toml"));
     let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
     crate::minitoml::parse(&text)
         .into_iter()
@@ -162,6 +166,15 @@ pub fn clips() -> Vec<Item> {
         return Vec::new();
     };
     clips_from(&text)
+}
+
+fn image_identity(value: &serde_json::Value, path: &str) -> String {
+    value
+        .get("fingerprint")
+        .and_then(|fingerprint| fingerprint.as_str())
+        .filter(|fingerprint| !fingerprint.is_empty())
+        .map(|fingerprint| format!("image:{fingerprint}"))
+        .unwrap_or_else(|| format!("image-path:{path}"))
 }
 
 pub(crate) fn clips_from(text: &str) -> Vec<Item> {
@@ -208,7 +221,9 @@ pub(crate) fn clips_from(text: &str) -> Vec<Item> {
             }
             "image" => {
                 let Some(path) = v.get("path").and_then(|x| x.as_str()) else { continue };
-                if crate::clipd::private_asset(path).is_none() || !seen.insert(format!("image:{path}")) {
+                if crate::clipd::private_asset(path).is_none()
+                    || !seen.insert(image_identity(&v, path))
+                {
                     continue;
                 }
                 let width = v.get("width").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -262,5 +277,19 @@ pub fn ago(ts: f64) -> String {
         format!("{}h ago", (s / 3600.0) as u64)
     } else {
         format!("{}d ago", (s / 86400.0) as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_identity;
+
+    #[test]
+    fn clipboard_images_are_identified_by_pixels_not_private_filename() {
+        let first = serde_json::json!({"fingerprint":"fnv1a64-v1:same"});
+        let second = serde_json::json!({"fingerprint":"fnv1a64-v1:same"});
+        assert_eq!(image_identity(&first, "/clipboard/1.png"), image_identity(&second, "/clipboard/2.png"));
+        let old = serde_json::json!({});
+        assert_ne!(image_identity(&old, "/clipboard/1.png"), image_identity(&old, "/clipboard/2.png"));
     }
 }

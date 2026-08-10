@@ -71,7 +71,7 @@ fn base_args(prompt: &str, label: &str, footer: Option<&str>) -> Vec<String> {
         // slides the line to reveal the match, which eats the title and
         // breaks every column on that row.
         "--no-hscroll", "--ellipsis=…", "--scrollbar=│",
-        "--color=border:8,label:6,prompt:6,pointer:5,hl:2,hl+:2,info:8,header:8",
+        "--color=border:8,preview-border:6,preview-label:6,label:6,prompt:6,pointer:5,hl:2,hl+:2,info:8,header:8",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -203,7 +203,13 @@ pub fn search() -> i32 {
     // clipboard — the helper inherits from our environment, so nothing about
     // the surface has to travel on its argv.
     args.push("--bind".into());
-    args.push(format!("focus:transform-footer:{} _footer {{2}}", shq(&me)));
+    args.push(if preview {
+        // One helper updates both the item-specific footer and the contextual
+        // c: image preview, so moving the cursor does not pay for two forks.
+        format!("focus:transform:{} _focus {{q}} {{2}}", shq(&me))
+    } else {
+        format!("focus:transform-footer:{} _footer {{2}}", shq(&me))
+    });
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());

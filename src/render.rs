@@ -11,7 +11,7 @@
 
 use crate::ansi::*;
 use crate::item::{Item, Kind};
-use crate::width::{dtrunc, dwidth, flatten, pad_to};
+use crate::width::{dtrunc, dtrunc_middle, dwidth, flatten, pad_to};
 use std::sync::OnceLock;
 
 /// Unit separator: splits visible text from hidden payload.
@@ -120,6 +120,50 @@ pub fn title_width(items: &[Item], width: usize) -> usize {
 
 pub fn render(items: &[Item], width: usize) -> String {
     render_with(items, width, None, None)
+}
+
+/// File search is one stable three-column form: full filename where possible,
+/// then kind, then the parent path. The general catalogue uses percentile
+/// widths because descriptions and process fields compete for space; applying
+/// that compromise to f: left most of a wide panel blank while truncating the
+/// one thing a file picker must distinguish.
+pub fn render_files(items: &[Item], width: usize) -> String {
+    let usable = width.max(48) - 8;
+    let lw = label_width();
+    let wanted_title = (usable * 38 / 100).clamp(24, 72);
+    let max_title = usable.saturating_sub(lw + 3 + 2 + 12).max(12);
+    let tw = wanted_title.min(max_title);
+    let path_width = usable.saturating_sub(tw + 2 + lw + 3).max(1);
+    let mut out = String::with_capacity(items.len() * 128);
+
+    for item in items {
+        let path = item.get("path");
+        let title = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&item.title);
+        let title = dtrunc(&flatten(title), tw);
+        let parent = std::path::Path::new(path)
+            .parent()
+            .map(|parent| crate::paths::tilde(&parent.to_string_lossy()))
+            .filter(|parent| !parent.is_empty())
+            .unwrap_or_else(|| item.subtitle.clone());
+        let parent = dtrunc_middle(&flatten(&parent), path_width);
+        let (color, label) = item.kind.style();
+
+        out.push_str(&title);
+        out.push_str(&" ".repeat((tw + 2).saturating_sub(dwidth(&title)).max(1)));
+        out.push_str(color);
+        out.push_str(&pad_to(label, lw, true));
+        out.push_str(RESET);
+        out.push_str(&format!("{DIM} · {parent}{RESET}"));
+        out.push(SEP);
+        out.push_str(&serde_json::to_string(item).unwrap_or_default());
+        out.push('\n');
+    }
+    out.pop();
+    out
 }
 
 pub fn render_with(
@@ -235,4 +279,28 @@ pub fn parse_line(line: &str) -> Option<Item> {
         None => s,
     };
     serde_json::from_str(json).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_files;
+    use crate::item::{Item, Kind};
+
+    #[test]
+    fn file_search_spends_space_on_the_filename_and_middle_truncates_its_parent() {
+        let filename = "CN115131558A_complete_name.md";
+        let path = crate::paths::home()
+            .join("App/a-very-long-container-name/another-long-project-name/source/deep/parent")
+            .join(filename);
+        let item = Item::new(path.to_string_lossy(), Kind::Find)
+            .title(filename)
+            .put("path", path.to_string_lossy().into_owned());
+        let rendered = render_files(&[item], 120);
+        let visible = rendered.split(super::SEP).next().unwrap();
+        assert!(visible.contains(filename), "the filename had room but was cut: {visible}");
+        assert!(visible.contains("~/App/"), "the path root is useful context: {visible}");
+        assert!(visible.contains("..."), "a long parent should lose its middle: {visible}");
+        assert!(visible.contains("/deep/parent"), "keep the directory nearest the file: {visible}");
+        assert_eq!(visible.matches(filename).count(), 1, "the final column is the parent, not the filename again");
+    }
 }

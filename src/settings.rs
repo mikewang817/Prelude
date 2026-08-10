@@ -22,7 +22,14 @@
 //! standing one, so the narrower must be able to override the broader.
 
 use crate::item::{Item, Kind};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+const DEFAULT_KEY: &str = "^R";
+const DEFAULT_HEIGHT: &str = "90%";
+const DEFAULT_PREVIEW: bool = true;
+const DEFAULT_CLASSIC_ENTER: bool = false;
+const PREF_KEYS: &[&str] = &["key", "height", "preview", "classic_enter"];
 
 // ---------------------------------------------------------------------------
 // settings.toml — the preferences that had nowhere else to live
@@ -38,6 +45,7 @@ struct Prefs {
     height: Option<String>,
     preview: Option<bool>,
     classic_enter: Option<bool>,
+    present: std::collections::BTreeSet<String>,
 }
 
 /// Read once. `on_enter` runs in the per-keystroke footer helper, so a file
@@ -55,18 +63,88 @@ fn prefs() -> &'static Prefs {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let flag = |k: &str| get(k).map(|v| matches!(v.as_str(), "true" | "yes" | "on" | "1"));
+        let flag = |k: &str| get(k).and_then(|v| parse_bool(&v));
         Prefs {
-            key: get("key"),
-            height: get("height"),
+            key: get("key").and_then(|v| validate_pref("key", &v).ok()),
+            height: get("height").and_then(|v| validate_pref("height", &v).ok()),
             preview: flag("preview"),
             classic_enter: flag("classic_enter"),
+            present: root
+                .into_iter()
+                .flat_map(|table| table.keys().cloned())
+                .collect(),
         }
     })
 }
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Canonicalise the friendly names accepted by the CLI. The launcher rows use
+/// the short names; the aliases make the typed surface forgiving without
+/// creating a second preference vocabulary in the file.
+fn canonical_key(key: &str) -> Option<&'static str> {
+    match key.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "key" | "launcher_key" => Some("key"),
+        "height" | "inline_height" => Some("height"),
+        "preview" | "quicklook" | "quick_look" => Some("preview"),
+        "enter" | "classic_enter" => Some("classic_enter"),
+        "hotkey" | "global_hotkey" => Some("hotkey"),
+        "paneldir" | "panel_directory" | "directory" => Some("paneldir"),
+        "roots" | "search_roots" => Some("roots"),
+        "index" | "file_index" => Some("index"),
+        "openwith" | "open_with" => Some("openwith"),
+        "snippets" => Some("snippets"),
+        "quicklinks" => Some("quicklinks"),
+        "favorites" | "favourites" => Some("favorites"),
+        "all" => Some("all"),
+        _ => None,
+    }
+}
+
+/// Validate values before they can make it into an fzf argv or a zsh
+/// `bindkey` line. Previously `settings set height banana` reported success
+/// and made the next launcher fail somewhere else, which is the least useful
+/// place to explain a typo.
+fn validate_pref(key: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    match key {
+        "key" => {
+            if value.is_empty()
+                || value.len() > 32
+                || value.chars().any(|c| c.is_control() || c == '\0')
+            {
+                return Err("key must be a short zsh bindkey sequence such as ^R or ^T".into());
+            }
+            Ok(value.to_string())
+        }
+        "height" => {
+            let (number, percent) = value
+                .strip_suffix('%')
+                .map(|n| (n, true))
+                .unwrap_or((value, false));
+            let n = number.parse::<u16>().map_err(|_| {
+                "height is 20%–100%, or a fixed height of 3–500 lines".to_string()
+            })?;
+            if (percent && !(20..=100).contains(&n)) || (!percent && !(3..=500).contains(&n)) {
+                return Err("height is 20%–100%, or a fixed height of 3–500 lines".into());
+            }
+            Ok(if percent { format!("{n}%") } else { n.to_string() })
+        }
+        "preview" | "classic_enter" => parse_bool(value)
+            .map(|v| v.to_string())
+            .ok_or_else(|| format!("{key} is on or off (also true/false, yes/no or 1/0)")),
+        _ => Err(format!("{key} is not stored in settings.toml")),
+    }
 }
 
 /// Which of the two sources of a setting wins.
@@ -82,12 +160,14 @@ fn resolve(from_env: Option<String>, from_file: Option<String>, fallback: &str) 
 /// The key the zsh widget binds. Consumed by `prelude init zsh`, so a change
 /// reaches a shell that starts afterwards rather than this one.
 pub fn launcher_key() -> String {
-    resolve(env("PRELUDE_KEY"), prefs().key.clone(), "^R")
+    let from_env = env("PRELUDE_KEY").and_then(|v| validate_pref("key", &v).ok());
+    resolve(from_env, prefs().key.clone(), DEFAULT_KEY)
 }
 
 /// How much of the terminal the inline launcher uses.
 pub fn height() -> String {
-    resolve(env("PRELUDE_HEIGHT"), prefs().height.clone(), "90%")
+    let from_env = env("PRELUDE_HEIGHT").and_then(|v| validate_pref("height", &v).ok());
+    resolve(from_env, prefs().height.clone(), DEFAULT_HEIGHT)
 }
 
 /// Whether `Ctrl+P` Quick Look exists at all.
@@ -95,7 +175,7 @@ pub fn preview_enabled() -> bool {
     if env("PRELUDE_NO_PREVIEW").is_some() {
         return false;
     }
-    prefs().preview.unwrap_or(true)
+    prefs().preview.unwrap_or(DEFAULT_PREVIEW)
 }
 
 /// The pre-2024 default: Enter inserts everything, whatever kind it is.
@@ -103,34 +183,153 @@ pub fn classic_enter() -> bool {
     if env("PRELUDE_CLASSIC_ENTER").is_some() {
         return true;
     }
-    prefs().classic_enter.unwrap_or(false)
+    prefs().classic_enter.unwrap_or(DEFAULT_CLASSIC_ENTER)
 }
 
-/// Rewrite `settings.toml` with one key changed.
-///
-/// The whole file is regenerated from the parsed table rather than appended
-/// to, so setting the same key twice replaces rather than accumulates — the
-/// rule `openwith::remember` already follows for the same reason.
-fn write_pref(key: &str, value: &str) -> Result<(), String> {
-    let path = file();
-    let mut table = std::fs::read_to_string(&path)
-        .map(|t| crate::minitoml::parse(&t))
-        .unwrap_or_default();
-    table.entry(String::new()).or_default().insert(key.to_string(), value.to_string());
-    let mut out = String::from(
-        "# Prelude's own preferences, written by the set: panel.\n\
-         # The matching environment variable still overrides any line here.\n\n",
-    );
-    for (k, v) in table.get("").into_iter().flatten() {
-        let literal = matches!(v.as_str(), "true" | "false");
-        if literal {
-            out.push_str(&format!("{k} = {v}\n"));
-        } else {
-            out.push_str(&format!("{k} = {v:?}\n"));
+fn pref_literal(value: &str) -> String {
+    if matches!(value, "true" | "false") { value.to_string() } else { format!("{value:?}") }
+}
+
+fn inline_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote == Some('"') && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match (quote, ch) {
+            (None, '\'' | '"') => quote = Some(ch),
+            (Some(open), close) if open == close => quote = None,
+            (None, '#') => return &line[index..],
+            _ => {}
         }
     }
-    crate::cache::write_atomic(&path, out.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(())
+    ""
+}
+
+/// Change one root key while preserving comments, unknown keys and future
+/// sections byte-for-byte. A settings panel should not punish somebody for
+/// opening its file and documenting why they chose a value.
+fn update_pref_text(text: &str, key: &str, value: Option<&str>) -> String {
+    let replacement = value.map(|v| format!("{key} = {}", pref_literal(v)));
+    let mut out = Vec::new();
+    let mut in_root = true;
+    let mut found = false;
+    let mut inserted = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if in_root && trimmed.starts_with('[') {
+            if !found && !inserted {
+                if let Some(line) = &replacement {
+                    out.push(line.clone());
+                    out.push(String::new());
+                }
+                inserted = true;
+            }
+            in_root = false;
+        }
+        let is_key = in_root
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(left, _)| left.trim().trim_matches(['\'', '"']) == key);
+        if is_key {
+            if !found {
+                if let Some(replacement) = &replacement {
+                    let comment = inline_comment(line);
+                    out.push(if comment.is_empty() {
+                        replacement.clone()
+                    } else {
+                        format!("{replacement}  {comment}")
+                    });
+                }
+                found = true;
+            }
+            continue; // duplicate definitions are removed as part of the edit
+        }
+        out.push(line.to_string());
+    }
+    if !found && !inserted {
+        if !out.is_empty() && !out.last().is_some_and(String::is_empty) {
+            out.push(String::new());
+        }
+        if let Some(line) = replacement {
+            out.push(line);
+        }
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        out.join("\n") + "\n"
+    }
+}
+
+fn write_pref(key: &str, value: &str) -> Result<(), String> {
+    let value = validate_pref(key, value)?;
+    let path = file();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        "# Prelude's own preferences, written by the set: panel.\n\
+         # The matching environment variable still overrides any line here.\n"
+            .into()
+    });
+    let out = update_pref_text(&text, key, Some(&value));
+    crate::cache::write_atomic(&path, out.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn remove_pref(key: &str) -> Result<(), String> {
+    let path = file();
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(()) };
+    let out = update_pref_text(&text, key, None);
+    crate::cache::write_atomic(&path, out.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn pref_source(key: &str, environment: &str) -> &'static str {
+    let environment_value = env(environment);
+    let valid_environment = environment_value.as_ref().is_some_and(|value| match key {
+        "key" | "height" => validate_pref(key, value).is_ok(),
+        // These variables are flags: any non-empty value intentionally means on.
+        _ => true,
+    });
+    if valid_environment {
+        "environment"
+    } else if environment_value.is_some() {
+        "invalid environment"
+    } else {
+        let valid = match key {
+            "key" => prefs().key.is_some(),
+            "height" => prefs().height.is_some(),
+            "preview" => prefs().preview.is_some(),
+            "classic_enter" => prefs().classic_enter.is_some(),
+            _ => false,
+        };
+        if valid {
+            "saved"
+        } else if prefs().present.contains(key) {
+            "invalid saved value"
+        } else {
+            "default"
+        }
+    }
+}
+
+fn source_detail(base: &str, source: &str, environment: &str) -> String {
+    match source {
+        "environment" => format!("${environment} override · {base}"),
+        "invalid environment" => {
+            format!("invalid ${environment} ignored · using saved/default · {base}")
+        }
+        "saved" => format!("saved · {base}"),
+        "invalid saved value" => format!("invalid saved value ignored · default · {base}"),
+        "default" => format!("default · {base}"),
+        _ => base.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +438,7 @@ pub fn add_root(raw: &str) -> Result<String, String> {
 /// The literal reading is tried first and always, so a directory whose name
 /// genuinely contains a backslash or a quote is never taken away by this. The
 /// unescaped readings are what it falls back to.
-fn readings_of(raw: &str) -> Vec<PathBuf> {
+pub(crate) fn readings_of(raw: &str) -> Vec<PathBuf> {
     let trimmed = raw.trim();
     let unquoted = match (trimmed.chars().next(), trimmed.chars().last()) {
         (Some(a), Some(b)) if a == b && (a == '\'' || a == '"') && trimmed.len() > 1 => {
@@ -278,8 +477,28 @@ fn unescape(s: &str) -> String {
 }
 
 pub fn remove_root(entry: &str) -> Result<(), String> {
-    let lines: Vec<String> = roots_lines().into_iter().filter(|l| l != entry).collect();
-    write_roots(&lines)
+    let readings = readings_of(entry);
+    let wanted = readings.iter().find_map(|path| path.canonicalize().ok());
+    let mut removed = None;
+    let lines: Vec<String> = roots_lines()
+        .into_iter()
+        .filter(|line| {
+            let matches = line == entry
+                || wanted.as_ref().is_some_and(|wanted| resolved(line).as_ref() == Some(wanted));
+            if matches {
+                if removed.is_none() {
+                    removed = Some(line.clone());
+                }
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    let removed = removed.ok_or_else(|| format!("{} is not a search root", entry.trim()))?;
+    write_roots(&lines)?;
+    let _ = removed;
+    Ok(())
 }
 
 /// The roots file as written, comments and all.
@@ -331,7 +550,7 @@ pub fn root_rows() -> Vec<(String, String)> {
         .into_iter()
         .map(|entry| {
             let state = match resolved(&entry) {
-                Some(p) if p.is_dir() => "indexed".to_string(),
+                Some(p) if p.is_dir() => "available".to_string(),
                 Some(p) => format!("not a folder: {}", p.display()),
                 None => "missing".to_string(),
             };
@@ -352,6 +571,7 @@ pub const EDIT_PROMPT: &str = "prompt";
 pub const EDIT_TOGGLE: &str = "toggle";
 pub const EDIT_OPEN: &str = "open";
 pub const EDIT_ADD_ROOT: &str = "add-root";
+pub const EDIT_REBUILD: &str = "rebuild";
 
 fn ago(secs: u64) -> String {
     match secs {
@@ -381,6 +601,29 @@ fn row(id: &str, title: &str, value: String, detail: &str, edit: &str) -> Item {
         .put("edit", edit)
 }
 
+fn preference_row(
+    id: &str,
+    title: &str,
+    value: String,
+    base_detail: &str,
+    edit: &str,
+    meta: (&str, &str, &str),
+) -> Item {
+    let (pref_key, default, environment) = meta;
+    let source = pref_source(pref_key, environment);
+    row(
+        id,
+        title,
+        value,
+        &source_detail(base_detail, source, environment),
+        edit,
+    )
+    .put("source", source)
+    .put("default", default)
+    .put("environment", environment)
+    .put("path", file().to_string_lossy().into_owned())
+}
+
 /// Every setting, with its current value on the row.
 ///
 /// Cheap by construction: a handful of files under two kilobytes each, plus
@@ -396,55 +639,104 @@ pub fn items() -> Vec<Item> {
     let indexed = crate::compute::fileindex_path();
     let count = index_count();
     let age = mtime(&indexed).map(|t| ago(crate::bus::now().saturating_sub(t)));
-    let missing = roots.iter().filter(|(_, s)| s != "indexed").count();
-    let value = match (count, &age) {
-        (Some(n), Some(a)) => format!("{} folders · {n} files · indexed {a}", roots.len()),
-        (None, Some(a)) => format!("{} folders · indexed {a}", roots.len()),
-        _ => format!("{} folders · never indexed", roots.len()),
-    };
-    let detail = if index_stale() {
-        "roots changed — run Rebuild".to_string()
-    } else if missing > 0 {
-        format!("{missing} of them are not there any more")
+    let missing = roots.iter().filter(|(_, s)| s != "available").count();
+    let value = if missing == 0 {
+        format!("{} folders · all available", roots.len())
     } else {
-        "what f: can find".to_string()
+        format!("{} folders · {missing} missing", roots.len())
+    };
+    let roots_source = if roots_file().is_file() { "saved" } else { "built-in" };
+    v.push(
+        row(
+            "roots",
+            "Search roots",
+            value,
+            &format!("{roots_source} · what f: can find"),
+            EDIT_ADD_ROOT,
+        )
+        .put("source", roots_source)
+        .put("path", roots_file().to_string_lossy().into_owned()),
+    );
+
+    // Indexing can take a minute, so it is its own visible operation rather
+    // than a side effect hidden behind adding a root.
+    let stale = index_stale();
+    let index_value = match (count, &age) {
+        (Some(n), Some(a)) => format!("{n} files · built {a}"),
+        (None, Some(a)) => format!("built {a}"),
+        _ => "never built".into(),
+    };
+    let index_detail = if stale {
+        "stale · rebuild before relying on f:"
+    } else {
+        "current · shared by every f: search"
     };
     v.push(
-        row("roots", "Search roots", value, &detail, EDIT_ADD_ROOT)
-            .put("path", roots_file().to_string_lossy().into_owned()),
+        row("index", "File index", index_value, index_detail, EDIT_REBUILD)
+            .put("path", indexed.to_string_lossy().into_owned())
+            .put("source", if stale { "stale" } else { "current" }),
     );
 
     let global = crate::global::configured_summary();
-    v.push(row("hotkey", "Global hotkey", global.hotkey, "opens the panel anywhere", EDIT_PROMPT));
-    v.push(row(
-        "paneldir",
-        "Panel directory",
-        crate::paths::tilde(&global.directory),
-        "where the panel stands",
-        EDIT_PROMPT,
-    ));
+    // Installed is a file check. Whether the helper is running needs `pgrep`
+    // and belongs in explicit `global status`, never on the gather path.
+    let panel_state = if global.installed { "panel installed" } else { "panel not installed" };
+    v.push(
+        row(
+            "hotkey",
+            "Global hotkey",
+            global.hotkey,
+            &format!("{} · {panel_state}", global.hotkey_source),
+            EDIT_PROMPT,
+        )
+        .put("source", global.hotkey_source)
+        .put("default", "cmd+space")
+        .put("path", crate::global::config_file().to_string_lossy().into_owned()),
+    );
+    v.push(
+        row(
+            "paneldir",
+            "Panel directory",
+            crate::paths::tilde(&global.directory),
+            &format!("{} · where the panel stands", global.directory_source),
+            EDIT_PROMPT,
+        )
+        .put("source", global.directory_source)
+        .put("default", crate::paths::tilde(&crate::paths::home().to_string_lossy()))
+        .put("path", crate::global::config_file().to_string_lossy().into_owned()),
+    );
 
-    v.push(row(
+    v.push(preference_row(
         "key",
         "Launcher key at a shell",
         launcher_key(),
         "the zsh widget · needs a new shell",
         EDIT_PROMPT,
+        ("key", DEFAULT_KEY, "PRELUDE_KEY"),
     ));
-    v.push(row("height", "Inline height", height(), "how much of the terminal", EDIT_PROMPT));
-    v.push(row(
+    v.push(preference_row(
+        "height",
+        "Inline height",
+        height(),
+        "how much of the terminal",
+        EDIT_PROMPT,
+        ("height", DEFAULT_HEIGHT, "PRELUDE_HEIGHT"),
+    ));
+    v.push(preference_row(
         "preview",
         "Quick Look",
         if preview_enabled() { "on".into() } else { "off".into() },
         "Ctrl+P, hidden until asked for",
         EDIT_TOGGLE,
+        ("preview", "on", "PRELUDE_NO_PREVIEW"),
     ));
-    v.push(row(
+    v.push(preference_row(
         "enter",
         "What Enter does",
         if classic_enter() { "insert everything".into() } else { "per kind".into() },
         "commands are handed over, objects act",
         EDIT_TOGGLE,
+        ("classic_enter", "per kind", "PRELUDE_CLASSIC_ENTER"),
     ));
 
     let openwith = config.join("open.toml");
@@ -457,6 +749,7 @@ pub fn items() -> Vec<Item> {
             "which application opens what",
             EDIT_OPEN,
         )
+        .put("source", if openwith.is_file() { "saved" } else { "none" })
         .put("path", openwith.to_string_lossy().into_owned()),
     );
 
@@ -470,6 +763,7 @@ pub fn items() -> Vec<Item> {
             "snip: · {{placeholder}} blanks",
             EDIT_OPEN,
         )
+        .put("source", if snippets.is_file() { "saved" } else { "built-in" })
         .put("path", snippets.to_string_lossy().into_owned()),
     );
 
@@ -483,6 +777,7 @@ pub fn items() -> Vec<Item> {
             "type the keyword to reach the object",
             EDIT_OPEN,
         )
+        .put("source", if quicklinks.is_file() { "saved" } else { "built-in" })
         .put("path", quicklinks.to_string_lossy().into_owned()),
     );
 
@@ -498,10 +793,18 @@ pub fn items() -> Vec<Item> {
             "agents, skills and MCP servers",
             EDIT_OPEN,
         )
+        .put("source", if favorites.is_file() { "saved" } else { "none" })
         .put("path", favorites.to_string_lossy().into_owned()),
     );
 
-    v
+    // This is a settings form, not a learned catalogue: keep related controls
+    // together. The 100-point gap is wider than the frecency cap, so opening
+    // one row often cannot scatter the form on the next launch.
+    let count = v.len();
+    v.into_iter()
+        .enumerate()
+        .map(|(index, item)| item.rank(((count - index) * 100) as f64))
+        .collect()
 }
 
 /// The full current value, for Quick Look and for `Show them`.
@@ -513,23 +816,25 @@ pub fn detail(it: &Item) -> Vec<String> {
                 out.push(format!("  {entry}  ({state})"));
             }
             out.push(String::new());
+            out.push("`f:` searches these roots plus the current project.".into());
+        }
+        "index" => {
             match index_count() {
-                Some(n) => out.push(format!("{n} files in the index")),
+                Some(n) => out.push(format!("{n} files in the shared index")),
                 None => out.push("the index has never been built".into()),
             }
             if index_stale() {
-                out.push("the roots have changed since — run Rebuild the index".into());
+                out.push("The roots have changed since it was built.".into());
             }
-            out.push(String::new());
-            out.push("`f:` searches this index plus the current project.".into());
+            out.push("Rebuilding walks every search root and may take a minute.".into());
         }
         "key" => {
             out.push("Bound by `prelude init zsh`, which runs when a shell starts,".into());
             out.push("so a change reaches the next shell rather than this one.".into());
+            setting_origin(it, &mut out);
         }
-        "preview" | "enter" => {
-            out.push("Set here or by the matching environment variable, which wins".into());
-            out.push("wherever it is exported.".into());
+        "height" | "preview" | "enter" => {
+            setting_origin(it, &mut out);
         }
         _ => {
             let path = it.get("path");
@@ -543,23 +848,74 @@ pub fn detail(it: &Item) -> Vec<String> {
     out
 }
 
+fn setting_origin(it: &Item, out: &mut Vec<String>) {
+    out.push(String::new());
+    out.push(format!("source: {}", it.get("source")));
+    if !it.get("default").is_empty() {
+        out.push(format!("default: {}", it.get("default")));
+    }
+    if !it.get("environment").is_empty() {
+        out.push(format!("environment override: ${}", it.get("environment")));
+    }
+    if it.get("source") == "environment" {
+        out.push("The environment wins until it is unset in that shell.".into());
+    }
+}
+
+fn ensure_setting_file(it: &Item) -> Result<PathBuf, String> {
+    let path = match it.get("setting") {
+        "roots" => {
+            if !roots_file().exists() {
+                write_roots(&roots_lines())?;
+            }
+            roots_file()
+        }
+        "openwith" => crate::openwith::ensure_file()?,
+        "snippets" => crate::sources::user::ensure_snippets_file()?,
+        "quicklinks" => crate::compute::ensure_quicklinks_file()?,
+        "favorites" => crate::favorites::ensure_file()?,
+        "key" | "height" | "preview" | "enter" => {
+            if !file().exists() {
+                crate::cache::write_atomic(
+                    &file(),
+                    b"# Prelude's own preferences. Environment variables override these values.\n",
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            file()
+        }
+        _ => PathBuf::from(it.get("path")),
+    };
+    if path.as_os_str().is_empty() {
+        Err("that setting has no file of its own".into())
+    } else if !path.exists() {
+        Err(format!("{} does not exist yet", crate::paths::tilde(&path.to_string_lossy())))
+    } else {
+        Ok(path)
+    }
+}
+
+pub fn open_file(it: &Item) -> i32 {
+    let result = ensure_setting_file(it).and_then(|path| {
+        crate::openwith::open_default_now(&path.to_string_lossy())
+    });
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
 /// Carry out Enter for a setting.
 pub fn edit(it: &Item) -> i32 {
     match it.get("edit") {
         EDIT_ADD_ROOT => add_root_interactively(),
+        EDIT_REBUILD => crate::runhere::run_cmd("prelude index"),
         EDIT_TOGGLE => toggle(it),
         EDIT_PROMPT => prompt_for(it),
-        _ => {
-            let path = it.get("path");
-            if path.is_empty() {
-                return 2;
-            }
-            if let Err(e) = crate::openwith::open_default_now(path) {
-                crate::ui::note(&e);
-                return 2;
-            }
-            0
-        }
+        _ => open_file(it)
     }
 }
 
@@ -648,15 +1004,7 @@ fn prompt_for(it: &Item) -> i32 {
     let Some(value) = crate::ui::prompt_line_initial(label, &current) else {
         return 130;
     };
-    let result = match id {
-        "hotkey" => crate::global::set_hotkey(&value),
-        "paneldir" => crate::global::set_directory(&value),
-        "key" => write_pref("key", &value)
-            .map(|()| format!("launcher key {value} — bound in the next shell you open")),
-        "height" => write_pref("height", &value)
-            .map(|()| format!("inline height {value}")),
-        _ => Err("that setting has no editor".into()),
-    };
+    let result = set_named(id, &value);
     match result {
         Ok(message) => {
             crate::ui::note(&message);
@@ -669,36 +1017,265 @@ fn prompt_for(it: &Item) -> i32 {
     }
 }
 
+fn override_for(key: &str) -> Option<&'static str> {
+    match key {
+        "key" if env("PRELUDE_KEY").is_some_and(|v| validate_pref("key", &v).is_ok()) => {
+            Some("PRELUDE_KEY")
+        }
+        "height"
+            if env("PRELUDE_HEIGHT").is_some_and(|v| validate_pref("height", &v).is_ok()) =>
+        {
+            Some("PRELUDE_HEIGHT")
+        }
+        "preview" if env("PRELUDE_NO_PREVIEW").is_some() => Some("PRELUDE_NO_PREVIEW"),
+        "classic_enter" if env("PRELUDE_CLASSIC_ENTER").is_some() => {
+            Some("PRELUDE_CLASSIC_ENTER")
+        }
+        _ => None,
+    }
+}
+
+fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
+    let key = canonical_key(raw_key).ok_or_else(|| format!("unknown setting {raw_key:?}"))?;
+    match key {
+        "hotkey" => crate::global::set_hotkey(raw_value),
+        "paneldir" => crate::global::set_directory(raw_value),
+        key @ ("key" | "height" | "preview" | "classic_enter") => {
+            let value = validate_pref(key, raw_value)?;
+            write_pref(key, &value)?;
+            let shown = match (key, value.as_str()) {
+                ("preview", "true") => "preview = on".into(),
+                ("preview", "false") => "preview = off".into(),
+                ("classic_enter", "true") => "enter = insert everything".into(),
+                ("classic_enter", "false") => "enter = per kind".into(),
+                ("key", value) => format!("key = {value} — bound in the next shell you open"),
+                (key, value) => format!("{key} = {value}"),
+            };
+            Ok(match override_for(key) {
+                Some(variable) => format!(
+                    "{shown} — saved, but ${variable} is set and remains effective"
+                ),
+                None => shown,
+            })
+        }
+        _ => Err(format!("{key} is managed through its own action, not `settings set`")),
+    }
+}
+
+fn reset_named(raw_key: &str) -> Result<String, String> {
+    let key = canonical_key(raw_key).ok_or_else(|| format!("unknown setting {raw_key:?}"))?;
+    match key {
+        "all" => {
+            let path = file();
+            let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+            for key in PREF_KEYS {
+                text = update_pref_text(&text, key, None);
+            }
+            crate::cache::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+            let variables: Vec<String> = PREF_KEYS
+                .iter()
+                .filter_map(|key| override_for(key).map(|variable| format!("${variable}")))
+                .collect();
+            let message = "key, height, Quick Look and Enter restored to defaults";
+            Ok(if variables.is_empty() {
+                message.into()
+            } else {
+                format!("{message} — {} still override them", variables.join(", "))
+            })
+        }
+        "hotkey" => crate::global::set_hotkey("cmd+space"),
+        "paneldir" => crate::global::set_directory_default(),
+        key @ ("key" | "height" | "preview" | "classic_enter") => {
+            remove_pref(key)?;
+            let default = match key {
+                "key" => DEFAULT_KEY,
+                "height" => DEFAULT_HEIGHT,
+                "preview" => "on",
+                _ => "per kind",
+            };
+            let shown = format!("{key} restored to {default}");
+            Ok(match override_for(key) {
+                Some(variable) => format!(
+                    "{shown} — but ${variable} is set and remains effective"
+                ),
+                None => shown,
+            })
+        }
+        _ => Err(format!("{key} has no scalar default to restore")),
+    }
+}
+
+/// Restore the selected scalar preference from the action panel.
+pub fn reset_item(it: &Item) -> i32 {
+    match reset_named(it.get("setting")) {
+        Ok(message) => {
+            crate::ui::note(&message);
+            0
+        }
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SettingView {
+    key: String,
+    title: String,
+    value: String,
+    detail: String,
+    source: String,
+    default: Option<String>,
+    environment: Option<String>,
+    path: Option<String>,
+}
+
+fn view(it: &Item) -> SettingView {
+    let optional = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    SettingView {
+        key: it.get("setting").to_string(),
+        title: it.title.clone(),
+        value: it.fields.first().cloned().unwrap_or_default(),
+        detail: it.fields.get(1).cloned().unwrap_or_default(),
+        source: it.get("source").to_string(),
+        default: optional(it.get("default")),
+        environment: optional(it.get("environment")),
+        path: optional(it.get("path")).map(|p| crate::paths::tilde(&p)),
+    }
+}
+
+#[derive(Serialize)]
+struct Check {
+    severity: &'static str,
+    setting: String,
+    message: String,
+}
+
+fn checks() -> Vec<Check> {
+    let mut out = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(file()) {
+        let parsed = crate::minitoml::parse(&text);
+        if let Some(root) = parsed.get("") {
+            for (key, value) in root {
+                if !PREF_KEYS.contains(&key.as_str()) {
+                    out.push(Check {
+                        severity: "warning",
+                        setting: key.clone(),
+                        message: "unknown key; Prelude leaves it untouched but does not use it".into(),
+                    });
+                } else if let Err(message) = validate_pref(key, value) {
+                    out.push(Check { severity: "error", setting: key.clone(), message });
+                }
+            }
+        }
+    }
+    for (key, variable) in [("key", "PRELUDE_KEY"), ("height", "PRELUDE_HEIGHT")] {
+        if let Some(value) = env(variable) {
+            if let Err(message) = validate_pref(key, &value) {
+                out.push(Check {
+                    severity: "error",
+                    setting: key.into(),
+                    message: format!("${variable} is invalid: {message}"),
+                });
+            }
+        }
+    }
+    for (entry, state) in root_rows() {
+        if state != "available" {
+            out.push(Check {
+                severity: "warning",
+                setting: "roots".into(),
+                message: format!("{entry}: {state}"),
+            });
+        }
+    }
+    if index_stale() {
+        out.push(Check {
+            severity: "warning",
+            setting: "index".into(),
+            message: "the file index has not been built for the current roots".into(),
+        });
+    }
+    out
+}
+
+fn check(json: bool) -> i32 {
+    let checks = checks();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&checks).unwrap_or_else(|_| "[]".into()));
+    } else if checks.is_empty() {
+        println!("Prelude settings are valid and the file index is current.");
+    } else {
+        for check in &checks {
+            println!("{:<8} {:<16} {}", check.severity, check.setting, check.message);
+        }
+    }
+    if checks.iter().any(|check| check.severity == "error") {
+        2
+    } else if checks.is_empty() {
+        0
+    } else {
+        1
+    }
+}
+
+fn get(raw_key: &str, json: bool) -> i32 {
+    let Some(key) = canonical_key(raw_key) else {
+        eprintln!("prelude: unknown setting {raw_key:?}");
+        return 2;
+    };
+    let item_key = if key == "classic_enter" { "enter" } else { key };
+    let Some(item) = items().into_iter().find(|item| item.get("setting") == item_key) else {
+        eprintln!("prelude: {raw_key:?} is not a setting");
+        return 2;
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view(&item)).unwrap_or_else(|_| "{}".into()));
+    } else {
+        println!("{}", item.fields.first().cloned().unwrap_or_default());
+    }
+    0
+}
+
+fn setting_path(raw_key: Option<&str>) -> Result<PathBuf, String> {
+    let Some(raw_key) = raw_key else { return Ok(file()) };
+    let key = canonical_key(raw_key).ok_or_else(|| format!("unknown setting {raw_key:?}"))?;
+    let item_key = if key == "classic_enter" { "enter" } else { key };
+    items()
+        .into_iter()
+        .find(|item| item.get("setting") == item_key)
+        .map(|item| PathBuf::from(item.get("path")))
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| format!("{raw_key} has no file of its own"))
+}
+
 /// `prelude settings …` — the same edits the panel makes, without a terminal.
-///
-/// Every other subsystem here has a door like this, and for the same two
-/// reasons: the guards can be exercised without standing up fzf, and a person
-/// who would rather type than pick is not forced through a picker.
 pub fn dispatch(args: &[&str]) -> i32 {
     let result: Result<String, String> = match args {
-        [] => return list(false),
-        ["--json"] => return list(true),
+        [] | ["list"] => return list(false),
+        ["--json"] | ["list", "--json"] => return list(true),
+        ["get", key] => return get(key, false),
+        ["get", key, "--json"] | ["get", "--json", key] => return get(key, true),
+        ["check"] => return check(false),
+        ["check", "--json"] | ["--json", "check"] => return check(true),
+        ["path"] => setting_path(None).map(|path| path.to_string_lossy().into_owned()),
+        ["path", key] => setting_path(Some(key)).map(|path| path.to_string_lossy().into_owned()),
         ["roots"] => {
             for (entry, state) in root_rows() {
                 println!("{entry}  ({state})");
             }
             return 0;
         }
-        ["add-root", path] => add_root(path).map(|added| {
-            format!("{added} added — run `prelude index` to include it")
-        }),
+        ["add-root", path] => add_root(path)
+            .map(|added| format!("{added} added — run `prelude index` to include it")),
         ["remove-root", path] => remove_root(path)
             .map(|()| format!("{path} removed — run `prelude index` to forget it")),
-        ["set", key @ ("key" | "height"), value] => {
-            write_pref(key, value).map(|()| format!("{key} = {value}"))
-        }
-        ["set", key @ ("preview" | "classic_enter"), value] => match value.trim() {
-            v @ ("true" | "false") => write_pref(key, v).map(|()| format!("{key} = {v}")),
-            other => Err(format!("{key} is true or false, not {other:?}")),
-        },
+        ["set", key, value] => set_named(key, value),
+        ["reset", key] => reset_named(key),
         _ => Err(
-            "usage: prelude settings [--json] | roots | add-root PATH | remove-root PATH | \
-             set key|height|preview|classic_enter VALUE"
+            "usage: prelude settings [list] [--json] | get KEY [--json] | check [--json] | \
+             path [KEY] | roots | add-root PATH | remove-root PATH | set KEY VALUE | reset KEY|all"
                 .into(),
         ),
     };
@@ -707,19 +1284,20 @@ pub fn dispatch(args: &[&str]) -> i32 {
             println!("{message}");
             0
         }
-        Err(e) => {
-            eprintln!("prelude: {e}");
+        Err(error) => {
+            eprintln!("prelude: {error}");
             2
         }
     }
 }
 
-/// `prelude settings [--json]`, for the same reason every other listing has a
-/// data door: an agent asked to check a setting should read a field.
+/// Stable settings records rather than launcher implementation fields. This
+/// is the data surface an agent can safely inspect.
 pub fn list(json: bool) -> i32 {
     let items = items();
     if json {
-        println!("{}", serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into()));
+        let views: Vec<SettingView> = items.iter().map(view).collect();
+        println!("{}", serde_json::to_string_pretty(&views).unwrap_or_else(|_| "[]".into()));
         return 0;
     }
     for it in &items {
@@ -807,13 +1385,17 @@ mod tests {
         for it in items() {
             assert_eq!(it.kind, Kind::Setting);
             assert!(!it.get("setting").is_empty(), "{} has no id", it.title);
+            assert!(!it.get("source").is_empty(), "{} has no source", it.title);
             assert!(
                 !it.fields.first().map(String::is_empty).unwrap_or(true),
                 "{} shows no value",
                 it.title
             );
             assert!(
-                matches!(it.get("edit"), EDIT_PROMPT | EDIT_TOGGLE | EDIT_OPEN | EDIT_ADD_ROOT),
+                matches!(
+                    it.get("edit"),
+                    EDIT_PROMPT | EDIT_TOGGLE | EDIT_OPEN | EDIT_ADD_ROOT | EDIT_REBUILD
+                ),
                 "{} has no editor",
                 it.title
             );
@@ -836,5 +1418,48 @@ mod tests {
         // An empty variable is not an instruction; `env` filters it out
         // before it reaches here, so the file still speaks.
         assert_eq!(resolve(None, f(), "90%"), "70%");
+    }
+
+    #[test]
+    fn bad_values_are_refused_before_they_reach_zsh_or_fzf() {
+        assert_eq!(validate_pref("height", "72%").as_deref(), Ok("72%"));
+        assert_eq!(validate_pref("height", "24").as_deref(), Ok("24"));
+        for bad in ["banana", "0%", "101%", "2"] {
+            assert!(validate_pref("height", bad).is_err(), "{bad}");
+        }
+        assert_eq!(validate_pref("preview", "off").as_deref(), Ok("false"));
+        assert_eq!(validate_pref("classic_enter", "YES").as_deref(), Ok("true"));
+        assert!(validate_pref("preview", "perhaps").is_err());
+        assert!(validate_pref("key", "^T\nnext").is_err());
+    }
+
+    #[test]
+    fn editing_a_preference_preserves_the_rest_of_the_file() {
+        let before = "# why this is 70\nheight = \"70%\" # fits this screen\nunknown = \"future\"\n\n[future]\nvalue = \"kept\"\n";
+        let changed = update_pref_text(before, "height", Some("80%"));
+        assert!(changed.contains("# why this is 70"));
+        assert!(changed.contains("height = \"80%\"  # fits this screen"));
+        assert!(changed.contains("unknown = \"future\""));
+        assert!(changed.contains("[future]\nvalue = \"kept\""));
+        let reset = update_pref_text(&changed, "height", None);
+        assert!(!reset.lines().any(|line| line.trim_start().starts_with("height")));
+        assert!(reset.contains("unknown = \"future\""));
+    }
+
+    #[test]
+    fn the_settings_form_keeps_a_stable_task_order() {
+        let mut rows = items();
+        rows.sort_by(crate::cache::by_rank);
+        let keys: Vec<&str> = rows.iter().map(|item| item.get("setting")).collect();
+        assert_eq!(&keys[..4], &["roots", "index", "hotkey", "paneldir"]);
+    }
+
+    #[test]
+    fn friendly_cli_names_resolve_to_one_preference_vocabulary() {
+        assert_eq!(canonical_key("quick-look"), Some("preview"));
+        assert_eq!(canonical_key("enter"), Some("classic_enter"));
+        assert_eq!(canonical_key("panel-directory"), Some("paneldir"));
+        assert_eq!(canonical_key("favourites"), Some("favorites"));
+        assert_eq!(canonical_key("not-a-setting"), None);
     }
 }

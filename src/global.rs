@@ -355,14 +355,28 @@ fn clear_directory() -> Result<String, String> {
 pub struct GlobalSummary {
     pub hotkey: String,
     pub directory: String,
+    pub hotkey_source: &'static str,
+    pub directory_source: &'static str,
+    pub installed: bool,
 }
 
 pub fn configured_summary() -> GlobalSummary {
+    let saved = config_path().is_file();
     let config = configured().unwrap_or_default();
+    let directory_saved = config.directory.is_some();
     GlobalSummary {
         hotkey: config.hotkey.canonical(),
         directory: effective_directory(&config).to_string_lossy().into_owned(),
+        hotkey_source: if saved { "saved" } else { "default" },
+        directory_source: if directory_saved { "saved" } else { "default" },
+        installed: quick_config_path().is_file(),
     }
+}
+
+/// The settings surface may reveal or copy the authoritative file, but never
+/// parses or writes it itself.
+pub fn config_file() -> PathBuf {
+    config_path()
 }
 
 /// Set the chord from the settings panel, with the same validation, the same

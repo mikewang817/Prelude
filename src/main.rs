@@ -253,17 +253,15 @@ fn main() -> ExitCode {
             }
             0
         }
-        // Where a handed-over row will land — a prompt or the clipboard — is
-        // inherited from whoever started the launcher, so this helper needs
-        // no argument to say the right thing.
+        // Focus normally changes only the footer. Clipboard images are the
+        // one contextual preview: c: has unused horizontal space and an image
+        // cannot be identified from its title, so it opens on the right and
+        // stands down again when focus leaves it.
+        ["_focus", q, line] => focus(q, line),
+        // Kept as a direct test/debug door, and for callers that need only the
+        // footer rather than fzf actions.
         ["_footer", rest @ ..] => {
-            let item = rest.first().and_then(|l| render::parse_line(l));
-            let primary = item
-                .as_ref()
-                .map(|i| defaults::describe(i, defaults::surface()))
-                .unwrap_or("Select")
-                .to_string();
-            println!("{}", ui::footer_for(&primary));
+            println!("{}", footer_for_line(rest.first().copied().unwrap_or("")));
             0
         }
         ["_preview", line] => { if let Some(i) = render::parse_line(line) { preview::show(&i); } 0 }
@@ -327,9 +325,10 @@ HUMANS
                          configurable global key; the panel is a hidden
                          Ghostty quick terminal
   prelude settings [--json]
-                         Prelude's own preferences and their values
+                         effective preferences, sources and files
+  prelude settings get KEY | set KEY VALUE | reset KEY|all
+  prelude settings check [--json] | path [KEY]
   prelude settings add-root PATH | remove-root PATH | roots
-  prelude settings set key|height|preview|classic_enter VALUE
   prelude doctor agents|sessions|skills|mcp
                          what is wrong with the agent side of the machine
                          --json for fields · --repair asks about each finding
@@ -363,6 +362,67 @@ SETUP
   prelude bench          measure candidate-gathering
   prelude build-translate  compile the Apple translation helper
 ";
+
+const AUTO_PREVIEW_LABEL: &str = "Clipboard preview";
+const CLIPBOARD_PREVIEW_WINDOW: &str = "right,55%,wrap,border-left";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPreview {
+    Keep,
+    ShowClipboardPreview,
+    HideClipboardPreview,
+}
+
+fn footer_for_line(line: &str) -> String {
+    let item = render::parse_line(line);
+    let primary = item
+        .as_ref()
+        .map(|item| defaults::describe(item, defaults::surface()))
+        .unwrap_or("Select");
+    ui::footer_for(primary)
+}
+
+/// Pure focus rule: every real clipboard row gets the same right-hand pane.
+/// Images render as pixels; text and Finder objects render their full content
+/// and metadata. A manually opened Quick Look has no marker and is left alone.
+fn focus_preview(q: &str, item: Option<&item::Item>, automatic_is_open: bool) -> FocusPreview {
+    let clipboard = compute::scope_query(q)
+        .is_some_and(|(scope, _)| scope == compute::Scope::Clipboard);
+    if clipboard && item.is_some_and(|item| item.kind == item::Kind::Clip) {
+        FocusPreview::ShowClipboardPreview
+    } else if automatic_is_open {
+        FocusPreview::HideClipboardPreview
+    } else {
+        FocusPreview::Keep
+    }
+}
+
+fn fzf_action_arg(value: &str) -> String {
+    value.replace('\\', "\\\\").replace(')', "\\)")
+}
+
+fn focus(q: &str, line: &str) -> i32 {
+    let item = render::parse_line(line);
+    let automatic_is_open = std::env::var("FZF_PREVIEW_LABEL")
+        .is_ok_and(|label| label.trim() == AUTO_PREVIEW_LABEL);
+    let mut action = format!("change-footer({})", fzf_action_arg(&footer_for_line(line)));
+    match focus_preview(q, item.as_ref(), automatic_is_open) {
+        FocusPreview::Keep => {}
+        FocusPreview::ShowClipboardPreview => action.push_str(&format!(
+            "+change-preview-window({CLIPBOARD_PREVIEW_WINDOW})+show-preview\
+             +change-preview-label({AUTO_PREVIEW_LABEL})"
+        )),
+        // `change-preview-window` without `hidden` makes a hidden pane visible.
+        // It used to run after `hide-preview`, immediately undoing the hide and
+        // producing the horizontal text pane shown in the bug report.
+        FocusPreview::HideClipboardPreview => action.push_str(
+            "+change-preview-window(down,99%,wrap,border-top,hidden)\
+             +change-preview-label()",
+        ),
+    }
+    println!("{action}");
+    0
+}
 
 /// Decide, per keystroke, what fzf should do.
 ///
@@ -400,7 +460,14 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
     };
     let rows = compute::dynamic_rows_with(q, &static_items);
     if !rows.is_empty() {
-        println!("{}", render::render_with(&rows, cols, None, tw));
+        let rendered = if compute::scope_query(q)
+            .is_some_and(|(scope, _)| scope == compute::Scope::Files)
+        {
+            render::render_files(&rows, cols)
+        } else {
+            render::render_with(&rows, cols, None, tw)
+        };
+        println!("{rendered}");
     }
     // Once the query has clearly declared an intent — a sum, a translation,
     // a scope, an agent to start — the unrelated catalogue underneath is
@@ -558,6 +625,45 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_rows_preview_automatically_and_only_inside_their_scope() {
+        use crate::item::{Item, Kind};
+        use super::{focus_preview, FocusPreview, CLIPBOARD_PREVIEW_WINDOW};
+
+        let image = Item::new("/private/image.png", Kind::Clip)
+            .put("clip_kind", "image")
+            .put("path", "/private/image.png");
+        let text = Item::new("copied text", Kind::Clip).put("clip_kind", "text");
+
+        assert!(
+            CLIPBOARD_PREVIEW_WINDOW.contains("border-left"),
+            "the list and live image need a visible divider"
+        );
+        assert_eq!(
+            focus_preview("c:", Some(&image), false),
+            FocusPreview::ShowClipboardPreview
+        );
+        assert_eq!(
+            focus_preview("c: screenshot", Some(&image), false),
+            FocusPreview::ShowClipboardPreview
+        );
+        assert_eq!(
+            focus_preview("c:", Some(&text), false),
+            FocusPreview::ShowClipboardPreview,
+            "text uses the same vertical pane rather than a horizontal Quick Look"
+        );
+        assert_eq!(
+            focus_preview("f:", Some(&image), true),
+            FocusPreview::HideClipboardPreview,
+            "leaving c: must not strand its right-hand pane"
+        );
+        assert_eq!(
+            focus_preview("f:", Some(&image), false),
+            FocusPreview::Keep,
+            "manual Quick Look outside c: remains a mode"
+        );
+    }
+
+    #[test]
     fn root_search_is_an_agent_home_until_the_user_types() {
         use crate::compute::{home_items, root_items, scope_query, scoped_rows, Scope};
         use crate::item::{Item, Kind};
@@ -701,6 +807,51 @@ mod tests {
         assert!(crate::compute::quicklink_draft(&secret).is_err(), "credentials are never indexed");
         let clip = crate::item::Item::new("some text", Kind::Clip);
         assert!(crate::compute::quicklink_draft(&clip).unwrap().is_none(), "ephemeral rows are not stable targets");
+    }
+
+    #[test]
+    fn typed_local_paths_are_file_objects_with_quicklink_and_quick_look() {
+        use crate::defaults::Surface;
+        use crate::item::Kind;
+
+        let root = std::env::temp_dir().join(format!(
+            "prelude-local-path-{}-{}",
+            std::process::id(),
+            crate::frecency::now() as u64
+        ));
+        let folder = root.join("Local Folder");
+        let file = folder.join("完整 note.md");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&file, "the complete local file\nsecond line\n").unwrap();
+        let pasted = file.to_string_lossy().replace(' ', "\\ ");
+
+        assert!(crate::compute::is_special(&pasted));
+        let row = crate::compute::dynamic_rows_with(&pasted, &[])
+            .into_iter()
+            .next()
+            .expect("an existing pasted path becomes a row");
+        assert_eq!(row.kind, Kind::File);
+        assert_eq!(row.title, "完整 note.md");
+        assert_eq!(row.get("path"), file.canonicalize().unwrap().to_string_lossy());
+        assert!(crate::preview::text(&row).contains("the complete local file"));
+        assert!(crate::actions::actions_for(&row, Surface::Prompt)
+            .iter()
+            .any(|(id, ..)| *id == "quicklink-create"));
+        let draft = crate::compute::quicklink_draft(&row).unwrap().unwrap();
+        assert_eq!(draft.kind, "file");
+        assert_eq!(draft.target, crate::paths::tilde(row.get("path")));
+
+        let folder_row = crate::compute::dynamic_rows_with(&folder.to_string_lossy(), &[])
+            .into_iter()
+            .next()
+            .expect("a local folder becomes an object too");
+        assert_eq!(folder_row.kind, Kind::Dir);
+        assert!(crate::preview::text(&folder_row).contains("Local Folder"));
+        assert!(crate::actions::actions_for(&folder_row, Surface::Prompt)
+            .iter()
+            .any(|(id, ..)| *id == "quicklink-create"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

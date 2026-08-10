@@ -156,6 +156,18 @@ Session filters are explicit words inside that scope:
 Archived Sessions are excluded from bare `s:` and from the small recent set
 in the general catalogue. Renamed Sessions still match their native title.
 
+## Local paths
+
+An explicit existing path is an object query and does not need the file index:
+absolute paths, `~/`, `./`, `../`, `file:///` and relative values containing a
+slash are recognized. Literal text is tried before one layer of shell
+unescaping, so both a real backslash and a Finder-dragged `Mobile\ Documents`
+remain representable. A file, folder or `.app` resolves to its ordinary Item;
+that gives it Launch Services Enter behaviour, Quick Look, and Create
+Quicklink rather than emitting an `open ...` command. Bare `/` remains the
+Skill browser. Recognition in `is_special` is lexical; existence is checked by
+the dynamic helper without a subprocess.
+
 ## Search providers
 
 A template Quicklink has two states:

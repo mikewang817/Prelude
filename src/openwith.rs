@@ -26,6 +26,19 @@ fn file() -> std::path::PathBuf {
     crate::paths::config().join("open.toml")
 }
 
+/// Materialise the editable rules file only when the settings row explicitly
+/// asks to open it. File actions remain the authority for writing rules.
+pub fn ensure_file() -> Result<std::path::PathBuf, String> {
+    let path = file();
+    if !path.exists() {
+        let text = "# Which application opens what, written by Prelude's ^K panel.\n\
+                    # Keys are extensions without the dot; \"*\" is everything else.\n\
+                    # Add rules from a file's Actions panel.\n\n[apps]\n";
+        crate::cache::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(path)
+}
+
 fn table() -> crate::minitoml::Table {
     std::fs::read_to_string(file())
         .map(|t| crate::minitoml::parse(&t))

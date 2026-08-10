@@ -445,11 +445,17 @@ pub(crate) fn add_web_search_defaults(mut text: String) -> (String, bool) {
     (text, true)
 }
 
-fn quicklinks_text() -> String {
-    let p = quicklinks_file();
-    if !p.exists() {
-        let _ = crate::cache::write_atomic(&p, QUICKLINKS_DEFAULT.as_bytes());
+pub fn ensure_quicklinks_file() -> Result<std::path::PathBuf, String> {
+    let path = quicklinks_file();
+    if !path.exists() {
+        crate::cache::write_atomic(&path, QUICKLINKS_DEFAULT.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
+    Ok(path)
+}
+
+fn quicklinks_text() -> String {
+    let p = ensure_quicklinks_file().unwrap_or_else(|_| quicklinks_file());
     let text = std::fs::read_to_string(&p).unwrap_or_default();
     let (text, changed) = add_web_search_defaults(text);
     if changed {
@@ -1390,6 +1396,76 @@ pub fn skill_query(q: &str) -> Option<(Item, String)> {
 /// evaluate a result. The one config lookup is a tiny local file needed for
 /// exact Quicklink aliases; calculations, subprocesses and network work stay
 /// in `dynamic_rows_with`.
+fn looks_like_local_path(q: &str) -> bool {
+    let trimmed = q.trim();
+    let unquoted = match (trimmed.chars().next(), trimmed.chars().last()) {
+        (Some(a), Some(b)) if a == b && matches!(a, '\'' | '"') && trimmed.len() > 1 => {
+            &trimmed[1..trimmed.len() - 1]
+        }
+        _ => trimmed,
+    };
+    unquoted.starts_with('/')
+        || unquoted.starts_with("~/")
+        || unquoted.starts_with("./")
+        || unquoted.starts_with("../")
+        || unquoted.starts_with("file:///")
+        || (!unquoted.contains("://") && unquoted.contains('/'))
+}
+
+/// Turn an explicitly typed or pasted local path into the same object row the
+/// file index would have produced. Existence is checked here, never in
+/// `is_special`, so the per-keystroke intent test remains lexical and cheap.
+fn local_path_item(q: &str) -> Option<Item> {
+    if !looks_like_local_path(q) {
+        return None;
+    }
+    let raw = q.trim();
+    let raw = raw.strip_prefix("file://").unwrap_or(raw);
+    let path = crate::settings::readings_of(raw)
+        .into_iter()
+        .find_map(|candidate| candidate.canonicalize().ok())?;
+    let path_text = path.to_string_lossy().into_owned();
+    let title = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("/")
+        .to_string();
+    if path.is_dir() {
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        {
+            return Some(
+                Item::new(format!("open {}", shq(&path_text)), Kind::App)
+                    .title(title)
+                    .sub(paths::tilde(&path_text))
+                    .put("path", path_text),
+            );
+        }
+        Some(
+            Item::new(format!("cd {}", shq(&path_text)), Kind::Dir)
+                .title(title)
+                .sub(paths::tilde(&path_text))
+                .put("path", path_text),
+        )
+    } else if path.is_file() {
+        let parent = path
+            .parent()
+            .map(|parent| paths::tilde(&parent.to_string_lossy()))
+            .unwrap_or_default();
+        Some(
+            Item::new(path_text.clone(), Kind::File)
+                .title(title)
+                .sub(parent)
+                .put("path", path_text),
+        )
+    } else {
+        None
+    }
+}
+
 pub fn is_special(q: &str) -> bool {
     let t = q.trim();
     if t.is_empty() {
@@ -1399,6 +1475,7 @@ pub fn is_special(q: &str) -> bool {
         || exact_scope_command(t).is_some()
         || scope_query(t).is_some()
         || t.starts_with(['/', '@'])
+        || looks_like_local_path(t)
     {
         return true;
     }
@@ -1431,6 +1508,14 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
     }
     if let Some((scope, term)) = scope_query(q) {
         return scoped_rows(scope, term, static_items);
+    }
+    // `/` by itself is the Skill browser. Any more specific path that really
+    // exists wins over slash-command browsing; a dragged `/Users/…` path must
+    // not become an empty Skill search.
+    if q.trim() != "/" {
+        if let Some(item) = local_path_item(q) {
+            return vec![item];
+        }
     }
     if let Some(rows) = skill_prefix_rows(q, static_items) {
         return rows;

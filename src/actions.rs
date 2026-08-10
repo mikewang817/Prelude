@@ -291,18 +291,19 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
                 "roots" => {
                     // Enter is "Add a folder…", so it is absent here.
                     v.push(a("set-root-remove", "Remove a folder…", "leaves the folder alone"));
-                    // Named rather than done on the way out of some other
-                    // action: it walks every root and can take a minute, and
-                    // a launcher that disappears for a minute has hung.
-                    v.push(a("set-index", "Rebuild the index now", "runs prelude index here"));
                     v.push(a("details", "Show every root", ""));
                 }
+                "index" => {
+                    v.push(a("details", "Show index status", ""));
+                }
                 "hotkey" => {
+                    v.push(a("set-default", "Reset to Cmd+Space", "still checks for conflicts"));
                     v.push(a("set-panel-open", "Start the panel", "if it is not running"));
                     v.push(a("set-panel-restart", "Restart the panel", "picks up a rebuilt binary"));
                 }
-                "paneldir" => v.push(a("set-paneldir-default", "Reset to $HOME", "")),
+                "paneldir" => v.push(a("set-default", "Reset to $HOME", "")),
                 "preview" | "enter" | "key" | "height" => {
+                    v.push(a("set-default", "Reset to the default", it.get("default")));
                     v.push(a("details", "What this changes", ""));
                 }
                 _ => {}
@@ -310,13 +311,23 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             let path = it.get("path");
             if !path.is_empty() {
                 let short = crate::paths::tilde(path);
-                // `openit` *is* Enter for the list-shaped settings, so it
-                // appears only for the ones whose Enter is something else.
-                if enter != crate::settings::EDIT_OPEN {
-                    v.push(a("openit", "Open the file", short.clone()));
+                let exists = std::path::Path::new(path).exists();
+                let can_create = matches!(
+                    it.get("setting"),
+                    "roots" | "openwith" | "snippets" | "quicklinks" | "favorites"
+                        | "key" | "height" | "preview" | "enter"
+                );
+                // `set-open-file` is Enter for list-shaped settings. It asks
+                // the owning module to materialise a missing file first, so
+                // "none yet" never turns into a Launch Services error.
+                if enter != crate::settings::EDIT_OPEN && (exists || can_create) {
+                    let label = if exists { "Open the file" } else { "Create and open the file" };
+                    v.push(a("set-open-file", label, short.clone()));
                 }
-                v.push(a("open", "Open it in your editor", format!("{editor} …")));
-                v.push(a("reveal-finder", "Reveal in Finder", short.clone()));
+                if exists {
+                    v.push(a("open", "Open it in your editor", format!("{editor} …")));
+                    v.push(a("reveal-finder", "Reveal in Finder", short.clone()));
+                }
                 v.push(a("copyabs", "Copy the file path", short));
             }
             v
@@ -954,15 +965,9 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         // same panel restart the CLI performs.
         "set-root-add" => return crate::settings::add_root_interactively(),
         "set-root-remove" => return crate::settings::remove_root_interactively(),
-        "set-index" => return crate::runhere::run_cmd("prelude index"),
         "set-value" => return crate::settings::edit(it),
-        "set-paneldir-default" => match crate::global::set_directory_default() {
-            Ok(message) => ui::note(&message),
-            Err(e) => {
-                ui::note(&e);
-                return 2;
-            }
-        },
+        "set-default" => return crate::settings::reset_item(it),
+        "set-open-file" => return crate::settings::open_file(it),
         "set-panel-open" => match crate::global::open_panel() {
             Ok(()) => return 0,
             Err(e) => {

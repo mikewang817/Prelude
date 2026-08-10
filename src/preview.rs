@@ -12,8 +12,15 @@ use crate::paths::tilde;
 use std::io::Write;
 
 pub fn show(it: &Item) {
-    if image_path(it).is_some_and(show_image) {
-        return;
+    // Terminal graphics are placements, not cells. Redrawing text does not
+    // erase one, so every preview first removes Prelude's fixed placement.
+    // Without this, fast arrow-key movement leaves old images underneath the
+    // new pane even though fzf has already cleared its character grid.
+    clear_native_image();
+    if let Some(path) = image_path(it) {
+        if show_image(path, image_dimensions(it)) {
+            return;
+        }
     }
     println!("{}", text(it));
 }
@@ -36,11 +43,73 @@ fn image_path(it: &Item) -> Option<&str> {
     .then_some(path)
 }
 
-/// Render an image inside fzf's Quick Look area. Chafa gives the best result
-/// and handles animation and scaling; when it is not installed, Ghostty/
-/// Kitty and iTerm still get their native inline-image protocol. Every other
-/// terminal falls back to the ordinary path and metadata view.
-fn show_image(path: &str) -> bool {
+fn image_dimensions(it: &Item) -> Option<(usize, usize)> {
+    let value = it.fields.first()?;
+    let (width, height) = value.split_once('×').or_else(|| value.split_once('x'))?;
+    let width = width.trim().parse().ok()?;
+    let height = height.trim().parse().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+const KITTY_IMAGE_ID: u32 = 1_347_565_876;
+
+fn native_kind() -> &'static str {
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
+    let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
+    if program.contains("ghostty") || term.contains("kitty") {
+        "kitty"
+    } else if program.contains("iterm") {
+        "iterm"
+    } else {
+        ""
+    }
+}
+
+fn kitty_delete() -> String {
+    format!("\x1b_Ga=d,d=I,i={KITTY_IMAGE_ID},q=2;\x1b\\")
+}
+
+fn kitty_image(
+    path: &str,
+    cols: usize,
+    rows: usize,
+    dimensions: Option<(usize, usize)>,
+) -> String {
+    let encoded = base64(path.as_bytes());
+    // Kitty stretches an image when both c and r are supplied. Give it only
+    // the limiting dimension and let the terminal derive the other from the
+    // image and cell geometry. Terminal cells are approximately twice as tall
+    // as they are wide; that estimate is used only to decide which pane edge
+    // is limiting — Kitty performs the actual aspect-preserving calculation.
+    let placement = match dimensions {
+        Some((width, height))
+            if width as f64 / (height as f64) < cols as f64 / (rows as f64 * 2.0) =>
+        {
+            format!("r={rows}")
+        }
+        _ => format!("c={cols}"),
+    };
+    format!(
+        "\x1b_Ga=T,f=100,t=f,q=2,C=1,i={KITTY_IMAGE_ID},{placement};{encoded}\x1b\\"
+    )
+}
+
+fn clear_native_image() {
+    if native_kind() == "kitty" {
+        print!("{}", kitty_delete());
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Render an image inside fzf's Quick Look area.
+///
+/// Native protocols come first. Ghostty can load a file by path, so a focus
+/// change writes roughly one hundred bytes and returns immediately; the old
+/// Chafa-first path started a process and streamed megabytes on every arrow
+/// press. Chafa remains the fallback, but `exec` replaces this preview helper
+/// with it so fzf's cancellation kills the renderer itself rather than leaving
+/// an orphan writing into the next image.
+fn show_image(path: &str, dimensions: Option<(usize, usize)>) -> bool {
     if !std::path::Path::new(path).is_file() {
         return false;
     }
@@ -56,48 +125,38 @@ fn show_image(path: &str) -> bool {
         .unwrap_or(24)
         .saturating_sub(2)
         .max(1);
-    let program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
-    let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
+
+    match native_kind() {
+        "kitty" => {
+            print!("{}", kitty_image(path, cols, rows, dimensions));
+            let _ = std::io::stdout().flush();
+            return true;
+        }
+        "iterm" => {
+            if let Ok(bytes) = std::fs::read(path) {
+                print!(
+                    "\x1b]1337;File=inline=1;width={cols};height={rows};preserveAspectRatio=1:{}\x07",
+                    base64(&bytes)
+                );
+                let _ = std::io::stdout().flush();
+                return true;
+            }
+        }
+        _ => {}
+    }
 
     if crate::exec::which("chafa").is_some() {
-        let format = if program.contains("iterm") {
-            "iterm"
-        } else if program.contains("ghostty") || term.contains("kitty") {
-            "kitty"
-        } else {
-            "symbols"
-        };
-        if std::process::Command::new("chafa")
+        use std::os::unix::process::CommandExt;
+        let _ = std::process::Command::new("chafa")
             .args([
                 "--animate=off",
                 "--exact-size=off",
-                "--format", format,
+                "--format", "symbols",
                 "--size", &format!("{cols}x{rows}"),
                 path,
             ])
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return true;
-        }
-    }
-
-    if program.contains("ghostty") || term.contains("kitty") {
-        let encoded = base64(path.as_bytes());
-        print!("\x1b_Ga=T,f=100,t=f,q=2,C=1,c={cols},r={rows};{encoded}\x1b\\");
-        let _ = std::io::stdout().flush();
-        return true;
-    }
-    if program.contains("iterm") {
-        if let Ok(bytes) = std::fs::read(path) {
-            print!(
-                "\x1b]1337;File=inline=1;width={cols};height={rows};preserveAspectRatio=1:{}\x07",
-                base64(&bytes)
-            );
-            let _ = std::io::stdout().flush();
-            return true;
-        }
+            .exec();
     }
     false
 }
@@ -429,6 +488,19 @@ pub fn text(it: &Item) -> String {
                 out.push(it.get("opening").to_string());
             }
         }
+        Kind::Dir => {
+            let path = it.get("path");
+            kv(&mut out, "path", &tilde(path));
+            if let Ok(metadata) = std::fs::metadata(path) {
+                if let Ok(modified) = metadata.modified() {
+                    let at = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs_f64())
+                        .unwrap_or(0.0);
+                    kv(&mut out, "modified", &crate::sources::user::ago(at));
+                }
+            }
+        }
         Kind::Config => {
             kv(&mut out, "agent", it.get("agent"));
             let p = it.get("path");
@@ -449,8 +521,8 @@ pub fn text(it: &Item) -> String {
             kv(&mut out, "image", it.get("image"));
         }
         Kind::Ssh => kv(&mut out, "host", it.get("host")),
-        Kind::Dir | Kind::Script | Kind::Git | Kind::History | Kind::Path
-        | Kind::Sys | Kind::Calc | Kind::Translate => {
+        Kind::Script | Kind::Git | Kind::History | Kind::Path | Kind::Sys
+        | Kind::Calc | Kind::Translate => {
             if !it.subtitle.is_empty() {
                 out.push(it.subtitle.clone());
                 out.push(String::new());
@@ -478,4 +550,30 @@ fn group(n: u64) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kitty_delete, kitty_image, KITTY_IMAGE_ID};
+
+    #[test]
+    fn native_image_focus_is_a_small_replaceable_terminal_message() {
+        let delete = kitty_delete();
+        let wide = kitty_image(
+            "/private/prelude/clipboard/large screenshot.png",
+            90,
+            40,
+            Some((2474, 1228)),
+        );
+        let tall = kitty_image("/private/prelude/clipboard/portrait.png", 90, 40, Some((800, 1600)));
+        assert!(delete.contains(&format!("d=I,i={KITTY_IMAGE_ID}")));
+        assert!(wide.contains(&format!("i={KITTY_IMAGE_ID}")));
+        assert!(wide.contains("t=f"), "Ghostty must load the file rather than receive its pixels");
+        assert!(wide.contains("c=90") && !wide.contains("r=40"), "wide images fit by width");
+        assert!(tall.contains("r=40") && !tall.contains("c=90"), "tall images fit by height");
+        assert!(
+            delete.len() + wide.len() < 256,
+            "an arrow press must write a path-sized message, not image-sized output"
+        );
+    }
 }
