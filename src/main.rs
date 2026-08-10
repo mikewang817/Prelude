@@ -139,7 +139,7 @@ fn main() -> ExitCode {
             println!("building file index ...");
             let n = compute::build_fileindex();
             println!("  indexed {n} files from: {}", compute::index_roots().join(", "));
-            println!("  search them with  f:name  in the launcher");
+            println!("  search names, paths and Finder tags with  f:name  or  f:tag:work");
             0
         }
         ["clipd"] => clipd::watch(),
@@ -379,7 +379,11 @@ fn footer_for_line(line: &str) -> String {
         .as_ref()
         .map(|item| defaults::describe(item, defaults::surface()))
         .unwrap_or("Select");
-    ui::footer_for(primary)
+    ui::footer_for_item(
+        primary,
+        item.as_ref(),
+        std::env::var_os("PRELUDE_FULL_SURFACE").is_some_and(|value| !value.is_empty()),
+    )
 }
 
 /// Pure focus rule: every real clipboard row gets the same right-hand pane.
@@ -739,6 +743,54 @@ mod tests {
         assert_eq!(files[0].get("clip_kind"), "files");
         assert_eq!(files[0].title, "Cargo.toml");
         assert!(files[0].cmd.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn file_search_matches_finder_tags_without_confusing_them_with_paths() {
+        let index = concat!(
+            "/tmp/client/report.md\t[\"Orange\",\"Project Alpha\"]\n",
+            "/tmp/orange-name.txt\t[\"Blue\"]\n",
+            "/tmp/plain.txt\n",
+        );
+        let by_name = crate::compute::search_fileindex_from(index, "orange");
+        assert_eq!(by_name.len(), 2, "ordinary terms search both paths and tags");
+        let by_tag = crate::compute::search_fileindex_from(index, "tag:orange");
+        assert_eq!(by_tag.len(), 1, "tag: searches metadata only");
+        assert_eq!(by_tag[0].title, "report.md");
+        assert_eq!(by_tag[0].get("tags"), "Orange\u{1e}Project Alpha");
+        assert_eq!(
+            crate::compute::search_fileindex_from(index, "tag:\"Project Alpha\"").len(),
+            1,
+            "quoted multi-word Finder tags stay together",
+        );
+        assert!(crate::compute::search_fileindex_from(index, "tag:orange-name").is_empty());
+    }
+
+    #[test]
+    fn finder_tag_import_is_bounded_private_and_tied_to_indexed_paths() {
+        let allowed = std::collections::HashSet::from(["/tmp/allowed"]);
+        let records = concat!(
+            "{\"path\":\"/tmp/allowed\",\"tags\":[\"Work\",\"work\",\"API_TOKEN=secret\"]}\n",
+            "{\"path\":\"/tmp/not-indexed\",\"tags\":[\"Private\"]}\n",
+        );
+        let tags = crate::compute::sanitized_file_tags(records, &allowed);
+        assert_eq!(tags.get("/tmp/allowed").unwrap(), &["Work"]);
+        assert!(!tags.contains_key("/tmp/not-indexed"));
+    }
+
+    #[test]
+    fn command_enter_is_only_advertised_for_files_and_opens_their_parent() {
+        use crate::item::{Item, Kind};
+        let file = Item::new("/tmp/project/readme.md", Kind::Find)
+            .put("path", "/tmp/project/readme.md");
+        assert_eq!(
+            crate::ui::containing_directory(&file).as_deref(),
+            Some(std::path::Path::new("/tmp/project")),
+        );
+        assert!(crate::ui::footer_for_item("Open it", Some(&file), true).contains("Cmd+Enter"));
+        assert!(!crate::ui::footer_for_item("Open it", Some(&file), false).contains("Cmd+Enter"));
+        let folder = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
+        assert!(!crate::ui::footer_for_item("Open it", Some(&folder), true).contains("Cmd+Enter"));
     }
 
     #[test]

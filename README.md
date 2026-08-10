@@ -424,20 +424,24 @@ Same conversation, borrowed skill available. `s:` finds the session id.
 
 ## Keys
 
-Two action keys, plus one Quick Look mode; none needs terminal configuration:
+The portable keys need no terminal configuration. The dedicated global panel
+adds one contextual macOS shortcut of its own:
 
 | Key | Prelude |
 |---|---|
 | `Enter` | The obvious thing for what you selected |
+| `Cmd+Enter` | Open a selected file's containing folder (global panel only) |
 | `Ctrl+K` | Everything else for this item |
 | `Ctrl+P` | Show or hide Quick Look in the result area |
 | `Esc` | Close |
 
-Ctrl, because Ctrl is what a terminal reliably receives. macOS spends Option
-on composing characters unless the terminal is told otherwise — so `Option+K`
-would type `˚` into the search box — and it never delivers Cmd to a terminal
-at all. A key that works on one machine and silently does nothing on the next
-is worse than no key.
+Ctrl is what a terminal reliably receives. macOS spends Option on composing
+characters and normally never delivers Cmd to terminal programs. Prelude can
+promise `Cmd+Enter` only because its generated quick-terminal configuration
+belongs to a dedicated Ghostty instance: Ghostty translates that chord to a
+private Ctrl sequence before fzf sees it. Your normal Ghostty configuration
+and inline `Ctrl+R` launcher are untouched, and the footer advertises the chord
+only on File rows in the global panel.
 
 `Ctrl+K` opens the alternatives to Enter — and only the alternatives.
 **Enter's own action is the header, not a row**, because opening the panel is
@@ -561,7 +565,9 @@ rules that keep computed rows from being filtered out by fzf.
 up to 38% of the usable width (capped only on very wide terminals), never
 repeats that name inside the path, and shortens an oversized parent through its
 middle — `~/App/a-long.../src/deep/parent` — so both where it starts and the
-directory nearest the file survive.
+directory nearest the file survive. `prelude index` also records Finder tags;
+ordinary terms match names, paths or tags, while `f:tag:work` searches tags
+only. Matching tags appear as `#work` on the row and in Quick Look.
 
 Clipboard history is chronological rather than frecent: the thing copied most
 recently is always first. Text is retained as text; one or several files remain

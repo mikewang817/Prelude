@@ -87,6 +87,13 @@ files. `:` produces searchable scope commands; Enter on one fills its prefix
 into the same search box. `@` lists agent-question commands before the
 question exists.
 
+The explicit `prelude index` rebuild reads each indexed file's Finder tags
+through Foundation and stores bounded, credential-filtered names beside its
+path. Ordinary `f:` words match filename, parent path or tag. A `tag:` word
+matches metadata only (`f:tag:work`), and quotes keep a multi-word name intact
+(`f:tag:"Project Alpha"`). No Spotlight or metadata process runs in the
+per-keystroke helper; an old path-only index remains readable until rebuilt.
+
 `/` has the two states a provider has, and for the same reason. While the name
 is *incomplete* it browses: `/cnipa-oo` lists every Skill whose name contains
 that, as Skill rows. The moment it is a name — `/cnipa-ooa`, with or without

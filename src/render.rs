@@ -149,7 +149,21 @@ pub fn render_files(items: &[Item], width: usize) -> String {
             .map(|parent| crate::paths::tilde(&parent.to_string_lossy()))
             .filter(|parent| !parent.is_empty())
             .unwrap_or_else(|| item.subtitle.clone());
-        let parent = dtrunc_middle(&flatten(&parent), path_width);
+        let tag_text = if path_width >= 16 && !item.get("tags").is_empty() {
+            let tags = item
+                .get("tags")
+                .split('\u{1e}')
+                .filter(|tag| !tag.is_empty())
+                .map(|tag| format!("#{tag}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let budget = (path_width * 45 / 100).max(8);
+            format!(" · {}", dtrunc(&tags, budget.saturating_sub(3)))
+        } else {
+            String::new()
+        };
+        let parent_width = path_width.saturating_sub(dwidth(&tag_text));
+        let parent = dtrunc_middle(&flatten(&parent), parent_width);
         let (color, label) = item.kind.style();
 
         out.push_str(&title);
@@ -157,7 +171,7 @@ pub fn render_files(items: &[Item], width: usize) -> String {
         out.push_str(color);
         out.push_str(&pad_to(label, lw, true));
         out.push_str(RESET);
-        out.push_str(&format!("{DIM} · {parent}{RESET}"));
+        out.push_str(&format!("{DIM} · {parent}{tag_text}{RESET}"));
         out.push(SEP);
         out.push_str(&serde_json::to_string(item).unwrap_or_default());
         out.push('\n');

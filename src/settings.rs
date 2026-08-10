@@ -669,7 +669,7 @@ pub fn items() -> Vec<Item> {
     let index_detail = if stale {
         "stale · rebuild before relying on f:"
     } else {
-        "current · shared by every f: search"
+        "current · paths and Finder tags for every f: search"
     };
     v.push(
         row("index", "File index", index_value, index_detail, EDIT_REBUILD)
@@ -826,7 +826,7 @@ pub fn detail(it: &Item) -> Vec<String> {
             if index_stale() {
                 out.push("The roots have changed since it was built.".into());
             }
-            out.push("Rebuilding walks every search root and may take a minute.".into());
+            out.push("Rebuilding walks every search root and records Finder tags; it may take a minute.".into());
         }
         "key" => {
             out.push("Bound by `prelude init zsh`, which runs when a shell starts,".into());

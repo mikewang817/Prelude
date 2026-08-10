@@ -1307,6 +1307,78 @@ pub fn index_roots() -> Vec<String> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
+const FILE_TAGS_JXA: &str = r#"
+ObjC.import('Foundation')
+function run(argv) {
+  const text = $.NSString.stringWithContentsOfFileEncodingError(
+    argv[0], $.NSUTF8StringEncoding, null)
+  if (!text) return ''
+  const out = []
+  for (const path of text.js.split('\n')) {
+    if (!path) continue
+    try {
+      const value = Ref()
+      const url = $.NSURL.fileURLWithPath(path)
+      if (!url.getResourceValueForKeyError(value, $.NSURLTagNamesKey, null) || !value[0]) continue
+      const tags = value[0].js.map(tag => tag.js)
+      if (tags.length) out.push(JSON.stringify({path: path, tags: tags}))
+    } catch (_) {}
+  }
+  return out.join('\n')
+}
+"#;
+
+pub(crate) fn sanitized_file_tags(
+    output: &str,
+    allowed: &std::collections::HashSet<&str>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut found = std::collections::HashMap::new();
+    for line in output.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(path) = value.get("path").and_then(|value| value.as_str()) else { continue };
+        if !allowed.contains(path) {
+            continue;
+        }
+        let mut tags: Vec<String> = value
+            .get("tags")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str())
+            .map(crate::width::flatten)
+            .filter(|tag| {
+                !tag.is_empty()
+                    && crate::width::dwidth(tag) <= 80
+                    && !crate::secrets::looks_secret(tag)
+            })
+            .take(16)
+            .collect();
+        tags.sort_by_key(|tag| tag.to_ascii_lowercase());
+        tags.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        if !tags.is_empty() {
+            found.insert(path.to_string(), tags);
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn finder_tags(index: &std::path::Path, lines: &[String]) -> std::collections::HashMap<String, Vec<String>> {
+    let Some(index) = index.to_str() else { return std::collections::HashMap::new() };
+    let output = run(
+        &["/usr/bin/osascript", "-l", "JavaScript", "-e", FILE_TAGS_JXA, index],
+        Duration::from_secs(120),
+    );
+    let allowed: std::collections::HashSet<&str> = lines.iter().map(String::as_str).collect();
+    sanitized_file_tags(&output, &allowed)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn finder_tags(_: &std::path::Path, _: &[String]) -> std::collections::HashMap<String, Vec<String>> {
+    std::collections::HashMap::new()
+}
+
 pub fn build_fileindex() -> usize {
     let finder = which("fd").or_else(|| which("fdfind"));
     let mut lines = Vec::new();
@@ -1327,34 +1399,70 @@ pub fn build_fileindex() -> usize {
         };
         lines.extend(out.lines().map(str::to_string));
     }
-    let _ = crate::cache::write_atomic(&fileindex_path(), lines.join("\n").as_bytes());
+    let index = fileindex_path();
+    // Write paths first so a tag-reader failure still leaves a complete usable
+    // index, and so JXA receives one short argv entry rather than thousands of
+    // paths (which can exceed ARG_MAX).
+    let _ = crate::cache::write_atomic(&index, lines.join("\n").as_bytes());
+    let tags = finder_tags(&index, &lines);
+    let records: Vec<String> = lines
+        .iter()
+        .map(|path| match tags.get(path) {
+            Some(tags) => format!("{path}\t{}", serde_json::to_string(tags).unwrap_or_default()),
+            None => path.clone(),
+        })
+        .collect();
+    let _ = crate::cache::write_atomic(&index, records.join("\n").as_bytes());
     // Recorded so the settings row can state the size without reading a
     // megabyte of paths on every gather.
     crate::settings::record_index_count(lines.len());
     lines.len()
 }
 
-/// `f:name` searches a prebuilt index. Spotlight indexing may be disabled and
-/// a live `fd` over $HOME takes over 30 seconds, so neither works live.
-pub fn search_fileindex(term: &str) -> Option<Vec<Item>> {
-    let text = std::fs::read_to_string(fileindex_path()).ok()?;
-    let needles: Vec<String> = term
-        .split_whitespace()
-        .map(|w| w.to_ascii_lowercase())
+pub(crate) fn search_fileindex_from(text: &str, term: &str) -> Vec<Item> {
+    let needles: Vec<String> = crate::sources::sessions::split_words(term)
+        .into_iter()
+        .map(|word| word.to_lowercase())
         .collect();
     let mut out = Vec::new();
-    for line in text.lines() {
-        let low = line.to_ascii_lowercase();
-        if needles.iter().all(|n| low.contains(n.as_str())) {
-            let name = line.rsplit('/').next().unwrap_or(line).to_string();
-            let dir = line.rsplit_once('/').map(|(d, _)| paths::tilde(d)).unwrap_or_default();
-            out.push(Item::new(line, Kind::Find).title(name).sub(dir).put("path", line));
+    for record in text.lines() {
+        let (path, tags): (&str, Vec<String>) = match record.split_once('\t') {
+            Some((path, encoded)) => (path, serde_json::from_str(encoded).unwrap_or_default()),
+            None => (record, Vec::new()),
+        };
+        let path_low = path.to_lowercase();
+        let tags_low: Vec<String> = tags.iter().map(|tag| tag.to_lowercase()).collect();
+        let matches = needles.iter().all(|needle| {
+            if let Some(tag) = needle.strip_prefix("tag:") {
+                !tag.is_empty() && tags_low.iter().any(|candidate| candidate.contains(tag))
+            } else {
+                path_low.contains(needle)
+                    || tags_low.iter().any(|candidate| candidate.contains(needle))
+            }
+        });
+        if matches {
+            let name = path.rsplit('/').next().unwrap_or(path).to_string();
+            let dir = path.rsplit_once('/').map(|(dir, _)| paths::tilde(dir)).unwrap_or_default();
+            out.push(
+                Item::new(path, Kind::Find)
+                    .title(name)
+                    .sub(dir)
+                    .put("path", path)
+                    .put("tags", tags.join("\u{1e}")),
+            );
             if out.len() >= 60 {
                 break;
             }
         }
     }
-    Some(out)
+    out
+}
+
+/// `f:name` searches a prebuilt index. Finder tags are captured during the
+/// explicit rebuild, never by launching metadata tools on each keystroke.
+pub fn search_fileindex(term: &str) -> Option<Vec<Item>> {
+    let text = std::fs::read_to_string(fileindex_path()).ok()?;
+    Some(search_fileindex_from(&text, term))
 }
 
 /// `@claude refactor this` — start an agent in the current directory with a

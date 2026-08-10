@@ -17,11 +17,16 @@ use std::process::{Command, Stdio};
 /// only legible to someone who already knows what they mean. And since Enter
 /// does something different per item, the row has to say which.
 pub fn footer_for(primary: &str) -> String {
+    footer_for_item(primary, None, false)
+}
+
+pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) -> String {
     let sep = format!("{DIM}   ·   {RESET}");
-    let mut parts = vec![
-        format!("{primary}{DIM}  Enter{RESET}"),
-        format!("Actions{DIM}  Ctrl+K{RESET}"),
-    ];
+    let mut parts = vec![format!("{primary}{DIM}  Enter{RESET}")];
+    if command_enter && item.is_some_and(|item| matches!(item.kind, Kind::File | Kind::Find)) {
+        parts.push(format!("Open folder{DIM}  Cmd+Enter{RESET}"));
+    }
+    parts.push(format!("Actions{DIM}  Ctrl+K{RESET}"));
     if crate::settings::preview_enabled() {
         parts.push(format!("Preview{DIM}  Ctrl+P{RESET}"));
     }
@@ -41,16 +46,11 @@ pub fn footer_for(primary: &str) -> String {
 /// competes with results.
 pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
 
-/// One key beyond Enter, and it is a Ctrl key because those are the only
-/// ones a terminal reliably receives. macOS spends Option on composing
-/// characters unless the terminal is told otherwise, and never delivers Cmd
-/// at all; a key that works on one machine and silently does nothing on the
-/// next is worse than no key.
-///
-/// The secondary action has no key of its own. It is not gone — it is the
-/// second entry of the ^K panel, where it is also spelled out rather than
-/// remembered.
-const EXPECT: &str = "ctrl-x,ctrl-k";
+/// Ctrl remains the portable terminal vocabulary. The dedicated global panel
+/// has one deliberate macOS exception: its generated Ghostty config translates
+/// Cmd+Enter into Ctrl+G, which fzf can receive reliably. It is contextual to
+/// files and is never advertised on an inline terminal surface.
+const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g";
 
 pub struct FzfOut {
     pub key: String,
@@ -252,9 +252,27 @@ pub fn search() -> i32 {
                 emit("RUN", &item.cmd);
                 return 0;
             }
+            "ctrl-g" if matches!(item.kind, Kind::File | Kind::Find) => {
+                crate::frecency::bump(&item.cmd);
+                let Some(directory) = containing_directory(&item) else { return 2 };
+                return match crate::openwith::open_now(&directory.to_string_lossy(), None) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        note(&error);
+                        2
+                    }
+                };
+            }
+            "ctrl-g" => continue,
             _ => return apply_default(&item),
         }
     }
+}
+
+pub(crate) fn containing_directory(item: &Item) -> Option<std::path::PathBuf> {
+    matches!(item.kind, Kind::File | Kind::Find)
+        .then(|| std::path::Path::new(item.get("path")).parent().map(std::path::Path::to_path_buf))
+        .flatten()
 }
 
 /// Carry out whatever Enter means for this item.

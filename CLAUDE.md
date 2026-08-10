@@ -194,8 +194,13 @@ while rebuilding is an explicit operation that may take a minute. Nothing here
 may read the file index to draw a row. Its size is recorded beside it when it
 is built; an index from an older build has no record, so the first reader counts
 it once and writes the number down rather than re-reading a megabyte on every
-gather. Settings gather may use file checks and stats, never `pgrep` or another
-subprocess; live panel status belongs to explicit `prelude global status`.
+gather. Finder tags are part of that explicit rebuild: one JXA process asks
+Foundation for `NSURLTagNamesKey`, secret-looking or unbounded names are
+rejected, and the bounded names are stored beside the path. `f:` may match them
+normally or exclusively with `tag:`; it must never launch `mdfind`, `mdls` or
+another metadata process on a keystroke. Settings gather may use file checks
+and stats, never `pgrep` or another subprocess; live panel status belongs to
+explicit `prelude global status`.
 
 ## The rules that matter
 
@@ -225,12 +230,14 @@ as a parameter, so the decisions stay testable without a process to read it
 out of. Do not reintroduce an env read inside a rule; a test that has to set a
 variable is a test that races every other test in the binary.
 
-**Two action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a mode.**
-Raycast has a third action — the secondary on its own key — and Prelude keeps
-that action but not the key: where useful, it is the first selectable row
+**Two general action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a
+mode.** Raycast has a third action — the secondary on its own key — and Prelude
+keeps that action but not the key: where useful, it is the first selectable row
 below Enter's non-selectable header. Neither action is a fixed verb; both are
-per-item, and they are opposites — where one acts, the other hands you text.
-A test asserts they never coincide. Ctrl+P is different: Quick Look replaces
+per-item, and they are opposites — where one acts, the other hands you text. A
+test asserts they never coincide. The global panel has one narrower object
+shortcut, not a generic secondary: Cmd+Enter on File/Find opens the containing
+directory. Ctrl+P is different: Quick Look replaces
 the result area until Ctrl+P is pressed again, without selecting or acting on
 anything. The preview is hidden by default and never owns a permanent column.
 Clipboard rows are the deliberate contextual exception: while any real row is
@@ -245,10 +252,12 @@ horizontal pane.
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
 Option+Enter comes through as a bare Enter — running the *primary* action,
-silently. Cmd never reaches a terminal at all. A key that works here and
-quietly does nothing on the next machine is worse than no key, which is why
-`EXPECT` is down to `ctrl-x,ctrl-k` and there is no terminal configuration to
-explain to anyone.
+silently. Cmd never reaches a terminal application. The containing-directory
+shortcut is honest only because Prelude owns the dedicated panel's Ghostty
+config: `cmd+enter=text:\\x07` translates it to private Ctrl+G, `EXPECT`
+includes `ctrl-g`, and the footer advertises Cmd+Enter only when
+`PRELUDE_FULL_SURFACE` and File/Find are both true. Never claim it on the zsh
+widget or alter the person's ordinary terminal config.
 
 **The line is not danger, it is whether there is anything to edit.** A
 command line goes onto the prompt — including agents, skills and sessions,

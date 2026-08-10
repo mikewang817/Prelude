@@ -404,6 +404,7 @@ pub fn text(it: &Item) -> String {
         Kind::File | Kind::Find => {
             let p = it.get("path");
             kv(&mut out, "path", &tilde(p));
+            kv(&mut out, "tags", &it.get("tags").replace('\u{1e}', ", "));
             if let Ok(m) = std::fs::metadata(p) {
                 kv(&mut out, "size", &format!("{} bytes", group(m.len())));
             }

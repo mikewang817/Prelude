@@ -400,7 +400,7 @@ pub fn open_panel() -> Result<(), String> {
     if running() {
         return Err("the panel is already running — press the chord to reveal it".into());
     }
-    start_helper()
+    start_current()
 }
 
 /// Stop and restart the instance, which is what a rebuilt binary needs.
@@ -410,9 +410,15 @@ pub fn open_panel() -> Result<(), String> {
 /// rows and the footer update and it looks like the build took — while the
 /// half that decides what to do with an answer is still the old one.
 pub fn restart_panel() -> Result<String, String> {
+    if !quick_config_path().is_file() {
+        return Err("the launcher panel is not installed; run `prelude global install`".into());
+    }
+    // A rebuild can change both the parent loop and Prelude-owned Ghostty
+    // bindings. Refresh while the old panel is still healthy, then replace it.
+    write_quick_config(&quick_config_path())?;
     stop_helper();
     start_helper()?;
-    Ok("panel restarted; it now runs the binary on disk".into())
+    Ok("panel restarted; it now runs the binary and panel configuration on disk".into())
 }
 
 fn write_hotkey(hotkey: Hotkey) -> Result<String, String> {
@@ -546,6 +552,9 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          working-directory = {directory}\n\
          keybind = global:{chord}=toggle_quick_terminal\n\
          keybind = unconsumed:escape=toggle_quick_terminal\n\
+         # fzf cannot receive Command. Translate it to Prelude's private Ctrl+G\n\
+         # inside this dedicated panel; the person's normal Ghostty is untouched.\n\
+         keybind = cmd+enter=text:\\x07\n\
          command = {exe} _panel\n",
         chord = hotkey.canonical(),
         exe = exe.display(),
@@ -661,6 +670,13 @@ fn wait_until_running() -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     false
+}
+
+fn start_current() -> Result<(), String> {
+    if quick_config_path().is_file() {
+        write_quick_config(&quick_config_path())?;
+    }
+    start_helper()
 }
 
 fn start_helper() -> Result<(), String> {
@@ -1113,7 +1129,7 @@ fn open_once() -> Result<(), String> {
         println!("the launcher panel is already running; press the chord to reveal it");
         return Ok(());
     }
-    start_helper()?;
+    start_current()?;
     println!("launcher panel started; press the chord to reveal it");
     Ok(())
 }
@@ -1123,7 +1139,7 @@ pub fn dispatch(args: &[&str]) -> i32 {
         ["install"] => install().map(|s| println!("{s}")),
         ["uninstall"] => uninstall(false).map(|s| println!("{s}")),
         ["uninstall", "--reset"] => uninstall(true).map(|s| println!("{s}")),
-        ["start"] => start_helper().map(|_| println!("Prelude global hotkey started")),
+        ["start"] => start_current().map(|_| println!("Prelude global hotkey started")),
         ["stop"] => {
             stop_helper();
             println!("Prelude global hotkey stopped");
@@ -1335,6 +1351,7 @@ mod tests {
         // Escape hides the panel *and* reaches fzf, so the launcher resets
         // behind a hidden panel and the next press is a reveal, not a rebuild.
         assert!(config.contains("keybind = unconsumed:escape=toggle_quick_terminal"));
+        assert!(config.contains(r"keybind = cmd+enter=text:\x07"));
         assert!(config.contains("command = /opt/homebrew/bin/prelude _panel"));
         assert!(config.contains("quick-terminal-position = center"));
         assert!(config.contains("quick-terminal-autohide = true"));

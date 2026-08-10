@@ -296,6 +296,9 @@ The replacement is a Ghostty quick terminal: a hidden instance hosting one
       window at rest, and declines saved state.
 - [x] Escape hides the panel and reaches fzf, so the launcher resets behind a
       hidden panel and stays warm.
+- [x] Cmd+Enter on a File/Find row opens its containing folder. The dedicated
+      config translates it to Ctrl+G, leaving the person's normal Ghostty and
+      the inline zsh widget untouched; no other row advertises the chord.
 - [x] One instance or none, enforced; `RunAtLoad` is the start, not a race
       partner for an explicit launch.
 - [x] The launcher is no longer the destination. Commands go to the tmux pane

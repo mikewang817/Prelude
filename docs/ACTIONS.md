@@ -33,9 +33,12 @@ The consequences are simple:
 - Opening, inserting, running and navigating complete the launcher action.
 - Destructive actions are red, last, and confirm when they cannot be undone.
 
-The prompt says `Action ›`, not `⌘`: terminals do not receive the Command key.
-The footer says `Choose`, not `Run`, because an action may copy, reveal, open,
-or remove something.
+The prompt says `Action ›`, not `⌘`: the action panel remains portable and
+terminals do not receive the Command key. The dedicated global panel has one
+explicit exception outside this menu: its own Ghostty config translates
+`Cmd+Enter` to Prelude's private `Ctrl+G`, and only a File/Find footer labels it
+`Open folder`. The footer says `Choose`, not `Run`, because an action may copy,
+reveal, open, or remove something.
 
 ## Rules
 
