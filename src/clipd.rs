@@ -25,6 +25,17 @@ const DAEMON_VERSION: &str = "4";
 const MAX_HISTORY: usize = 500;
 const MAX_IMAGES: usize = 100;
 
+/// One clipboard image, and all of them together.
+///
+/// A count is not a budget. A hundred images at the twenty-five megabytes
+/// each one is individually allowed is two and a half gigabytes of a person's
+/// disk, spent by a launcher, silently, on a cache — and a run of Retina
+/// screenshots is exactly how somebody gets there without doing anything
+/// unusual. The per-image cap stops one absurd bitmap; this one stops the
+/// accumulation, and it binds first in every realistic case.
+const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_IMAGES_TOTAL: u64 = 400 * 1024 * 1024;
+
 fn pidfile() -> PathBuf {
     paths::cache().join("clipd.pid")
 }
@@ -39,8 +50,20 @@ fn recorded_pid() -> Option<(i32, Option<&'static str>)> {
 
 use crate::exec::alive;
 
+/// The lock a live watcher holds for its whole life.
+///
+/// A pidfile cannot answer "is it running" on its own. Pids are reused, so a
+/// recorded number that is alive may be alive as something else entirely —
+/// and the window for that is not small on a machine that has been up for
+/// weeks. A held lock is the kernel's own answer, released when the holder
+/// ends however it ends, including a kill nobody handled.
+fn daemon_lock() -> PathBuf {
+    paths::cache().join("clipd.running")
+}
+
 pub fn is_running() -> bool {
-    recorded_pid().is_some_and(|(pid, version)| version == Some(DAEMON_VERSION) && alive(pid))
+    recorded_pid().is_some_and(|(_, version)| version == Some(DAEMON_VERSION))
+        && crate::cache::lock_is_held(&daemon_lock())
 }
 
 /// Start the watcher on first use. An older Prelude daemon is stopped first;
@@ -87,6 +110,17 @@ pub fn assets_dir() -> PathBuf {
 pub fn watch() -> i32 {
     let _ = std::fs::create_dir_all(paths::cache());
     let _ = std::fs::create_dir_all(paths::data());
+    // Claimed before anything else, and held for the life of the process.
+    //
+    // `ensure_running` was check-then-start, and the gap between the two is
+    // real: two shells opening at the same moment both saw no watcher and
+    // both started one. Two watchers then appended to, trimmed and renamed
+    // one history file forever after — the trim being read-change-write, so
+    // the losing copy took whole records with it. The lock closes the gap at
+    // the only place it can be closed, which is inside the winner.
+    let Some(_running) = crate::cache::try_lock(&daemon_lock(), Duration::ZERO) else {
+        return 0;
+    };
     let _ = std::fs::create_dir_all(assets_dir());
     private_dir(&assets_dir());
     migrate_image_fingerprints();
@@ -183,7 +217,7 @@ fn record(mut value: serde_json::Value) {
             // Clipboard screenshots can be large, but an accidental 200 MB
             // bitmap must not silently turn into permanent launcher state.
             let Ok(meta) = real.metadata() else { return };
-            if meta.len() > 25 * 1024 * 1024 {
+            if meta.len() > MAX_IMAGE_BYTES {
                 let _ = std::fs::remove_file(real);
                 return;
             }
@@ -335,16 +369,27 @@ fn trim(path: &Path) {
     let lines: Vec<&str> = text.lines().collect();
     let mut kept = Vec::new();
     let mut images = 0;
+    // Newest first, so what falls off the end is always the oldest — by
+    // count, and by the total bytes the whole collection is allowed.
+    let mut image_bytes: u64 = 0;
     for line in lines.iter().rev() {
-        let is_image = serde_json::from_str::<serde_json::Value>(line)
-            .ok()
+        let record = serde_json::from_str::<serde_json::Value>(line).ok();
+        let is_image = record
+            .as_ref()
             .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(|k| k == "image"))
             .unwrap_or(false);
         if is_image {
             images += 1;
-            if images > MAX_IMAGES {
+            let size = record
+                .as_ref()
+                .and_then(|v| v.get("path").and_then(|p| p.as_str()))
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if images > MAX_IMAGES || image_bytes.saturating_add(size) > MAX_IMAGES_TOTAL {
                 continue;
             }
+            image_bytes += size;
         }
         kept.push(*line);
         if kept.len() >= MAX_HISTORY {

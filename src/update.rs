@@ -243,6 +243,21 @@ fn staged_dir() -> PathBuf {
     crate::paths::cache().join("update")
 }
 
+/// Remove every staged version except the one named.
+///
+/// A cache with no eviction is not a cache, it is a leak with a good excuse.
+fn prune_staged(keep: &str) {
+    let Ok(entries) = std::fs::read_dir(staged_dir()) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy() == keep {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Download the archive for this machine and verify it before it is anywhere
 /// it could be run from.
 fn stage(version: &str) -> Result<PathBuf, String> {
@@ -250,6 +265,13 @@ fn stage(version: &str) -> Result<PathBuf, String> {
     let asset = format!("prelude-{target}.tar.gz");
     let dir = staged_dir().join(version);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Every version ever downloaded was kept here, forever: five releases had
+    // become twenty-one megabytes on this machine, and nothing was ever going
+    // to remove them. The rollback binary is `prelude.old` beside the
+    // installed one — these archives are only a download cache, and the only
+    // one worth caching is the one being installed right now, so that an
+    // interrupted download can resume instead of starting again.
+    prune_staged(version);
     let archive = dir.join(&asset);
     if verify(&archive, &dir).is_ok() {
         return Ok(archive);
@@ -433,6 +455,8 @@ fn apply(version: &str) -> i32 {
         }
     };
     forget_cached_row();
+    // The archive has served its purpose the moment the binary is in place.
+    prune_staged("");
     println!("  installed {version}; the previous binary is at {}", previous.display());
     // The panel is the whole reason this module exists: leaving it on the old
     // binary is the state an update is supposed to end, not create. But when
