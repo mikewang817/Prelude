@@ -279,6 +279,20 @@ pub fn search() -> i32 {
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
     args.push("--bind".into());
     args.push(format!("ctrl-y:execute-silent({} _copy {{2}})", shq(&me)));
+    // The key that used to be history search still is: pressed *inside* the
+    // launcher it moves the query into `h:`, carrying whatever was typed, and
+    // pressed again it carries the text back out. Ctrl+R twice at a shell is
+    // therefore the old incremental history search, which is the muscle
+    // memory this launcher took over and owes back.
+    args.push("--bind".into());
+    args.push(format!("ctrl-r:transform:{} _hist {{q}}", shq(&me)));
+    // Tab is the finger's guess for "finish this for me". It completes the
+    // focused row where completion is what Enter would do anyway — scope
+    // commands and search providers — and does nothing everywhere else,
+    // because inventing a Tab behaviour for rows that have no completion
+    // would teach the key to mean something different per row.
+    args.push("--bind".into());
+    args.push(format!("tab:transform:{} _tab {{2}}", shq(&me)));
     if preview {
         args.push("--preview".into());
         args.push(format!("{} _preview {{2}}", shq(&me)));

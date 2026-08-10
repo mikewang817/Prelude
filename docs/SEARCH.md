@@ -54,6 +54,13 @@ than matching every file containing the letter.
 
 Clearing the query returns to the Agent home. Type `:` to list every scope.
 
+Two keys carry their shell meaning into the launcher. `Ctrl+R` moves the typed
+text into the `h:` history scope and back out again — so pressing it twice at
+a shell is still incremental history search, now over the deduplicated,
+secret-filtered history rows. `Tab` completes the focused row when completion
+is what Enter would do anyway: scope commands (`f` → `f:`) and search
+providers (`g` → `g `). On any other row Tab does nothing.
+
 ## The web search under every query
 
 Because root search deliberately excludes the large sources, an ordinary

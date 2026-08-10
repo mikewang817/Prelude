@@ -183,12 +183,18 @@ prelude quicklink check
 | Key | Action |
 |---|---|
 | `Enter` | Perform the focused row's stated default |
+| `Tab` | Complete the focused scope command or search keyword |
+| `Ctrl+R` | Search shell history with the text already typed; again to come back |
 | `Ctrl+K` | Open contextual actions |
 | `Ctrl+P` | Toggle Quick Look when enabled |
 | `Cmd+Enter` | Open a file's containing folder from the global panel |
 | `→` | Open the focused row's actions, when nothing is typed |
 | `←` | Go back one level, when nothing is typed |
 | `Escape` | Go back one level; close Prelude at the outermost one |
+
+`Ctrl+R` pressed twice at a shell is therefore still incremental history
+search: the first press opens Prelude, the second moves what you type into the
+`h:` scope.
 
 ## Boundaries
 

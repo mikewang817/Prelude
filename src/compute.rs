@@ -1639,6 +1639,31 @@ pub fn scope_query(q: &str) -> Option<(Scope, &str)> {
     Some((def.scope, rest.trim()))
 }
 
+/// What Ctrl+R does to the query it finds: into `h:`, and back out.
+///
+/// The key that opened the launcher spent decades meaning "search my shell
+/// history", and the fingers that press it have not been told otherwise —
+/// they press it, see a list, and press it again, which at a shell walked to
+/// the next match. So a second press moves the typed text into the history
+/// scope: `git commit` becomes `h:git commit`, and the search the person
+/// actually meant runs over the three thousand commands root search
+/// deliberately excludes. A third press carries the text back out.
+///
+/// A query already in some *other* scope switches scope rather than nesting:
+/// `f:serve` becomes `h:serve`, because "search this in history instead" is
+/// the whole meaning of the key, and `h:f:serve` is a question with an empty
+/// answer.
+pub fn history_toggle(q: &str) -> String {
+    let t = q.trim_start();
+    if let Some((scope, term)) = scope_query(t) {
+        if scope == Scope::History {
+            return term.to_string();
+        }
+        return format!("h:{term}");
+    }
+    format!("h:{t}")
+}
+
 pub fn needs_static_items(q: &str) -> bool {
     let t = q.trim();
     scope_query(t).is_some()

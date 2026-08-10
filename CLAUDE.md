@@ -17,8 +17,8 @@ cargo clippy --release     # expected warning-free
 ```
 
 `_surface`, `_panel`, `_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`,
-`_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_refresh`, `_refresh-path`,
-`_copy-skill`, `_rm-skill`, `_lend-skill`, `_lend-mcp`, `_actions` are internal entry points. They
+`_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_hist`, `_tab`, `_refresh`,
+`_refresh-path`, `_copy-skill`, `_rm-skill`, `_lend-skill`, `_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
 
@@ -326,6 +326,19 @@ the unconditional door, so nothing is lost while they are away. `→` cannot be
 an `--expect` key for exactly this reason — those are not bindings and cannot
 be unbound — so it is a binding that `print`s `ui::OPEN_ACTIONS` onto fzf's
 output queue, and `run_fzf` scans for it rather than reading a fixed line.
+
+**A key the launcher took over keeps meaning what the fingers think it means.**
+Ctrl+R spent decades as incremental history search, and the widget sits on it;
+the debt is paid *inside*: a second press moves the typed text into `h:`
+(`compute::history_toggle`, via `_hist`), so Ctrl+R Ctrl+R at a shell is the
+old search over the three thousand commands root search deliberately excludes,
+and a third press carries the text back out. A query in another scope switches
+rather than nests, because `h:f:serve` is a question with an empty answer. Tab
+is the same rule for shell completion: it completes exactly the rows whose
+Enter is already a completion — scope commands and providers, `tab_completion`
+— and stays inert everywhere else, so the key never acquires a meaning that
+varies by row. Both are bindings, not `--expect` keys, for the reason `→` is
+not; both go through `fzf_action_arg` because a query can contain `)`.
 
 **Two general action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a
 mode.** Graphical launchers often put a secondary action on its own key;

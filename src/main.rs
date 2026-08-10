@@ -276,6 +276,22 @@ fn main() -> ExitCode {
         },
         // Decides, per keypress of Enter, whether to accept the selection or
         // answer it in place. Only fzf can make that conditional.
+        // Ctrl+R inside the launcher: the query moves into `h:` and back out,
+        // carrying the typed text both ways. See `compute::history_toggle`.
+        ["_hist", q] => {
+            println!("change-query({})", fzf_action_arg(&compute::history_toggle(q)));
+            0
+        }
+        // Tab completes the focused row where completion is what Enter would
+        // do anyway, and does nothing everywhere else. An empty transform is
+        // fzf's no-op, so a row with no completion leaves the key inert
+        // rather than teaching it a second meaning.
+        ["_tab", line] => {
+            if let Some(completion) = tab_completion(render::parse_line(line).as_ref()) {
+                println!("change-query({})", fzf_action_arg(completion));
+            }
+            0
+        }
         ["_enter", line] => {
             let item = render::parse_line(line);
             if let Some(it) = item.as_ref().filter(|i| i.get("mode") == "complete-query") {
@@ -446,6 +462,17 @@ fn focus_preview(q: &str, item: Option<&item::Item>, automatic_is_open: bool) ->
 
 fn fzf_action_arg(value: &str) -> String {
     value.replace('\\', "\\\\").replace(')', "\\)")
+}
+
+/// What Tab may do to the focused row: complete it, or nothing.
+///
+/// Only rows whose Enter is *already* a completion — scope commands, search
+/// providers waiting for an argument — answer. Everything else stays silent,
+/// so Tab never acquires a second meaning that varies by row.
+fn tab_completion(item: Option<&item::Item>) -> Option<&str> {
+    item.filter(|i| i.get("mode") == "complete-query")
+        .map(|i| i.get("completion"))
+        .filter(|c| !c.is_empty())
 }
 
 fn focus(q: &str, line: &str) -> i32 {
@@ -929,6 +956,52 @@ mod tests {
         let none = "[notes]\nkind = \"folder\"\ntarget = \"~/notes\"\n";
         let it = row(none, "rust async").unwrap();
         assert_eq!(it.get("url"), "https://www.google.com/search?q=rust%20async");
+    }
+
+    /// Ctrl+R spent decades meaning "search my shell history", and the
+    /// fingers that press it have not been told otherwise. Inside the
+    /// launcher a second press moves the typed text into `h:` — so Ctrl+R
+    /// Ctrl+R at a shell is the old incremental history search — and a third
+    /// press carries the text back out unharmed.
+    #[test]
+    fn ctrl_r_pressed_again_is_still_history_search() {
+        use crate::compute::history_toggle as t;
+        assert_eq!(t(""), "h:", "an empty query opens the history scope");
+        assert_eq!(t("git commit"), "h:git commit", "typed text travels into the scope");
+        assert_eq!(t("h:git commit"), "git commit", "and back out, unchanged");
+        assert_eq!(t("h:"), "", "the round trip from nothing ends at nothing");
+        assert_eq!(t("H:git"), "git", "scope prefixes fold case everywhere else too");
+        // A query already in another scope switches, rather than nesting:
+        // `h:f:serve` is a question with an empty answer.
+        assert_eq!(t("f:serve"), "h:serve");
+        assert_eq!(t("c:token"), "h:token");
+    }
+
+    /// Tab is the finger's guess for "finish this for me". It completes
+    /// exactly the rows whose Enter is already a completion, and stays inert
+    /// on every other row rather than acquiring a per-row meaning.
+    #[test]
+    fn tab_completes_only_what_enter_would_complete() {
+        use crate::item::{Item, Kind};
+        let scope = Item::new("f:", Kind::Search)
+            .put("mode", "complete-query")
+            .put("completion", "f:");
+        assert_eq!(crate::tab_completion(Some(&scope)), Some("f:"));
+        let provider = Item::new("g", Kind::Search)
+            .put("mode", "complete-query")
+            .put("completion", "g ");
+        assert_eq!(crate::tab_completion(Some(&provider)), Some("g "));
+        // Ordinary rows — a history command, a file, an agent — answer
+        // nothing, and so does a completion row that carries no completion.
+        for it in [
+            Item::new("git rebase", Kind::History),
+            Item::new("/tmp/x", Kind::File),
+            Item::new("claude", Kind::Agent),
+            Item::new("f:", Kind::Search).put("mode", "complete-query"),
+        ] {
+            assert_eq!(crate::tab_completion(Some(&it)), None);
+        }
+        assert_eq!(crate::tab_completion(None), None);
     }
 
     #[test]
