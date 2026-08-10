@@ -470,9 +470,14 @@ installation message.
 
 Validation:
 
-- 164 tests pass and release Clippy is warning-free. Both arm64 and x86_64
-  release binaries build from the same checkout; `install.sh` passes shell
-  syntax and checksum-path checks.
+- 164 tests pass and release Clippy is warning-free. The v0.6.0 release
+  workflow built and published ad-hoc-signed arm64 and x86_64 archives with
+  checksums.
+- The public README command was then run through its actual curl pipe. It
+  downloaded and verified the arm64 release, reused current fzf/Ghostty,
+  installed `~/.local/bin/prelude`, added the managed zsh block and ended with
+  every schema-6 status field healthy. The resulting quick terminal ran that
+  installed binary, not the checkout.
 - A real installation reported schema 6 with supervision, Accessibility and
   chord readiness all true. `SIGKILL` changed Ghostty pid 85687 to 86566 under
   launchd, after which status remained healthy.
