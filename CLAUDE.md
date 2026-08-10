@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 165 tests
+cargo test                 # 170 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # gather must stay under 40ms
 ./target/release/prelude _dump       # empty-query agent home
@@ -148,6 +148,15 @@ Favorites are Prelude preferences for Agent, Skill and MCP object keys. They
 never carry paths, commands or definitions, never write native Agent data, and
 only promote inside the existing Kind band. Tests address a temporary
 preference path and must not read the person's real `favorites.txt`.
+
+Skill/MCP archive state reuses those stable object identities but lives as
+atomic 0600 metadata at `$XDG_DATA_HOME/prelude/capabilities.json`. It is a
+Prelude view overlay: never move a Skill, edit/disable an MCP definition, clear
+a Favorite, or retain a path/command/definition in it. Archived capabilities
+stay in the complete gathered snapshot so `skill:is:archived` and
+`mcp:is:archived` can restore them, but leave Home, root search, `a:`, default
+capability scopes, slash invocation and Session borrow pickers. Per-keystroke
+rules read the decorated `archived` field and never the metadata file.
 
 `docs/AGENT-CONTROL-PLANE.md` is the implementation source of truth. Read it
 before changing Agent, Run, Session, Task, Skill, MCP, Config, Home, messaging

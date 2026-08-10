@@ -58,8 +58,8 @@ Prelude gives local coding agents a shared operational surface:
 - see what is **working, waiting, or no longer running**
 - resume native conversations without hunting for session IDs
 - answer an agent question from the top row of the launcher
-- inspect and move skills between supported agents
-- compare MCP ownership, health, tools, and redacted definitions
+- inspect, archive, restore, and move skills between supported agents
+- compare, archive, and restore MCP servers without changing native definitions
 - send local agent-to-human and agent-to-agent messages
 
 ```sh

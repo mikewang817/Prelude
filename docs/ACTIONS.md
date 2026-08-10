@@ -231,6 +231,7 @@ of opening an empty picker.
 ### Skill
 
 - Add or remove it from Favorites; this is a Prelude preference and changes no Skill copy
+- Archive it in Prelude, or restore it from `skill:is:archived`
 - Run with an owner agent
 - Prepare a one-off borrowed run
 - Install into another agent
@@ -254,6 +255,12 @@ you not to read it. Quick Look states the same thing as data: a modification
 time per copy, so a divergence says which way round to replace, and a warning
 line for any symlink that is broken or resolves outside the Skill.
 
+Archive changes only Prelude's view. Every copy stays in its native Agent
+directory, Favorites are retained, and restoring removes only the archive
+flag. Archived Skills leave Home, root search, slash invocation and ordinary
+capability pickers; `skill:is:archived` is the recovery surface and
+`skill:is:all` shows both states.
+
 ### MCP server
 
 At a shell, Enter shows what the server exposes. It can be added to or removed
@@ -262,6 +269,7 @@ not the server's primary purpose.
 
 Alternatives are:
 
+- Archive it in Prelude, or restore it from `mcp:is:archived`
 - Show cached actual tools when the background MCP handshake succeeded
 - Test Claude connection health now, or refresh Codex's owner-reported status
 - Refresh an enabled stdio tool inventory explicitly
@@ -284,6 +292,11 @@ borrow, install or replacement action. HTTP/hosted tool inventory is labelled
 unsupported when owner authentication is unavailable. Current Claude and Codex
 CLI help exposes no server-level Enable/Disable verb, so Prelude does not invent
 one.
+
+MCP archive is not Disable under another name: every Agent definition and
+connection remains untouched. Variants sharing one normalized capability id
+archive together, Favorites survive, `mcp:is:archived` restores them and
+`mcp:is:all` includes both archived and ordinary rows.
 
 ### File and config
 

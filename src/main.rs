@@ -6,6 +6,7 @@
 mod actions;
 mod agent;
 mod ansi;
+mod archive;
 mod bus;
 mod cache;
 mod calc;
@@ -1154,6 +1155,31 @@ mod tests {
             .put("path", "/tmp/image.png");
         assert_eq!(ids(&image_clip), ["secondary", "openit", "reveal-finder", "copyabs"]);
         assert!(!clip_ids.iter().any(|id| id == "run" || id == "runhere"));
+    }
+
+    #[test]
+    fn capabilities_can_be_archived_and_restored_without_offering_that_to_agents() {
+        use crate::item::{Item, Kind};
+        let ids = |item: &Item| -> Vec<String> {
+            crate::actions::actions_for(item, crate::defaults::Surface::Prompt)
+                .iter()
+                .map(|(id, ..)| id.to_string())
+                .collect()
+        };
+        for item in [
+            Item::new("/review", Kind::Skill).put("name", "review"),
+            Item::new("codex mcp get node", Kind::Mcp)
+                .put("name", "node")
+                .put("capability_id", "mcp:node"),
+        ] {
+            assert!(ids(&item).contains(&"capability-archive".to_string()));
+            let archived = item.put("archived", "true");
+            let archived_ids = ids(&archived);
+            assert_eq!(archived_ids[0], "capability-unarchive");
+            assert!(!archived_ids.contains(&"capability-archive".to_string()));
+        }
+        let agent = Item::new("claude", Kind::Agent).put("agent", "claude");
+        assert!(!ids(&agent).iter().any(|id| id.starts_with("capability-")));
     }
 
     #[test]
@@ -2339,8 +2365,19 @@ mod tests {
             .put("pinned", "true")
             .put("archived", "true")
             .put("active_run", "claude:7:1");
-        let graph = crate::control::Snapshot::from_items(&[run], &[session], &[], &[], &[]);
-        assert_eq!(graph.schema, 3);
+        let skill = Item::new("/review", Kind::Skill)
+            .put("name", "review")
+            .put("agent", "claude")
+            .put("archived", "true");
+        let mcp = Item::new("claude mcp get node", Kind::Mcp)
+            .put("name", "node")
+            .put("agent", "claude")
+            .put("capability_id", "mcp:node")
+            .put("archived", "true");
+        let graph = crate::control::Snapshot::from_items(
+            &[run], &[session], &[skill], &[mcp], &[],
+        );
+        assert_eq!(graph.schema, 4);
         let claude = graph.agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(claude.runs, ["claude:7:1"]);
         assert_eq!(claude.sessions, ["claude:s1"]);
@@ -2348,6 +2385,7 @@ mod tests {
         assert_eq!(graph.sessions[0].active_run.as_deref(), Some("claude:7:1"));
         assert_eq!(graph.sessions[0].native_title.as_deref(), Some("native"));
         assert!(graph.sessions[0].pinned && graph.sessions[0].archived);
+        assert!(graph.skills[0].archived && graph.mcp[0].archived);
         assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
     }
 
@@ -2386,19 +2424,23 @@ mod tests {
                 .put("agent", owners)
                 .put("dir", format!("/skills/{name}"))
         };
-        let skills =
-            [skill("deploy", "claude"), skill("review", "codex, pi"), skill("notes", "shared")];
+        let skills = [
+            skill("deploy", "claude"),
+            skill("review", "codex, pi"),
+            skill("notes", "shared"),
+            skill("retired", "codex").put("archived", "true"),
+        ];
         let offered = |agent: &str| -> Vec<String> {
             borrowable_skills(&skills, agent).into_iter().map(|(_, name, _)| name).collect()
         };
-        assert_eq!(offered("claude"), ["review", "notes"], "claude already has deploy");
+        assert_eq!(offered("claude"), ["review", "notes"], "owned and archived skills stay out");
         assert_eq!(offered("codex"), ["deploy", "notes"]);
         // `~/.agents/skills` is a location, not an Agent — `missing_agents`
         // reports a Skill that lives only there as missing from every one of
         // them — so a shared Skill stays borrowable for all of them.
         assert!(offered("pi").contains(&"notes".to_string()));
         // Nothing known about the host means nothing is excluded.
-        assert_eq!(offered("").len(), skills.len());
+        assert_eq!(offered("").len(), skills.len() - 1, "archive puts it away everywhere");
 
         let server = |name: &str, owner: &str, portable: &str| {
             Item::new(format!("{owner} mcp get {name}"), Kind::Mcp)
@@ -2409,6 +2451,7 @@ mod tests {
         let servers = [
             server("node_repl", "claude", "true"),
             server("chatcut", "codex", "true"),
+            server("retired", "codex", "true").put("archived", "true"),
             server("claude.ai Gmail", "claude", "false"),
         ];
         let names: Vec<String> =

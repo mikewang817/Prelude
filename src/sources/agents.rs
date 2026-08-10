@@ -105,7 +105,9 @@ pub fn usage_rank(times: u32, last: f64) -> f64 {
 /// once and naming the agents that have it is more useful than either three
 /// duplicate rows or silently dropping two of them.
 pub fn skills() -> Vec<Item> {
-    skills_with(&crate::cache::read_cached("sessions"))
+    let mut skills = skills_with(&crate::cache::read_cached("sessions"));
+    crate::archive::decorate(&mut skills);
+    skills
 }
 
 /// The same, for a caller that already holds the session list.

@@ -8,12 +8,10 @@
 use crate::item::Item;
 use serde::Serialize;
 
-/// Schema 3 adds Run effective context — the branch, the model and the
-/// capabilities a run actually loaded — and the reverse edges from Skill and
-/// MCP back to the Runs that borrowed them. Every field schema 2 had is still
-/// there and still means what it did; a reader that knows only the old shape
-/// keeps working.
-const SCHEMA: u32 = 3;
+/// Schema 4 adds Prelude's reversible archive overlay to Skill and MCP
+/// records. Schema 3 added Run effective context and reverse capability edges;
+/// those fields and meanings are unchanged.
+const SCHEMA: u32 = 4;
 
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -94,6 +92,7 @@ pub struct SessionRecord {
 pub struct SkillRecord {
     pub id: String,
     pub name: String,
+    pub archived: bool,
     pub owners: Vec<String>,
     pub missing: Vec<String>,
     pub integrity: String,
@@ -112,6 +111,7 @@ pub struct SkillRecord {
 pub struct McpRecord {
     pub id: String,
     pub name: String,
+    pub archived: bool,
     pub owners: Vec<String>,
     pub variants: Vec<crate::capability::McpVariant>,
     pub comparison: String,
@@ -239,6 +239,7 @@ impl Snapshot {
                 runs: named_by(&run_records, true, skill.get("name")),
                 id: format!("skill:{}", skill.get("name")),
                 name: skill.get("name").to_string(),
+                archived: skill.get("archived") == "true",
                 owners: skill
                     .get("agent")
                     .split(',')
@@ -330,6 +331,7 @@ impl Snapshot {
                 runs: named_by(&run_records, false, server.get("name")),
                 id,
                 name: server.get("name").to_string(),
+                archived: server.get("archived") == "true",
                 owners,
                 variants,
                 comparison: server.get("comparison").to_string(),
@@ -388,10 +390,12 @@ impl Snapshot {
 
 pub fn snapshot() -> Snapshot {
     let sessions = crate::cache::read_cached("sessions");
-    let mcp = crate::cache::read_cached("mcp");
+    let mut mcp = crate::cache::read_cached("mcp");
     let runs = crate::sources::running::live_with_sessions(&sessions);
     let sessions = crate::sources::running::annotate_sessions(sessions, &runs);
-    let skills = crate::sources::agents::skills_with(&sessions);
+    let mut skills = crate::sources::agents::skills_with(&sessions);
+    crate::archive::decorate(&mut skills);
+    crate::archive::decorate(&mut mcp);
     let configs = crate::sources::agents::configs();
     Snapshot::from_items(&runs, &sessions, &skills, &mcp, &configs)
 }

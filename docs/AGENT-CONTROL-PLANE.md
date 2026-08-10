@@ -9,7 +9,8 @@ Agent, Run, Session, Skill, MCP, Config, Home, messaging or Agent doctor
 behaviour, read this file.
 
 **Eight milestones are complete and two were removed after they shipped.**
-There is no current milestone. The surviving Agent inventory is now a
+Milestone 11 is implemented locally and awaiting one-line release validation.
+The surviving Agent inventory is now a
 Raycast-style Agent experience without rebuilding a collaboration system.
 What remains is written down as recorded limitations under the milestone that
 owns each one — decisions with reasons, not a backlog, and reopening one means
@@ -510,6 +511,51 @@ panel reaches Runs, Sessions, Ask, settings, diagnostics and Favorites. Control
 schema 3 serializes the same registry capabilities and passed a private-value
 scan.
 
+### 11. Skill and MCP archive lifecycle — `[>]`
+
+Product rule: archive is a Prelude view overlay, not an Agent operation. Every
+Skill copy remains installed and every MCP owner definition remains enabled.
+Unarchive removes only the overlay. A merged Skill archives by name; MCP owner
+variants archive together by normalized capability id, which is the same
+stable identity Favorites uses.
+
+Acceptance criteria:
+
+- [x] Skill and MCP action panels offer Archive and, on an archived row,
+      Restore from archive as the first alternative.
+- [x] Archive state contains only stable object keys — never paths, commands,
+      fingerprints, definitions or credentials — in atomic `0600`
+      `$XDG_DATA_HOME/prelude/capabilities.json` metadata.
+- [x] Malformed or newer metadata is refused on mutation rather than silently
+      overwritten; tests never address the person's real data file.
+- [x] Archived capabilities leave Home, root search, `a:`, bare `skill:` and
+      `mcp:`, slash browsing/invocation and Session borrow pickers.
+- [x] `skill:is:archived` and `mcp:is:archived` recover archived rows;
+      `is:all` includes both states, and an unknown `is:` word collapses the
+      list rather than widening it.
+- [x] Quick Look states the archive overlay, and Control schema 4 exposes
+      `archived` on Skill and MCP records while retaining the authoritative
+      installed inventory and Run edges.
+- [x] Favorites survive archive/unarchive and continue to rank only inside the
+      existing Kind band.
+- [x] Tests, release Clippy with `-D warnings`, `git diff --check`, release
+      build and gather remain inside the 40 ms budget.
+- [ ] Publish verified v0.6.2 native assets and exercise the public one-line
+      installer through its real `curl | bash` path.
+
+The Session exception does not transfer here. An archived Session with a live
+Run reappears because "finished conversation" contradicts "running now". A
+capability archive means "keep this installed object out of Prelude's ordinary
+inventory"; the Run row remains visible and its effective-context view still
+names capabilities it confirmed, so resurfacing the inventory object would
+undo the preference without revealing any otherwise-hidden work.
+
+Local evidence: 170 tests pass. Unit coverage pins private atomic metadata,
+stable merged identities, native-file non-mutation, both action states, every
+default visibility surface, archive scopes, borrow exclusion and Control
+schema 4. A release gather measured 26.8 ms median and 36.9 ms maximum; release
+Clippy is warning-free. Release evidence remains unchecked above.
+
 ## Recorded limitations
 
 Each is a decision with a reason, written down so it is argued with rather than
@@ -554,6 +600,17 @@ As of 2026-08-09:
   - `898e9d6` — typed Agent registry, rich surfaces, Skills discovery and Favorites
 
 ## Progress log
+
+### 2026-08-10 — Skill and MCP archive lifecycle implemented
+
+- Added reversible Prelude-only archive metadata for merged Skill and MCP
+  capability identities without touching native Agent files or definitions.
+- Hid archived capabilities from ordinary inventory and invocation surfaces,
+  while adding explicit `is:archived` and `is:all` recovery queries.
+- Added Archive/Restore actions, Quick Look state and Control schema 4 fields;
+  excluded archived capabilities from one-run Session borrowing.
+- Passed 170 tests, release Clippy, `git diff --check`, release build and the
+  40 ms gather budget; v0.6.2 one-line release validation remains open.
 
 ### 2026-08-09 — Raycast-style Agent experience completed
 

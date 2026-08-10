@@ -533,6 +533,24 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
         acts.splice(at..at, qacts);
     }
 
+    // Archive is a reversible Prelude overlay. It never moves a Skill copy or
+    // edits/disables an MCP definition. Restoring is first on an archived row;
+    // putting away a visible row sits beside the other management actions.
+    if crate::archive::key(it).is_some() {
+        let action = if it.get("archived") == "true" {
+            a("capability-unarchive", "Restore from archive", "return to normal inventory")
+        } else {
+            let scope = if it.kind == Kind::Skill { "skill:is:archived" } else { "mcp:is:archived" };
+            a("capability-archive", "Archive in Prelude", format!("find later with {scope}"))
+        };
+        if it.get("archived") == "true" {
+            acts.insert(0, action);
+        } else {
+            let at = acts.iter().position(|(id, ..)| is_destructive(it.kind, id)).unwrap_or(acts.len());
+            acts.insert(at, action);
+        }
+    }
+
     // Favourites are Prelude's launcher preference, not native Agent
     // metadata. They are available on stable inventory objects only and sit
     // before destructive management actions.
@@ -750,6 +768,7 @@ fn mcp_matrix_lines(it: &Item) -> Vec<String> {
 pub(crate) fn borrowable_skills(skills: &[Item], agent: &str) -> Vec<(String, String, String)> {
     skills
         .iter()
+        .filter(|skill| crate::archive::visible(skill))
         .filter(|skill| !skill.get("dir").is_empty() && !skill.get("name").is_empty())
         .filter(|skill| !owned_by(skill.get("agent"), agent))
         .map(|skill| {
@@ -768,6 +787,7 @@ pub(crate) fn borrowable_skills(skills: &[Item], agent: &str) -> Vec<(String, St
 pub(crate) fn borrowable_servers(servers: &[Item], agent: &str) -> Vec<(String, String, String)> {
     servers
         .iter()
+        .filter(|server| crate::archive::visible(server))
         .filter(|server| !server.get("name").is_empty() && server.get("portable") != "false")
         .filter(|server| !owned_by(server.get("agent"), agent))
         .map(|server| {
@@ -1145,7 +1165,8 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             }
         }
         "session-mcp" => {
-            let servers = crate::cache::read_cached("mcp");
+            let mut servers = crate::cache::read_cached("mcp");
+            crate::archive::decorate(&mut servers);
             let choices = borrowable_servers(&servers, it.get("agent"));
             if choices.is_empty() {
                 ui::note(
@@ -1253,6 +1274,21 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             let wanted = id == "favorite";
             match crate::favorites::set(it, wanted) {
                 Ok(()) => ui::note(if wanted { "added to Favorites" } else { "removed from Favorites" }),
+                Err(error) => { ui::note(&error); return 2; }
+            }
+        }
+        "capability-archive" | "capability-unarchive" => {
+            let archived = id == "capability-archive";
+            match crate::archive::set(it, archived) {
+                Ok(()) => ui::note(if archived {
+                    if it.kind == Kind::Skill {
+                        "archived · find it with skill:is:archived"
+                    } else {
+                        "archived · find it with mcp:is:archived"
+                    }
+                } else {
+                    "restored to normal inventory"
+                }),
                 Err(error) => { ui::note(&error); return 2; }
             }
         }

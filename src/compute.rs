@@ -856,12 +856,20 @@ pub fn needs_static_items(q: &str) -> bool {
 fn skill_prefix_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
     let rest = q.trim().strip_prefix('/')?;
     let name = rest.split_whitespace().next().unwrap_or(rest);
-    if static_items.iter().any(|it| it.kind == Kind::Skill && it.title.eq_ignore_ascii_case(name)) {
+    if static_items.iter().any(|it| {
+        it.kind == Kind::Skill
+            && crate::archive::visible(it)
+            && it.title.eq_ignore_ascii_case(name)
+    }) {
         return None;
     }
     let want = rest.to_lowercase();
     Some(static_items.iter()
-        .filter(|it| it.kind == Kind::Skill && it.title.to_lowercase().contains(&want))
+        .filter(|it| {
+            it.kind == Kind::Skill
+                && crate::archive::visible(it)
+                && it.title.to_lowercase().contains(&want)
+        })
         .take(100)
         .cloned()
         .collect())
@@ -918,7 +926,7 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
             matches!(
                 it.kind,
                 Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Session
-            )
+            ) && crate::archive::visible(it)
         })
         .cloned()
         .collect()
@@ -935,10 +943,10 @@ pub fn root_items(items: &[Item]) -> Vec<Item> {
     items
         .iter()
         .filter(|it| {
-            matches!(
+            (matches!(
                 it.kind,
                 Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search
-            ) || !it.get("quicklink").is_empty()
+            ) && crate::archive::visible(it)) || !it.get("quicklink").is_empty()
         })
         .cloned()
         .collect()
@@ -1172,6 +1180,29 @@ fn matches_terms(it: &Item, term: &str) -> bool {
     needles.iter().all(|n| hay.contains(n))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CapabilityArchiveView {
+    Visible,
+    Archived,
+    All,
+}
+
+/// `skill:` and `mcp:` keep archived objects out until explicitly asked for.
+/// Unknown `is:` words remain search needles, so a typo collapses the list
+/// instead of silently widening it to every capability.
+fn capability_archive_filter(term: &str) -> (CapabilityArchiveView, String) {
+    let mut view = CapabilityArchiveView::Visible;
+    let mut needles = Vec::new();
+    for word in term.split_whitespace() {
+        match word.to_ascii_lowercase().as_str() {
+            "is:archived" => view = CapabilityArchiveView::Archived,
+            "is:all" => view = CapabilityArchiveView::All,
+            _ => needles.push(word),
+        }
+    }
+    (view, needles.join(" "))
+}
+
 pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item> {
     use Kind::*;
     if scope == Scope::Running {
@@ -1207,7 +1238,24 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         return static_items
             .iter()
             .filter(|it| matches!(it.kind, Msg | Agent | Run | Skill | Mcp | Config))
+            .filter(|it| crate::archive::visible(it))
             .filter(|it| matches_agent_filters(it, &filters, &needles))
+            .take(200)
+            .cloned()
+            .collect();
+    }
+    if matches!(scope, Scope::Skills | Scope::Mcp) {
+        let kind = if scope == Scope::Skills { Skill } else { Mcp };
+        let (archive_view, needles) = capability_archive_filter(term);
+        return static_items
+            .iter()
+            .filter(|item| item.kind == kind)
+            .filter(|item| match archive_view {
+                CapabilityArchiveView::Visible => crate::archive::visible(item),
+                CapabilityArchiveView::Archived => item.get("archived") == "true",
+                CapabilityArchiveView::All => true,
+            })
+            .filter(|item| matches_terms(item, &needles))
             .take(200)
             .cloned()
             .collect();
@@ -1224,8 +1272,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         Scope::Ports => kind == Port,
         Scope::Processes => kind == Proc,
         Scope::Containers => kind == Container,
-        Scope::Skills => kind == Skill,
-        Scope::Mcp => kind == Mcp,
+        Scope::Skills | Scope::Mcp => false,
         Scope::Config => kind == Config,
         Scope::Settings => kind == Setting,
         Scope::Agent | Scope::Running | Scope::Sessions | Scope::Files => false,
@@ -1494,7 +1541,9 @@ pub fn skill_query(q: &str) -> Option<(Item, String)> {
         None => (rest, ""),
     };
     let skills = crate::sources::agents::skills();
-    let hit = skills.into_iter().find(|s| s.title.eq_ignore_ascii_case(name))?;
+    let hit = skills
+        .into_iter()
+        .find(|skill| crate::archive::visible(skill) && skill.title.eq_ignore_ascii_case(name))?;
     Some((hit, args.to_string()))
 }
 
@@ -1773,6 +1822,43 @@ mod tests {
             Item::new("two", Kind::Mcp).title("review server"),
         ];
         assert_eq!(scoped_rows(scope, term, &rows).len(), 1);
+    }
+
+    #[test]
+    fn archived_capabilities_leave_inventory_but_remain_recoverable_in_their_scopes() {
+        let rows = vec![
+            Item::new("/current", Kind::Skill).title("current").put("name", "current"),
+            Item::new("/retired", Kind::Skill)
+                .title("retired")
+                .put("name", "retired")
+                .put("archived", "true"),
+            Item::new("codex mcp get live", Kind::Mcp).title("live").put("name", "live"),
+            Item::new("codex mcp get old", Kind::Mcp)
+                .title("old")
+                .put("name", "old")
+                .put("archived", "true"),
+        ];
+        assert_eq!(home_items(&rows).len(), 2);
+        assert_eq!(root_items(&rows).len(), 2);
+        assert_eq!(scoped_rows(Scope::Agent, "", &rows).len(), 2);
+
+        let titles = |scope, term| {
+            scoped_rows(scope, term, &rows)
+                .into_iter()
+                .map(|item| item.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles(Scope::Skills, ""), ["current"]);
+        assert_eq!(titles(Scope::Skills, "is:archived"), ["retired"]);
+        assert_eq!(titles(Scope::Skills, "is:all"), ["current", "retired"]);
+        assert_eq!(titles(Scope::Mcp, ""), ["live"]);
+        assert_eq!(titles(Scope::Mcp, "is:archived"), ["old"]);
+        assert_eq!(titles(Scope::Mcp, "is:all"), ["live", "old"]);
+        assert!(scoped_rows(Scope::Skills, "is:unknown", &rows).is_empty());
+
+        let slash = dynamic_rows_with("/", &rows);
+        assert_eq!(slash.into_iter().map(|item| item.title).collect::<Vec<_>>(), ["current"]);
+        assert!(dynamic_rows_with("/retired", &rows).is_empty());
     }
 
     #[test]

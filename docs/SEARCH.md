@@ -11,7 +11,7 @@ on one screen, because looking at it *is* how you manage it.
 - questions waiting for a person (`Msg`)
 - installed agents, as launch entries (`Agent`)
 - running agents (`Run`)
-- their skills (`Skill`) and MCP servers (`Mcp`)
+- their non-archived skills (`Skill`) and MCP servers (`Mcp`)
 - the conversations you have had with them (`Session`)
 
 History, files, applications, `$PATH`, clipboard and machine objects are still
@@ -26,7 +26,9 @@ quiet exactly when nothing was broken, which is most of the time.
 
 Sessions are the one kind counted rather than filtered. There are hundreds of
 them, so `gather` puts only the newest `sessions::IN_MAIN_LIST` in the list at
-all and `s:` owns the rest.
+all and `s:` owns the rest. Archived Skills and MCP servers are also absent by
+design, but remain in the complete snapshot for `skill:is:archived` and
+`mcp:is:archived` to recover.
 
 ### Home order
 
@@ -65,7 +67,7 @@ row whose displayed text does not contain `c:`.
 | `a:` | agents, running agents, skills, MCP and agent config |
 | `r:` | running agents, classified live |
 | `s:` | all conversation sessions |
-| `skill:` | all installed Skills; `/` remains the invocation accelerator |
+| `skill:` | non-archived installed Skills; `/` remains the invocation accelerator |
 | `f:` | current-project files and the indexed roots; `set:` decides which roots |
 | `c:` | text, Finder files and images, strictly newest first |
 | `h:` | shell history |
@@ -78,7 +80,7 @@ row whose displayed text does not contain `c:`.
 | `port:` | listening TCP ports |
 | `proc:` | processes |
 | `docker:` | running containers |
-| `mcp:` | MCP servers |
+| `mcp:` | non-archived MCP servers |
 | `cfg:` | agent configuration |
 | `set:` | Prelude's own settings, each with its current value |
 
@@ -101,13 +103,17 @@ arguments after it — the query has stopped describing a search and started
 being an invocation, so the single row is the run that invokes it and the
 Skill row is gone. That is deliberate; nothing else in the launcher shows two
 rows for one intent. A Skill's own row — with its copies, its integrity and
-its `^K` panel — is reached by `skill:`, `/`, `a:`, or ordinary search.
+its `^K` panel — is reached by `skill:`, `/`, `a:`, or ordinary search while
+it is not archived. Archive also removes slash invocation: putting a Skill
+away but continuing to offer `/name` would preserve the most consequential
+route and hide only its label. `skill:is:archived` is where it is restored.
 `/` never lists MCP servers at all: they are not invoked by name, and `mcp:`
 is their scope.
 
 Agent sessions intentionally do not appear under `a:`. Hundreds of old
 conversations turned the agent overview into a session browser; `s:` already
-has that job.
+has that job. Archived Skills and MCP servers also stay out of `a:`; their
+kind-specific archive scopes are the explicit recovery surface.
 
 Control filters are explicit words inside `a:`:
 
@@ -162,6 +168,22 @@ Session filters are explicit words inside that scope:
 
 Archived Sessions are excluded from bare `s:` and from the small recent set
 in the general catalogue. Renamed Sessions still match their native title.
+
+Capability archive filters are parallel but live in each capability's own
+scope:
+
+| Query | Meaning |
+|---|---|
+| `skill:is:archived` | archived Skills only |
+| `skill:is:all` | archived and non-archived Skills |
+| `mcp:is:archived` | archived MCP server variants only |
+| `mcp:is:all` | archived and non-archived MCP server variants |
+
+Bare `skill:` and `mcp:` exclude archived rows. Archive is Prelude-only: it
+does not remove a Skill copy, disable a server or alter any Agent file. MCP
+owner variants sharing one normalized capability id archive together. An
+unknown filter such as `skill:is:unknown` is retained as a search term and
+collapses the list visibly instead of silently returning every row.
 
 ## Local paths
 

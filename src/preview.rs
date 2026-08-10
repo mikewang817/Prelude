@@ -279,6 +279,7 @@ pub fn text(it: &Item) -> String {
         }
         Kind::Skill => {
             kv(&mut out, "agents", it.get("agent"));
+            kv(&mut out, "archive", if it.get("archived") == "true" { "archived in Prelude" } else { "" });
             kv(&mut out, "integrity", it.get("integrity"));
             kv(&mut out, "fingerprint", it.get("fingerprint"));
             kv(&mut out, "file", &tilde(it.get("file")));
@@ -326,6 +327,7 @@ pub fn text(it: &Item) -> String {
         Kind::Mcp => {
             kv(&mut out, "agent", it.get("agent"));
             kv(&mut out, "name", it.get("name"));
+            kv(&mut out, "archive", if it.get("archived") == "true" { "archived in Prelude" } else { "" });
             kv(&mut out, "config", &tilde(it.get("config")));
             kv(&mut out, "transport", it.get("transport"));
             let health_at = it.get("health_checked_at").parse::<f64>().unwrap_or(0.0);
