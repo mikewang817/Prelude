@@ -126,6 +126,19 @@ app:zed                   installed applications
 :                         every available scope
 ```
 
+Large collections stay behind their scope, so a root query searches a small
+catalogue rather than every file on the disk. Whatever you type also carries a
+web search on the last row, which is what stops an unmatched query from being
+an empty box:
+
+```text
+git commit                the query itself · Search Google · Enter opens it
+```
+
+It sits under everything the machine could answer with, so it leads only when
+nothing else matched, and it stays out of scopes. Re-point the `g` Quicklink
+and this row follows it.
+
 See [the search guide](docs/SEARCH.md) for the complete query grammar.
 
 ## Quicklinks

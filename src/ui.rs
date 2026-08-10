@@ -44,6 +44,12 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
 /// It shows only on an empty query and disappears the moment you type, so it
 /// costs a row exactly when there is nothing else to look at and never
 /// competes with results.
+///
+/// Six of the twenty scopes, deliberately. Listing all of them was tried and
+/// taken back out: it is three rows of syntax above the thing the launcher is
+/// actually for, and a header that long stops reading as a hint and starts
+/// reading as the list. `:` is on the end of this line and answers the same
+/// question in full, as rows, when it is asked.
 pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
 
 /// Ctrl remains the portable terminal vocabulary. The dedicated global panel

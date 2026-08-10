@@ -54,6 +54,30 @@ than matching every file containing the letter.
 
 Clearing the query returns to the Agent home. Type `:` to list every scope.
 
+## The web search under every query
+
+Because root search deliberately excludes the large sources, an ordinary
+sentence such as `git commit` can match nothing in it. Every query therefore
+carries one computed web-search row, which is what makes a result of `0/58`
+impossible:
+
+```text
+git commit    · Search Google · www.google.com    Enter opens the browser
+```
+
+Three rules define it:
+
+- Its displayed text is the query itself, so fzf matches it by construction.
+- It is emitted after the catalogue, so `--tiebreak=index` keeps it below
+  anything that scored the same. It leads only when nothing else matched.
+- It is absent inside a scope, and for the bare `:` and `/` browsers. A scope
+  is a statement about where to look.
+
+The provider follows the `g` Quicklink, so re-pointing that keyword at Baidu,
+Kagi, or an intranet search moves this row with it. Deleting the keyword falls
+back to Google. The row is an ordinary Link: `Ctrl+K` offers its URL as text
+and can save it as a Quicklink.
+
 ## Scopes
 
 | Prefix | Items selected from the cached snapshot |

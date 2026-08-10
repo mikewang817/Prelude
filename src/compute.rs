@@ -2138,6 +2138,75 @@ fn is_quicklink_template(key: &str) -> bool {
         .is_some_and(|target| target.contains("{q}"))
 }
 
+// ─── the web search that is always there ─────────────────────────────────
+
+/// The keyword the always-on web search follows, and what it falls back to.
+///
+/// Following `[g]` rather than hard-coding Google is the point: somebody who
+/// re-points that keyword at Baidu, Kagi or an intranet search has said where
+/// their web searches should go, and a second search that ignored them would
+/// be a launcher arguing with its own configuration. Deleting the keyword does
+/// not delete the fallback, which is why the built-in template stays here.
+pub const WEB_SEARCH_KEY: &str = "g";
+pub const WEB_SEARCH_NAME: &str = "Google";
+pub const WEB_SEARCH_TEMPLATE: &str = "https://www.google.com/search?q={q}";
+
+fn web_search_provider_from(text: &str) -> (String, String) {
+    quicklink_entry(&crate::minitoml::parse(text), WEB_SEARCH_KEY)
+        .and_then(|(key, body)| {
+            let template = body.get("target").or_else(|| body.get("url"))?.clone();
+            if !template.contains("{q}") {
+                return None;
+            }
+            Some((body.get("name").cloned().unwrap_or(key), template))
+        })
+        .unwrap_or_else(|| (WEB_SEARCH_NAME.to_string(), WEB_SEARCH_TEMPLATE.to_string()))
+}
+
+/// The row that turns any query into a web search, appended to every list.
+///
+/// A launcher whose search box answers *nothing at all* to `git commit` reads
+/// as broken rather than as principled, and that is exactly what happened: the
+/// root list is the agent inventory plus search commands and Quicklinks, so an
+/// ordinary sentence matched none of it and fzf drew an empty box. Every other
+/// row here has to be found; this one is computed from what was typed, so it
+/// cannot fail to exist.
+///
+/// Three things keep it from being in the way. Its display text *is* the
+/// query, so it fuzzy-matches by construction and needs no help to survive
+/// filtering. It is emitted last, after the catalogue, so `--tiebreak=index`
+/// leaves it below anything that scored the same. And it is absent inside a
+/// scope — `f:`, `c:`, `h:` and the rest are a person saying where to look,
+/// and answering "or the web" to that is not an answer.
+pub fn web_search_row(q: &str) -> Option<Item> {
+    web_search_row_from(&quicklinks_text(), q)
+}
+
+pub(crate) fn web_search_row_from(text: &str, q: &str) -> Option<Item> {
+    let term = q.trim();
+    // Nothing typed is the home screen, and the bare browsers (`:` for the
+    // scope list, `/` for skills) are a keystroke on the way somewhere, not a
+    // thing anybody wants looked up.
+    if term.is_empty() || term == ":" || term == "/" || term == "@" {
+        return None;
+    }
+    if scope_query(term).is_some() || exact_scope_command(term).is_some() {
+        return None;
+    }
+    let (name, template) = web_search_provider_from(text);
+    let url = template.replace("{q}", &percent_encode(term));
+    Some(
+        Item::new(url.clone(), Kind::Link)
+            // The query itself, not "Search Google for …": fzf matches
+            // displayed text, and a row that has to be matched against a
+            // prefix nobody typed is a row that disappears when it is needed.
+            .title(term)
+            .fields([format!("Search {name}"), dtrunc_template(&template)])
+            .put("url", url)
+            .put("web_search", "true"),
+    )
+}
+
 // ─── whole-disk file search ──────────────────────────────────────────────
 
 pub fn fileindex_path() -> std::path::PathBuf {

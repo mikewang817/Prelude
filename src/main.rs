@@ -533,6 +533,7 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
     // a scope, an agent to start — the unrelated catalogue underneath is
     // noise. Show only what was asked for.
     if compute::is_special(q) {
+        web_search(q, cols, tw);
         return 0;
     }
     let list = if q.trim().is_empty() {
@@ -546,7 +547,20 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
             println!();
         }
     }
+    web_search(q, cols, tw);
     0
+}
+
+/// The web search goes *last*, under everything the machine could answer with.
+///
+/// It is the row that makes a query impossible to dead-end, and that is the
+/// whole of its job: it must be there when nothing else matched and out of the
+/// way when something did. Emitted after the catalogue, `--tiebreak=index`
+/// keeps it below every row that scored the same.
+fn web_search(q: &str, cols: usize, tw: Option<usize>) {
+    if let Some(row) = compute::web_search_row(q) {
+        println!("{}", render::render_with(&[row], cols, None, tw));
+    }
 }
 
 /// `^Y`: copy without closing the launcher.
@@ -865,6 +879,56 @@ mod tests {
         let (url, _, term, _) = crate::compute::quicklink_from(crate::compute::QUICKLINKS_DEFAULT, "g rust").unwrap();
         assert_eq!(term, "rust");
         assert_eq!(url, "https://www.google.com/search?q=rust");
+    }
+
+    /// The row that made `git commit` stop drawing an empty box.
+    ///
+    /// The root list is the agent inventory plus search commands and
+    /// Quicklinks, so an ordinary sentence matched none of it and fzf answered
+    /// with nothing at all — which reads as a broken launcher, especially to
+    /// somebody whose Ctrl-R used to be history search. The web search is
+    /// computed from the query rather than found in a list, so it cannot fail
+    /// to be there.
+    #[test]
+    fn any_query_can_be_taken_to_the_web() {
+        use crate::compute::{web_search_row_from as row, QUICKLINKS_DEFAULT as DEFAULTS};
+        use crate::item::Kind;
+        let it = row(DEFAULTS, "git commit").expect("an ordinary query reaches the web");
+        assert_eq!(it.kind, Kind::Link, "an object acts; it is not handed over as text");
+        assert_eq!(it.get("url"), "https://www.google.com/search?q=git%20commit");
+        // fzf matches *displayed* text, so the query has to be in it. A row
+        // titled "Search Google" would be filtered out by the very query that
+        // computed it.
+        assert_eq!(it.title, "git commit");
+        assert!(it.fields.iter().any(|f| f.contains("Google")));
+
+        // A scope is a person saying where to look. "Or the web" is not an
+        // answer to that, and neither are the two bare browsers.
+        for q in ["", "  ", ":", "/", "f: readme", "c:", "set:", "h: git"] {
+            assert!(row(DEFAULTS, q).is_none(), "{q:?} must not carry a web search");
+        }
+        // Everything else does, including the queries that already computed
+        // an answer of their own.
+        for q in ["1+1", "/deploy", "@claude what now", "~/App", "safari"] {
+            assert!(row(DEFAULTS, q).is_some(), "{q:?} must carry a web search");
+        }
+    }
+
+    /// Following `[g]` rather than hard-coding Google: re-pointing that
+    /// keyword is somebody saying where their web searches go, and a second
+    /// search that ignored it would be the launcher arguing with its own
+    /// configuration. Deleting the keyword does not delete the fallback.
+    #[test]
+    fn the_always_on_web_search_follows_the_keyword_the_person_owns() {
+        use crate::compute::web_search_row_from as row;
+        let mine = "[g]\nname = \"Kagi\"\nurl = \"https://kagi.com/search?q={q}\"\n";
+        let it = row(mine, "rust async").unwrap();
+        assert_eq!(it.get("url"), "https://kagi.com/search?q=rust%20async");
+        assert!(it.fields.iter().any(|f| f.contains("Kagi")));
+
+        let none = "[notes]\nkind = \"folder\"\ntarget = \"~/notes\"\n";
+        let it = row(none, "rust async").unwrap();
+        assert_eq!(it.get("url"), "https://www.google.com/search?q=rust%20async");
     }
 
     #[test]

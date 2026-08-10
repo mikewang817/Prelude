@@ -527,6 +527,28 @@ an MCP server's name is whatever its owner called it, and `claude.ai Google
 Drive` split on whitespace becomes a different question with an empty answer.
 `a:` excludes Session because `s:` owns the hundreds of old conversations.
 
+**But a query that matches none of that must not answer with an empty box.**
+That is what it did, and it was reported as "搜索用不了" — search does not
+work — which is the right reading: a root list of fifty-seven rows has nothing
+in it for `git commit`, so fzf drew `0/58` and a blank rectangle, and nothing
+on screen said the machine had understood the question and declined to answer
+it. The person most likely to hit this is the one who has just given Ctrl-R to
+the launcher and typed the command they were looking for. So
+`compute::web_search_row` computes one web-search row *from* the query and
+`dynamic` prints it after everything else. It cannot fail to exist, which is
+the whole point — every other row here has to be found.
+
+Three things make it safe to have on every query, and each is the part to keep.
+Its **display text is the query**, so fzf matches it by construction; titled
+`Search Google for …` it would be filtered out by the very query that computed
+it. It is emitted **last**, after the catalogue, so `--tiebreak=index` leaves
+it under anything that scored the same and it leads only when it is the only
+thing left. And it is **absent inside a scope** — `f:`, `c:`, `h:` and the rest
+are a person saying where to look, and "or the web" is not an answer to that.
+The provider follows the `g` quicklink rather than hard-coding Google, because
+somebody who re-points that keyword has said where their web searches go; the
+built-in template is the fallback for having deleted it, not the authority.
+
 `/` has the two states a search provider has. An *incomplete* name browses —
 `/cnipa-oo` lists the Skill rows it matches — and a complete one is an
 invocation, so `/cnipa-ooa` is the single row that runs it and the Skill row
