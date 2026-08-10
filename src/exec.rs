@@ -140,15 +140,7 @@ pub fn capture(args: &[&str], timeout: Duration) -> Output {
     // Its own process group, so the deadline can reach everything it starts.
     // `setpgid(0, 0)` between fork and exec is async-signal-safe, which is the
     // whole of what a pre-exec hook is allowed to be.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(|| {
-            if setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    own_process_group(&mut command);
     let Ok(mut child) = command.spawn() else {
         return lose(Output { spawn_failed: true, ..Output::default() });
     };
@@ -251,6 +243,31 @@ fn collect(drained: Option<Drained>) -> (Vec<u8>, bool) {
         .unwrap_or_default()
 }
 
+/// Put a child in its own process group, so a deadline can reach everything
+/// it starts rather than only the process we can see.
+///
+/// Exposed because `mcp_tools` spawns servers itself — it speaks JSON-RPC
+/// over their pipes, which `capture` cannot do — and it met the identical
+/// problem: an MCP server is routinely `npx` starting `node`, so killing the
+/// child left the grandchild holding stdout and the reader thread joined on
+/// a pipe that would never close.
+pub fn own_process_group(command: &mut Command) {
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Kill a child and everything it started.
+pub fn kill_tree(pid: i32) {
+    kill_group(pid);
+}
+
 fn kill_group(pid: i32) {
     if pid <= 0 {
         return;
@@ -282,6 +299,29 @@ pub fn which(name: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&path)
         .map(|d| d.join(name))
         .find(|p| p.is_file())
+}
+
+/// `which`, for a tool whose absence means this source cannot answer.
+///
+/// The difference matters where the cache is concerned. Most `which` calls
+/// ask whether something optional exists — zoxide, docker — and "no" is a
+/// complete answer. For the agent CLIs it is not, because **PATH is not the
+/// same everywhere Prelude runs**: the global panel is a Ghostty started by
+/// launchd, which does not inherit a login shell's PATH, so `claude` can be
+/// missing there and present in every terminal on the machine. Treated as an
+/// honest empty, that wiped the person's MCP inventory out of the panel and
+/// left them looking at a launcher that had lost their servers.
+///
+/// Counting it as a lost command means the last good answer survives instead.
+/// An agent that really has been uninstalled still loses its rows, as soon as
+/// any refresh returns something — which is the same refresh, if any other
+/// agent is present.
+pub fn require(name: &str) -> Option<std::path::PathBuf> {
+    let found = which(name);
+    if found.is_none() {
+        LOST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    found
 }
 
 /// Quote for the shell only when it actually needs it.

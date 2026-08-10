@@ -526,7 +526,7 @@ fn mcp_item(
 
 /// `claude mcp list` prints `<name>: <target> - <status>` per server.
 fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
-    if crate::exec::which("claude").is_none() {
+    if crate::exec::require("claude").is_none() {
         return;
     }
     let text = crate::exec::run(&["claude", "mcp", "list"], Duration::from_secs(30));
@@ -565,7 +565,7 @@ fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
 
 /// codex has --json, which also reports auth_status and why it is disabled.
 fn mcp_codex(out: &mut Vec<Item>, checked_at: u64) {
-    if crate::exec::which("codex").is_none() {
+    if crate::exec::require("codex").is_none() {
         return;
     }
     let text = crate::exec::run(&["codex", "mcp", "list", "--json"], Duration::from_secs(20));

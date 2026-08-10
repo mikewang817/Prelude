@@ -80,6 +80,12 @@ fn stdio_tools(
     if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) {
         process.current_dir(cwd);
     }
+    // Its own process group. An MCP server is routinely a launcher — `npx`
+    // starting `node`, `uvx` starting python — and the grandchild inherits
+    // these pipes. Killing only the child left it holding stdout open, so the
+    // reader thread below joined on a pipe that would never close and this
+    // whole refresh process hung, permanently, holding nothing anybody wanted.
+    crate::exec::own_process_group(&mut process);
     let mut child = process.spawn().map_err(|_| "could not start server")?;
     let stdout = child.stdout.take().ok_or("no server output")?;
     let stderr = child.stderr.take();
@@ -144,6 +150,9 @@ fn stdio_tools(
             id += 1;
         }
     })();
+    // The tree, not the process: everything holding these pipes has to go
+    // before the reader threads can finish.
+    crate::exec::kill_tree(child.id() as i32);
     let _ = child.kill();
     let _ = child.wait();
     drop(receiver);
@@ -170,7 +179,7 @@ fn cached_item(
 }
 
 fn codex_inventory(out: &mut Vec<Item>, checked_at: u64) {
-    if crate::exec::which("codex").is_none() {
+    if crate::exec::require("codex").is_none() {
         return;
     }
     let text = crate::exec::run(
@@ -212,7 +221,7 @@ fn codex_inventory(out: &mut Vec<Item>, checked_at: u64) {
 }
 
 fn claude_inventory(out: &mut Vec<Item>, checked_at: u64) {
-    if crate::exec::which("claude").is_none() {
+    if crate::exec::require("claude").is_none() {
         return;
     }
     let text = crate::exec::run(&["claude", "mcp", "list"], Duration::from_secs(30));

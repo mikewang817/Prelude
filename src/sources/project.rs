@@ -43,7 +43,9 @@ pub fn root() -> Option<PathBuf> {
 }
 
 fn read(p: &Path) -> Option<String> {
-    std::fs::read(p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    // Bounded: these are other people's files, and a generated `package.json`
+    // or a monorepo `Makefile` has no size this program gets to assume.
+    paths::read_bounded(p, paths::SMALL_FILE).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// The highest-value source: things this specific project can do.

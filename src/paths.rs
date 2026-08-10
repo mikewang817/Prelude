@@ -14,6 +14,37 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
         .join("prelude")
 }
 
+/// Read at most `limit` bytes of a file, for anything on the launch path.
+///
+/// Every source here reads files it did not create and cannot bound: a
+/// `package.json` in a generated project, a `Makefile` in a monorepo, a shell
+/// history that has never been rotated. The normal case is kilobytes and the
+/// abnormal case is not rare enough to ignore — a hundred-megabyte history
+/// file is one runaway script away, and gather would read all of it, decode
+/// all of it and hold all of it, at every keystroke's parent process.
+///
+/// Reading the first `limit` bytes rather than refusing the file keeps the
+/// useful part of a large one: these formats are line-oriented and the
+/// callers parse them line by line, so a truncated read is a shorter list,
+/// not a broken one. The one thing never to do is let another program's file
+/// size decide this program's memory.
+pub fn read_bounded(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(limit).read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// What a small structured file is allowed to be: manifests, configs, the
+/// files a project describes itself with.
+pub const SMALL_FILE: u64 = 4 * 1024 * 1024;
+
+/// What a log-shaped file is allowed to be. Shell history is read whole and
+/// deduplicated down to a few thousand rows, so the cap only has to be
+/// comfortably larger than any real history.
+pub const LOG_FILE: u64 = 32 * 1024 * 1024;
+
 pub fn cache() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache")
 }

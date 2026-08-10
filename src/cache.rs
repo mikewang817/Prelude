@@ -120,6 +120,12 @@ impl Drop for Lock {
 /// a fraction of a second, which is orders of magnitude more than any of
 /// these cycles takes and far less than a person can perceive.
 pub fn lock_for_write(path: &std::path::Path) -> Option<Lock> {
+    try_lock(path, Duration::from_millis(250))
+}
+
+/// Take the lock and hold it for as long as the returned guard lives, waiting
+/// at most `patience` for a current holder to finish.
+pub fn try_lock(path: &std::path::Path, patience: Duration) -> Option<Lock> {
     use std::os::fd::AsRawFd;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -132,7 +138,7 @@ pub fn lock_for_write(path: &std::path::Path) -> Option<Lock> {
         .truncate(false)
         .open(&lock_path)
         .ok()?;
-    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    let deadline = std::time::Instant::now() + patience;
     loop {
         if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
             return Some(Lock(file));
@@ -142,6 +148,21 @@ pub fn lock_for_write(path: &std::path::Path) -> Option<Lock> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Is somebody holding this lock right now?
+///
+/// A liveness test that cannot be fooled by pid reuse, which is the flaw in
+/// every "is the recorded pid alive" check: pids wrap, and the number that
+/// named a daemon this morning names a text editor by the afternoon. A lock
+/// is held by a *process*, and the kernel releases it when that process ends
+/// however it ends — so this asks the only authority that cannot be wrong.
+pub fn lock_is_held(path: &std::path::Path) -> bool {
+    // Acquiring it proves nobody else has it; releasing it immediately leaves
+    // the world as we found it. No patience at all: this is a question, and a
+    // question that waits a quarter of a second is one asked on the launch
+    // path at a cost the answer is not worth.
+    try_lock(path, Duration::ZERO).is_none()
 }
 
 /// Re-invoke ourselves as a detached background helper.
@@ -369,8 +390,8 @@ fn refresh_dir() -> std::path::PathBuf {
     paths::cache().join("refresh")
 }
 
-fn lease_file(name: &str) -> std::path::PathBuf {
-    refresh_dir().join(format!("{name}.lease"))
+fn lease_file_in(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    dir.join(format!("{name}.lease"))
 }
 
 fn backoff_file(name: &str) -> std::path::PathBuf {
@@ -404,7 +425,11 @@ fn now_secs() -> u64 {
 
 /// Is somebody already refreshing this source?
 fn lease_is_live(name: &str) -> bool {
-    let path = lease_file(name);
+    lease_is_live_in(&refresh_dir(), name)
+}
+
+fn lease_is_live_in(dir: &std::path::Path, name: &str) -> bool {
+    let path = lease_file_in(dir, name);
     let Ok(text) = std::fs::read_to_string(&path) else { return false };
     let fresh = path
         .metadata()
@@ -432,11 +457,15 @@ fn lease_is_live(name: &str) -> bool {
 /// syscall, so two processes that decide to refresh at the same instant
 /// cannot both win. The loser exits rather than duplicating the work.
 fn claim_lease(name: &str) -> bool {
-    let _ = std::fs::create_dir_all(refresh_dir());
-    let path = lease_file(name);
+    claim_lease_in(&refresh_dir(), name)
+}
+
+fn claim_lease_in(dir: &std::path::Path, name: &str) -> bool {
+    let _ = std::fs::create_dir_all(dir);
+    let path = lease_file_in(dir, name);
     // A lease left by a dead process is cleared first, otherwise the source
     // would be locked out until something happened to remove it.
-    lease_is_live(name);
+    lease_is_live_in(dir, name);
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
             use std::io::Write;
@@ -448,7 +477,11 @@ fn claim_lease(name: &str) -> bool {
 }
 
 fn release_lease(name: &str) {
-    let _ = std::fs::remove_file(lease_file(name));
+    release_lease_in(&refresh_dir(), name)
+}
+
+fn release_lease_in(dir: &std::path::Path, name: &str) {
+    let _ = std::fs::remove_file(lease_file_in(dir, name));
 }
 
 /// When this source may be tried again, and how many times it has failed.
@@ -494,14 +527,42 @@ fn refresh_ttl(name: &str) -> u64 {
     }
 }
 
+/// How long ago this source last produced an answer, whatever that answer was.
+///
+/// It used to be the cache file's mtime alone, and that stopped being the same
+/// question the moment an unchanged result stopped rewriting the file. A
+/// source whose output is *stable* — which is the normal state of ports,
+/// dirs, and MCP inventories — would then have looked stale forever and been
+/// refreshed on every single launch: the write that was removed for costing
+/// 3ms would have been replaced by a process spawn costing far more.
+///
+/// So a successful refresh stamps its own file. The cache's mtime still
+/// counts, because it is what a fresh install and every older build have.
+fn last_refreshed(name: &str) -> Option<Duration> {
+    let age = |path: std::path::PathBuf| {
+        path.metadata().ok()?.modified().ok()?.elapsed().ok()
+    };
+    match (age(cache_file(name)), age(stamp_file(name))) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn stamp_file(name: &str) -> std::path::PathBuf {
+    refresh_dir().join(format!("{name}.stamp"))
+}
+
+fn record_attempt(name: &str) {
+    let _ = std::fs::create_dir_all(refresh_dir());
+    let _ = write_atomic(&stamp_file(name), now_secs().to_string().as_bytes());
+}
+
 pub fn stale(name: &str) -> bool {
-    cache_file(name)
-        .metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.elapsed().ok())
-        .map(|age| age.as_secs() >= refresh_ttl(name))
-        .unwrap_or(true)
+    is_stale(last_refreshed(name), refresh_ttl(name))
+}
+
+fn is_stale(since: Option<Duration>, ttl: u64) -> bool {
+    since.map(|age| age.as_secs() >= ttl).unwrap_or(true)
 }
 
 /// A named source: what to call it in the cache, and how to gather it.
@@ -566,6 +627,9 @@ pub fn refresh_named(name: &str) -> bool {
             let items = f();
             if write_refreshed(n, &items, before) {
                 record_success(n);
+                // The source answered, so the clock restarts — even when the
+                // answer was identical and no file was written.
+                record_attempt(n);
             } else {
                 record_failure(n);
             }
@@ -997,30 +1061,45 @@ mod tests {
     /// Only one process refreshes a source. The claim is `create_new`, so it
     /// is the filesystem that arbitrates rather than a check followed by a
     /// race between the checkers.
+    ///
+    /// It addresses a directory rather than setting `XDG_CACHE_HOME`: these
+    /// tests share one process, and a test that moves an environment variable
+    /// races every other test in the binary.
     #[test]
     fn one_refresh_per_source_and_a_dead_holder_never_blocks_it() {
         let dir = scratch("lease");
-        // Point the cache at scratch for the duration; these helpers address
-        // `paths::cache()`, which reads this variable on every call.
-        let previous = std::env::var_os("XDG_CACHE_HOME");
-        unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
+        assert!(claim_lease_in(&dir, "mcp"), "an unheld source must be claimable");
+        assert!(!claim_lease_in(&dir, "mcp"), "a held source must not be claimed twice");
+        assert!(claim_lease_in(&dir, "fleet"), "a lease is per source, not global");
+        release_lease_in(&dir, "mcp");
+        assert!(claim_lease_in(&dir, "mcp"), "a released source is claimable again");
 
-        assert!(claim_lease("mcp"), "an unheld source must be claimable");
-        assert!(!claim_lease("mcp"), "a held source must not be claimed twice");
-        assert!(claim_lease("fleet"), "a lease is per source, not global");
-        release_lease("mcp");
-        assert!(claim_lease("mcp"), "a released source is claimable again");
+        // A lease naming a process that no longer exists is not a lease. Pid 0
+        // can never be one of ours, so it stands in for a holder that died
+        // without cleaning up — which is the case that would otherwise lock a
+        // source out of refreshing for good.
+        release_lease_in(&dir, "mcp");
+        std::fs::write(lease_file_in(&dir, "mcp"), "0 1\n").unwrap();
+        assert!(!lease_is_live_in(&dir, "mcp"));
+        assert!(claim_lease_in(&dir, "mcp"), "a dead holder must not lock a source out");
+    }
 
-        // A lease naming a process that no longer exists is not a lease.
-        // Pid 0 can never be a live child of ours.
-        release_lease("mcp");
-        std::fs::write(lease_file("mcp"), "0 1\n").unwrap();
-        assert!(!lease_is_live("mcp"));
-        assert!(claim_lease("mcp"), "a dead holder must not lock a source out");
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
-            None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
+    /// Staleness is "how long since this source last answered", and it stopped
+    /// being the cache file's mtime the moment an unchanged result stopped
+    /// rewriting the file. Left that way, every source with stable output
+    /// would have looked stale forever and spawned a refresh process on every
+    /// launch — trading a 3ms write for something far more expensive.
+    #[test]
+    fn a_source_that_answered_is_not_stale_even_when_nothing_changed() {
+        for name in ["dirs", "mcp", "fleet"] {
+            let ttl = refresh_ttl(name);
+            assert!(!is_stale(Some(Duration::from_secs(0)), ttl), "{name} just answered");
+            assert!(
+                !is_stale(Some(Duration::from_secs(ttl.saturating_sub(1))), ttl),
+                "{name} is inside its interval"
+            );
+            assert!(is_stale(Some(Duration::from_secs(ttl)), ttl), "{name} is due");
+            assert!(is_stale(None, ttl), "a source that has never answered is stale");
         }
     }
 }

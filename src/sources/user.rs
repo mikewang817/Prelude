@@ -89,7 +89,9 @@ pub fn dirs() -> Vec<Item> {
 
 /// Hosts from ~/.ssh/config.
 pub fn ssh() -> Vec<Item> {
-    let Ok(text) = std::fs::read_to_string(paths::home().join(".ssh/config")) else {
+    let Some(text) = paths::read_bounded(&paths::home().join(".ssh/config"), paths::SMALL_FILE)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+    else {
         return Vec::new();
     };
     let mut items = Vec::new();
