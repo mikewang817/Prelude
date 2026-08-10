@@ -8,9 +8,8 @@ The source of truth is this file, not a conversation summary. Before changing
 Agent, Run, Session, Skill, MCP, Config, Home, messaging or Agent doctor
 behaviour, read this file.
 
-**Eight milestones are complete and two were removed after they shipped.**
-Milestone 11 is implemented locally and awaiting one-line release validation.
-The surviving Agent inventory is now a
+**Nine milestones are complete and two were removed after they shipped.**
+There is no current milestone. The surviving Agent inventory is now a
 Raycast-style Agent experience without rebuilding a collaboration system.
 What remains is written down as recorded limitations under the milestone that
 owns each one — decisions with reasons, not a backlog, and reopening one means
@@ -511,7 +510,7 @@ panel reaches Runs, Sessions, Ask, settings, diagnostics and Favorites. Control
 schema 3 serializes the same registry capabilities and passed a private-value
 scan.
 
-### 11. Skill and MCP archive lifecycle — `[>]`
+### 11. Skill and MCP archive lifecycle — `[x]`
 
 Product rule: archive is a Prelude view overlay, not an Agent operation. Every
 Skill copy remains installed and every MCP owner definition remains enabled.
@@ -540,7 +539,7 @@ Acceptance criteria:
       existing Kind band.
 - [x] Tests, release Clippy with `-D warnings`, `git diff --check`, release
       build and gather remain inside the 40 ms budget.
-- [ ] Publish verified v0.6.2 native assets and exercise the public one-line
+- [x] Publish verified v0.6.2 native assets and exercise the public one-line
       installer through its real `curl | bash` path.
 
 The Session exception does not transfer here. An archived Session with a live
@@ -550,11 +549,19 @@ inventory"; the Run row remains visible and its effective-context view still
 names capabilities it confirmed, so resurfacing the inventory object would
 undo the preference without revealing any otherwise-hidden work.
 
-Local evidence: 170 tests pass. Unit coverage pins private atomic metadata,
-stable merged identities, native-file non-mutation, both action states, every
-default visibility surface, archive scopes, borrow exclusion and Control
-schema 4. A release gather measured 26.8 ms median and 36.9 ms maximum; release
-Clippy is warning-free. Release evidence remains unchecked above.
+Definition-of-done evidence: 170 tests pass. Unit coverage pins private atomic
+metadata, stable merged identities, native-file non-mutation, both action
+states, every default visibility surface, archive scopes, borrow exclusion and
+Control schema 4. A release gather measured 26.8 ms median and 36.9 ms maximum;
+release Clippy is warning-free.
+
+The v0.6.2 tag built and published checksum-listed arm64 and x86_64 assets in
+GitHub Actions. The public README `curl | bash` command then downloaded and
+verified the arm64 asset, reused installed fzf/Ghostty, preserved the managed
+zsh block and reinstalled the supervised panel. The installed
+`~/.local/bin/prelude` reports Control schema 4 with `archived` on every Skill
+and MCP record, exposes both Archive actions through `_actions`, and generated
+a healthy panel whose command points at that installed binary.
 
 ## Recorded limitations
 
@@ -601,7 +608,7 @@ As of 2026-08-09:
 
 ## Progress log
 
-### 2026-08-10 — Skill and MCP archive lifecycle implemented
+### 2026-08-10 — Skill and MCP archive lifecycle completed
 
 - Added reversible Prelude-only archive metadata for merged Skill and MCP
   capability identities without touching native Agent files or definitions.
@@ -610,7 +617,7 @@ As of 2026-08-09:
 - Added Archive/Restore actions, Quick Look state and Control schema 4 fields;
   excluded archived capabilities from one-run Session borrowing.
 - Passed 170 tests, release Clippy, `git diff --check`, release build and the
-  40 ms gather budget; v0.6.2 one-line release validation remains open.
+  40 ms gather budget; published and validated the v0.6.2 one-line install.
 
 ### 2026-08-09 — Raycast-style Agent experience completed
 
