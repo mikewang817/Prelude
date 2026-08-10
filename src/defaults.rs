@@ -128,6 +128,13 @@ pub fn on_enter(item: &Item) -> Default_ {
     if item.kind == Session && !item.get("active_run").is_empty() {
         return Act(Verb::CdThere);
     }
+    // A newer release. `prelude update` has no arguments anybody would add,
+    // so there is nothing to hand over and nothing to edit — the reason
+    // commands go to the prompt does not apply, and the row's whole purpose
+    // is the thing it would have made you paste somewhere.
+    if item.get("update") == "available" {
+        return Act(Verb::RunHere);
+    }
     match item.kind {
         // A question someone is blocked on. There is exactly one thing to do
         // with it.
@@ -308,6 +315,9 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
     }
     if d == Default_::Act(Verb::Inspect) && item.kind == Kind::Proc {
         return "Show its full command";
+    }
+    if d == Default_::Act(Verb::RunHere) && item.get("update") == "available" {
+        return "Update now";
     }
     if d == Default_::Act(Verb::RunHere) && item.kind == Kind::Mcp {
         return "Show what it exposes";

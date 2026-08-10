@@ -1102,6 +1102,31 @@ mod tests {
         assert!(!crate::ui::OPEN_ACTIONS.trim().is_empty());
     }
 
+    /// A row whose entire purpose is one command with no arguments should run
+    /// it, not hand you the text to run yourself.
+    #[test]
+    fn the_update_row_updates_rather_than_copying_the_command() {
+        use crate::defaults::{describe, on_enter, Default_, Surface, Verb};
+
+        let row = crate::update::row("9.9.9");
+        // It is a Sys row, and Sys hands its command over — which is right for
+        // every other Sys row and wrong for this one: `prelude update` has no
+        // argument anybody would add, so the reason commands go to the prompt
+        // does not apply, and copying it made the row a detour to itself.
+        assert_eq!(row.kind, crate::item::Kind::Sys);
+        assert_eq!(on_enter(&crate::item::Item::new("df -h", crate::item::Kind::Sys)),
+                   Default_::Insert, "an ordinary system command still hands over");
+        assert_eq!(on_enter(&row), Default_::Act(Verb::RunHere));
+        for surface in [Surface::Prompt, Surface::Clipboard] {
+            assert_eq!(describe(&row, surface), "Update now",
+                       "and it says so, on both surfaces");
+        }
+        // The opposite of acting is being handed the text, so `^K` keeps it.
+        let ids: Vec<String> = crate::actions::actions_for(&row, Surface::Clipboard)
+            .iter().map(|(id, ..)| id.to_string()).collect();
+        assert!(ids.contains(&"copy".to_string()), "{ids:?}");
+    }
+
     /// The panel refreshes itself behind your back, so the one thing it must
     /// never do is move something you are looking at.
     #[test]

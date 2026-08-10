@@ -48,6 +48,7 @@ With the default **per kind** setting:
 | Folder | open in Finder |
 | Application | launch through Launch Services |
 | URL / Quicklink result | open in the default browser |
+| newer release available | download, verify, install, and close the panel |
 | Calculator / conversion / translation | copy the result |
 | Prelude setting | carry out the setting-specific edit |
 | clipboard record | hand its text or payload path back to the surface |

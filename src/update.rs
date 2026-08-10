@@ -393,10 +393,19 @@ fn apply(version: &str) -> i32 {
     };
     println!("  installed {version}; the previous binary is at {}", previous.display());
     // The panel is the whole reason this module exists: leaving it on the old
-    // binary is the state an update is supposed to end, not create.
-    match crate::global::restart_panel() {
-        Ok(said) => println!("  {said}"),
-        Err(e) => println!("  the panel was not restarted ({e}); run:  prelude global start"),
+    // binary is the state an update is supposed to end, not create. But when
+    // the update is running *inside* the panel, restarting it means killing
+    // the process tree we are in — `stop_helper` pkills the Ghostty instance
+    // this process descends from. Closing the surface achieves the same end
+    // safely: the next press runs `<installed prelude> _surface`, which is now
+    // the binary just installed. `ui::apply_default` emits the CLOSE.
+    if crate::ui::env_flag("PRELUDE_FULL_SURFACE") {
+        println!("  this panel is closing; the next press runs {version}");
+    } else {
+        match crate::global::restart_panel() {
+            Ok(said) => println!("  {said}"),
+            Err(e) => println!("  the panel was not restarted ({e}); run:  prelude global start"),
+        }
     }
     0
 }

@@ -102,6 +102,13 @@ fn once() -> (i32, After) {
             std::thread::sleep(CONFIRM);
             (code, After::Close)
         }
+        // Said by an action that has made this panel's binary obsolete. The
+        // surface goes away and the next press rebuilds it from disk.
+        "CLOSE" => {
+            println!("prelude: {payload}");
+            std::thread::sleep(CONFIRM);
+            (code, After::Close)
+        }
         "MSG" => {
             println!("prelude: {payload}");
             std::thread::sleep(CONFIRM);

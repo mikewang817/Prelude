@@ -427,6 +427,25 @@ in the README states all of this rather than leaving it to be discovered in a
 packet capture — a privacy claim that turns out to have an exception is worse
 than one that never claimed it.
 
+**The update row runs; it does not hand you the command.** It is a `Kind::Sys`
+row, and `Sys` hands its command over — right for every other one and wrong for
+this: `prelude update` takes no argument anybody would add, so the reason
+commands go to the prompt ("it is so often the *start* of a command") does not
+apply, and copying it made the row a detour to itself. `on_enter` checks the
+`update` field before the kind, the footer says `Update now`, and `^K` keeps
+`Copy the command` because the opposite of acting is being handed the text.
+
+**But it cannot restart the panel from inside the panel.** `stop_helper` pkills
+the Ghostty instance this process descends from, so restarting mid-update kills
+the process tree doing the updating — after the binary has already been
+swapped, leaving a panel that is down rather than new. It does not need to:
+closing the surface is enough, because the next press runs `<installed prelude>
+_surface`, which by then *is* the new binary. `apply` therefore checks
+`PRELUDE_FULL_SURFACE` and skips the restart, and `apply_default` emits a
+`CLOSE` verb the panel loop turns into `After::Close`. The zsh widget has no
+case for `CLOSE` and ignores it, which is the correct behaviour there: nothing
+in a terminal needs closing, and `restart_panel` runs normally.
+
 **An update that does not restart the panel creates the exact state it was
 meant to end.** `update.rs` exists as much for question 1 — *is the running
 panel the binary on disk* — as for the release check, because that is the
