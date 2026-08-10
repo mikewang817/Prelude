@@ -114,11 +114,14 @@ fn rebuild(widths: &[usize], tw: usize, cols: usize) {
     let root_feed = crate::render::render_with(&root, cols, Some(widths), Some(tw));
     let home_feed = crate::render::render_with(&home, cols, Some(widths), Some(tw));
     let cache = crate::paths::cache();
-    let _ = crate::cache::write_atomic(&cache.join("list.txt"), root_feed.as_bytes());
-    let _ = crate::cache::write_atomic(&cache.join("home.txt"), home_feed.as_bytes());
+    let mut snapshot = vec![
+        (cache.join("list.txt"), root_feed.as_bytes().to_vec()),
+        (cache.join("home.txt"), home_feed.as_bytes().to_vec()),
+    ];
     if let Ok(json) = serde_json::to_vec(&items) {
-        let _ = crate::cache::write_atomic(&cache.join("search-items.json"), &json);
+        snapshot.push((cache.join("search-items.json"), json));
     }
+    crate::cache::write_group(&snapshot);
 }
 
 /// What the list is made of, as one number.

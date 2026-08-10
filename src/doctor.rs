@@ -612,14 +612,29 @@ fn agent_rows(mut configs: ConfigProbes) -> Vec<Row> {
         };
         // A version costs a subprocess, which is exactly what a command a
         // person typed is allowed to spend.
-        let version = crate::exec::run(probe.version, Duration::from_secs(20));
-        let version = version.lines().next().unwrap_or("").trim().to_string();
+        //
+        // `capture` rather than `run`, because this is a report and the three
+        // ways of printing nothing are three different findings. They read
+        // identically to `run`, which flattens all of them into an empty
+        // string — and "printed nothing" is the least useful of the three to
+        // be told when what actually happened was a twenty-second hang.
+        let probed = crate::exec::capture(probe.version, Duration::from_secs(20));
+        let version = probed.stdout_text().lines().next().unwrap_or("").trim().to_string();
         let mut row = Row::new(
             probe.agent,
             if version.is_empty() { paths::tilde(&path.to_string_lossy()) } else { version.clone() },
         );
         if version.is_empty() {
-            row.issue("no-version", format!("`{} --version` printed nothing", probe.agent));
+            let why = match probed.failure() {
+                Some(how) => format!("`{} --version` {how}", probe.agent),
+                None => format!("`{} --version` printed nothing", probe.agent),
+            };
+            let detail = probed.stderr_text();
+            let detail = detail.lines().next().unwrap_or("").trim();
+            row.issue(
+                "no-version",
+                if detail.is_empty() { why } else { format!("{why} — {detail}") },
+            );
         }
         match read_login(probe.login, &login_output(probe.login)) {
             LoginState::In(how) => row.note(format!("logged in · {how}")),

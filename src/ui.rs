@@ -215,11 +215,17 @@ pub fn search() -> i32 {
     let static_path = crate::paths::cache().join("list.txt");
     let home_path = crate::paths::cache().join("home.txt");
     let items_path = crate::paths::cache().join("search-items.json");
-    let _ = crate::cache::write_atomic(&static_path, root_feed.as_bytes());
-    let _ = crate::cache::write_atomic(&home_path, home_feed.as_bytes());
+    // One gather's answer in three files: staged, then renamed together, and
+    // skipped entirely where the bytes have not moved — which for a catalogue
+    // of four hundred kilobytes is most launches.
+    let mut snapshot = vec![
+        (static_path.clone(), root_feed.as_bytes().to_vec()),
+        (home_path, home_feed.as_bytes().to_vec()),
+    ];
     if let Ok(json) = serde_json::to_vec(&items) {
-        let _ = crate::cache::write_atomic(&items_path, &json);
+        snapshot.push((items_path, json));
     }
+    crate::cache::write_group(&snapshot);
     let me = std::env::current_exe().unwrap_or_default();
     let me = me.to_string_lossy().into_owned();
 

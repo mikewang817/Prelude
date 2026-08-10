@@ -162,7 +162,7 @@ pub fn save(m: &Msg) -> std::io::Result<()> {
     }
     let json = serde_json::to_vec_pretty(m)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    crate::cache::write_atomic(&file_of(&m.id), &json)
+    crate::cache::write_state(&file_of(&m.id), &json)
 }
 
 /// Drop answered messages once they are old enough to be history rather than

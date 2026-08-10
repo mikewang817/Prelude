@@ -58,7 +58,7 @@ fn write_at(path: &Path, values: &BTreeSet<String>) -> Result<(), String> {
     if !text.is_empty() {
         text.push('\n');
     }
-    crate::cache::write_atomic(path, text.as_bytes())
+    crate::cache::write_state(path, text.as_bytes())
         .map_err(|error| format!("could not save favourites: {error}"))
 }
 
@@ -75,6 +75,9 @@ pub fn ensure_file() -> Result<PathBuf, String> {
 pub fn set(item: &Item, wanted: bool) -> Result<(), String> {
     let key = key(item).ok_or_else(|| "that object cannot be favourited".to_string())?;
     let path = file();
+    // Read, change, write. Two windows favouriting two different things at
+    // the same moment kept one of them without the lock.
+    let _lock = crate::cache::lock_for_write(&path);
     let mut values = read_at(&path);
     if wanted {
         values.insert(key);

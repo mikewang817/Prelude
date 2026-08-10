@@ -8,7 +8,6 @@
 use crate::item::{Item, Kind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const SCHEMA: u32 = 1;
@@ -63,41 +62,19 @@ fn read_at(path: &Path) -> Result<Metadata, String> {
 }
 
 fn write_at(path: &Path, metadata: &Metadata) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| "capability metadata has no directory".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("could not create capability metadata directory: {error}"))?;
     let bytes = serde_json::to_vec_pretty(metadata)
         .map_err(|error| format!("could not encode capability archive metadata: {error}"))?;
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut output = options
-        .open(&tmp)
-        .map_err(|error| format!("could not write capability archive metadata: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("could not protect capability archive metadata: {error}"))?;
-    }
-    output
-        .write_all(&bytes)
-        .map_err(|error| format!("could not write capability archive metadata: {error}"))?;
-    output
-        .sync_all()
-        .map_err(|error| format!("could not sync capability archive metadata: {error}"))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|error| format!("could not replace capability archive metadata: {error}"))?;
-    Ok(())
+    // 0600, flushed before the rename, unique temp name — the same rules the
+    // bus, favorites and frecency follow, in the one place that owns them.
+    crate::cache::write_state(path, &bytes)
+        .map_err(|error| format!("could not write capability archive metadata: {error}"))
 }
 
 fn set_at(path: &Path, item: &Item, archived: bool) -> Result<(), String> {
     let key = key(item).ok_or_else(|| "that object cannot be archived".to_string())?;
+    // Read, change, write: held under the write lock so archiving two things
+    // from two windows does not silently keep one of them.
+    let _lock = crate::cache::lock_for_write(path);
     // A malformed file is evidence, not an empty preference. Refuse to
     // overwrite it invisibly when an action is applied.
     let mut metadata = read_at(path)?;

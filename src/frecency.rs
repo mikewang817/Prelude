@@ -66,6 +66,13 @@ pub fn bump(cmd: &str) {
     if cmd.is_empty() {
         return;
     }
+    // Read, change, write — so two of these at once lose one of the two
+    // counts. Which is not hypothetical here: this runs on *every* Enter, and
+    // a person with a shell and the panel open is two Preludes. The lock is
+    // held across the whole cycle, and if it cannot be had in a quarter of a
+    // second the bump is taken anyway: a launcher may lose a use count, but
+    // it may never make somebody wait to press a key.
+    let _lock = crate::cache::lock_for_write(&file());
     let mut freq = load();
     let entry = freq.entry(cmd.to_string()).or_insert((0, 0.0));
     entry.0 += 1;
@@ -82,5 +89,5 @@ pub fn bump(cmd: &str) {
         .iter()
         .map(|(c, (n, t))| format!("{n}\t{t:.0}\t{c}\n"))
         .collect();
-    let _ = crate::cache::write_atomic(&file(), body.as_bytes());
+    let _ = crate::cache::write_state(&file(), body.as_bytes());
 }
