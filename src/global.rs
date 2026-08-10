@@ -519,18 +519,18 @@ fn xml(value: &str) -> String {
 
 /// Start and supervise the hidden panel instance at login.
 ///
-/// The old job launched `/usr/bin/open` and then exited successfully. launchd
-/// therefore had nothing left to watch: if Ghostty quit once, the global
-/// shortcut stayed dead until the user knew to run `prelude global start`.
-/// Running the app executable as the job keeps ownership honest and lets
-/// launchd replace it after a crash.
-fn launch_agent(ghostty: &Path, config: &Path, stdout: &Path, stderr: &Path) -> String {
+/// Ghostty explicitly requires macOS applications to be launched through
+/// Launch Services, not by executing `Contents/MacOS/ghostty` directly.
+/// `open -W` remains alive until that exact new application instance exits, so
+/// launchd still has a real process to supervise and can replace the hidden
+/// quick-terminal owner after a crash or Quit.
+fn launch_agent(app: &Path, config: &Path, stdout: &Path, stderr: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>{LABEL}</string>
-  <key>ProgramArguments</key><array><string>{ghostty}</string><string>--config-file={config}</string></array>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-W</string><string>-n</string><string>-a</string><string>{app}</string><string>--args</string><string>--config-file={config}</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>
@@ -540,7 +540,7 @@ fn launch_agent(ghostty: &Path, config: &Path, stdout: &Path, stderr: &Path) -> 
   <key>StandardErrorPath</key><string>{stderr}</string>
 </dict></plist>
 "#,
-        ghostty = xml(&ghostty.to_string_lossy()),
+        app = xml(&app.to_string_lossy()),
         config = xml(&config.to_string_lossy()),
         stdout = xml(&stdout.to_string_lossy()),
         stderr = xml(&stderr.to_string_lossy()),
@@ -548,17 +548,17 @@ fn launch_agent(ghostty: &Path, config: &Path, stdout: &Path, stderr: &Path) -> 
 }
 
 /// Upgrade an installed login agent in place. This lets `prelude global start`
-/// repair integrations from the old `/usr/bin/open` design instead of making
-/// an upgrader know that `install` has to be repeated.
+/// repair integrations from both the old non-waiting `open` job and the direct
+/// executable design instead of making an upgrader know to repeat `install`.
 fn refresh_launch_agent() -> Result<(), String> {
     let path = launch_agent_path();
     if !path.is_file() {
         return Err("the launcher login agent is missing; run `prelude global install`".into());
     }
-    let ghostty = ghostty_executable().ok_or_else(|| {
+    let app = ghostty_app().ok_or_else(|| {
         "the launcher panel needs Ghostty in /Applications or ~/Applications".to_string()
     })?;
-    let body = launch_agent(&ghostty, &quick_config_path(), &stdout_path(), &stderr_path());
+    let body = launch_agent(&app, &quick_config_path(), &stdout_path(), &stderr_path());
     if std::fs::read(&path).is_ok_and(|old| old == body.as_bytes()) {
         return Ok(());
     }
@@ -979,7 +979,7 @@ fn install() -> Result<String, String> {
     if !cfg!(target_os = "macos") {
         return Err("the launcher panel is available on macOS only".into());
     }
-    let ghostty = ghostty_executable().ok_or_else(|| {
+    let app = ghostty_app().ok_or_else(|| {
         "the launcher panel needs Ghostty in /Applications or ~/Applications".to_string()
     })?;
 
@@ -1039,7 +1039,7 @@ fn install() -> Result<String, String> {
         ));
     }
 
-    let new_agent = launch_agent(&ghostty, &destination, &stdout_path(), &stderr_path());
+    let new_agent = launch_agent(&app, &destination, &stdout_path(), &stderr_path());
     if let Err(e) = crate::cache::write_atomic(&agent, new_agent.as_bytes()) {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
         return Err(format!("could not write {}: {e}", agent.display()));
@@ -1053,8 +1053,8 @@ fn install() -> Result<String, String> {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
         return Err(e);
     }
-    // The supervised Ghostty process is the LaunchAgent now. Bootstrapping is
-    // both the initial start and the guarantee that a later crash is repaired.
+    // A waiting `open` process is the LaunchAgent. It exits with the exact
+    // Ghostty application instance, so KeepAlive repairs a later crash.
     if let Err(e) = start_helper() {
         rollback_install(&destination, &backup, &agent, old_agent.as_deref());
         return Err(format!("{e}; the previous launcher was restored"));
@@ -1614,19 +1614,22 @@ mod tests {
     }
 
     #[test]
-    fn generated_metadata_escapes_paths_and_supervises_the_real_process() {
+    fn generated_metadata_escapes_paths_and_supervises_the_supported_launch() {
         let agent = launch_agent(
-            Path::new("/Users/me/Applications/Ghostty.app/Contents/MacOS/ghostty"),
+            Path::new("/Users/me/Applications/Ghostty.app"),
             Path::new("/tmp/a&b/panel.ghostty"),
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
         );
         assert!(agent.contains("/tmp/a&amp;b/panel.ghostty"));
-        assert!(agent.contains("/Users/me/Applications/Ghostty.app/Contents/MacOS/ghostty"));
+        assert!(agent.contains("/Users/me/Applications/Ghostty.app"));
         assert!(agent.contains("<key>RunAtLoad</key><true/>"));
-        // launchd owns the long-lived Ghostty process itself. An `open` job
-        // exits immediately and cannot repair a panel that later dies.
-        assert!(!agent.contains("/usr/bin/open"));
+        // Ghostty requires Launch Services on macOS. `-W` makes `open` wait
+        // for this new (`-n`) application instance instead of leaving launchd
+        // with a successful, already-exited launcher to supervise.
+        assert!(agent
+            .contains("<string>/usr/bin/open</string><string>-W</string><string>-n</string>"));
+        assert!(agent.contains("<string>--args</string>"));
         assert!(agent.contains("<key>KeepAlive</key><true/>"));
     }
 

@@ -77,10 +77,14 @@ dismissal: it hides the panel *and* passes Escape to fzf, so the launcher
 resets behind a hidden panel and the next press is a reveal, not a rebuild.
 
 One instance or none. Two panels both claim the chord and the loser still
-answers a toggle, so the panel appears to open every other press. The
-LaunchAgent runs Ghostty itself as a `KeepAlive` job: this is both the one
-start and the supervision. Never return it to an `/usr/bin/open` job — that
-process exits immediately, so launchd cannot repair a panel that later dies.
+answers a toggle, so the panel appears to open every other press. Ghostty must
+be launched through Launch Services on macOS: executing
+`Contents/MacOS/ghostty` directly leaves it as a foreground application even
+with `macos-hidden = always`, which puts the dedicated instance in the Dock.
+The LaunchAgent therefore owns `open -W -n -a Ghostty.app --args …` as a
+`KeepAlive` job. `-W` is load-bearing: ordinary `open` exits immediately and
+leaves launchd unable to repair a panel that later dies; waiting ties the
+supervisor's lifetime to the exact new Ghostty instance.
 
 **`cargo build` does not change the running panel.** The loop was started at
 login and executes whatever the binary held then. Each press *does* spawn the

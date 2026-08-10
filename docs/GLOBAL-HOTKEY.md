@@ -28,13 +28,15 @@ There is no terminal backend setting and no tmux integration.
 ```text
 login
   └─ launchd: app.prelude.hotkey
-       └─ Ghostty --config-file=~/.config/prelude/quick-terminal.ghostty
-            ├─ no window or shell while idle
-            └─ global chord toggles a Quick Terminal
-                 └─ prelude _surface
-                      ├─ quick-terminal marker == 1 → prelude _panel loop
-                      │    └─ child prelude → fzf
-                      └─ no marker → open -n exact Ghostty.app and exit
+       └─ open -W -n -a Ghostty.app --args --config-file=…
+            ├─ waits for the dedicated application instance
+            └─ Launch Services starts hidden Ghostty
+                 ├─ no window or shell while idle
+                 └─ global chord toggles a Quick Terminal
+                      └─ prelude _surface
+                           ├─ quick-terminal marker == 1 → prelude _panel loop
+                           │    └─ child prelude → fzf
+                           └─ no marker → open -n exact Ghostty.app and exit
 ```
 
 The generated Ghostty configuration sets:
@@ -50,13 +52,23 @@ The generated Ghostty configuration sets:
 - `command = <installed-prelude> _surface`
 - `abnormal-command-exit-runtime = 0`
 
-`macos-hidden` keeps the dedicated instance out of the Dock and app switcher.
-`initial-window = false` leaves it with no surface at rest. Disabling saved
-state prevents the hidden instance from restoring ordinary Ghostty windows.
+`macos-hidden` makes the dedicated instance a macOS UI element, keeping it out
+of the Dock and app switcher. `initial-window = false` leaves it with no surface
+at rest. Disabling saved state prevents the hidden instance from restoring
+ordinary Ghostty windows.
 
-The LaunchAgent runs Ghostty's executable itself with `RunAtLoad` and
-`KeepAlive`. It does not supervise a short-lived `/usr/bin/open` process, so
-launchd can replace Ghostty if the panel process exits.
+One resident Ghostty application process is required: Ghostty owns the global
+event tap and Quick Terminal. It should be invisible and idle, not represented
+by a Dock tile. Quitting that dedicated instance causes it to return by design;
+`KeepAlive` preserves the global shortcut. `prelude global stop` is the
+intentional way to stop both supervision and the instance.
+
+Ghostty requires macOS application launches to go through Launch Services. The
+LaunchAgent therefore runs `/usr/bin/open -W -n -a Ghostty.app --args …` rather
+than executing `Contents/MacOS/ghostty` directly. `-W` keeps the launcher alive
+until the new application instance exits, giving launchd something real to
+supervise without bypassing Ghostty's supported launch path. This is also what
+allows `macos-hidden = always` to take effect.
 
 ## Why `_surface` exists
 
