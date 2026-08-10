@@ -1821,7 +1821,15 @@ mod tests {
         );
         assert!(mi.contains(&"mcplogin".to_string()), "not logged in, no way in: {mi:?}");
         assert!(mi.contains(&"mcpremove".to_string()), "{mi:?}");
-        assert!(mi.iter().any(|i| i.starts_with("install:") || i == "menu:install"), "{mi:?}");
+        let has_install_target = crate::agent::installed().into_iter().any(|name| {
+            name != "codex"
+                && crate::agent::get(name).is_some_and(|spec| spec.capabilities.install_mcp)
+        });
+        assert_eq!(
+            mi.iter().any(|i| i.starts_with("install:") || i == "menu:install"),
+            has_install_target,
+            "an install action is honest only when another installed agent can receive it: {mi:?}"
+        );
         // A healthy server is not nagged about logging in.
         let ok = Item::new("codex mcp get n", Kind::Mcp)
             .put("name", "n").put("agent", "codex").put("health", "ok");
