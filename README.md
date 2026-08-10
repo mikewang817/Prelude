@@ -1,66 +1,83 @@
 # Prelude
 
 <p align="center">
-  <strong>The command center for terminal-first work on macOS.</strong><br>
-  Search your Mac. Control your coding agents. Keep your hands on the keyboard.
+  <strong>A fast launcher and control plane for terminal-first work on macOS.</strong><br>
+  Search the Mac, manage coding agents, and keep commands reviewable.
 </p>
 
 <p align="center">
   <a href="#install"><strong>Install</strong></a> ·
-  <a href="#one-search-box-your-whole-workspace"><strong>Explore features</strong></a> ·
-  <a href="docs/SEARCH.md"><strong>Search guide</strong></a> ·
-  <a href="CONTRIBUTING.md"><strong>Contribute</strong></a>
+  <a href="#how-prelude-is-different"><strong>Why Prelude</strong></a> ·
+  <a href="#agent-control-plane"><strong>Agents</strong></a> ·
+  <a href="docs/SEARCH.md"><strong>Search guide</strong></a>
 </p>
 
-![Prelude agent home showing agents, runs, skills, MCP servers, and recent sessions](docs/assets/prelude-home.png)
+![Prelude showing agents, active runs, skills, MCP servers, and recent sessions](docs/assets/prelude.png)
 
-Prelude turns one shortcut into a live index of your work: **commands, files,
-apps, clipboard history, projects, agents, sessions, skills, and MCP servers**.
-Find what you need, see exactly what `Enter` will do, and move on.
+Prelude puts commands, files, apps, clipboard history, projects, coding agents,
+sessions, skills, and MCP servers behind one shortcut. It is built in Rust on
+[fzf](https://github.com/junegunn/fzf), stays local, and targets a gather time
+below 40 ms.
 
-It is not another terminal dashboard. It is the layer between you and all the
-things you reach for while building software.
+## Install
 
-## Why Prelude
-
-| | |
-|---|---|
-| **One launcher, two surfaces** | Press `Ctrl+R` at a zsh prompt, or open a global Ghostty panel from anywhere on your Mac. |
-| **An AI agent control plane** | See Claude Code, Codex, pi, and OpenCode together—running jobs, waiting questions, conversations, skills, and MCP servers. |
-| **Commands stay reviewable** | Prelude inserts commands into your prompt or copies them from the global panel. It never guesses which terminal should execute them. |
-| **Objects just open** | Files, folders, apps, and URLs go directly to macOS Launch Services instead of becoming shell commands. |
-| **Every action is contextual** | `Enter` does the obvious thing, `Ctrl+K` shows alternatives, and the footer tells you what will happen before you act. |
-| **Built for instant recall** | The gather path targets under 40 ms. Slow work is cached, and no network request or directory walk runs on every keystroke. |
-
-## One search box. Your whole workspace.
-
-```text
-f:tag:work          files with the Finder tag “work”
-c:                  text, images, and Finder objects from your clipboard
-h:git rebase        complete shell history
-app:zed             installed applications
-s:is:pinned         pinned Claude, Codex, and pi conversations
-a:waiting           agents waiting for your input
-/cnipa-ooa          invoke an installed skill
-@claude explain …   ask an installed agent
-10kg to lb          calculate and convert inline
-:                   browse every available scope
+```sh
+curl -fsSL https://raw.githubusercontent.com/mikewang817/Prelude/main/install.sh | bash
 ```
 
-Large collections stay behind explicit scopes, so the home screen remains
-useful instead of becoming a wall of thousands of files. Clear the query and
-Prelude returns to your agent home.
+That one command downloads the native binary for your Mac, provides a compatible
+`fzf`, installs the official signed Ghostty app when needed, adds the zsh widget,
+and starts the login-persistent global panel. No Rust toolchain, repository
+clone, Homebrew setup, or manual shell editing is required.
 
-### Your agents, at a glance
+On first install, macOS asks for Ghostty's Accessibility permission so it can
+register the global shortcut. Then:
 
-Prelude gives local coding agents a shared operational surface:
+- **`Cmd+Shift+Space`** opens Prelude from anywhere.
+- **`Ctrl+R`** opens Prelude at the current zsh prompt.
 
-- see what is **working, waiting, or no longer running**
-- resume native conversations without hunting for session IDs
-- answer an agent question from the top row of the launcher
-- inspect, archive, restore, and move skills between supported agents
-- compare, archive, and restore MCP servers without changing native definitions
+Run the same command again to upgrade or repair the installation. The installer
+is idempotent.
+
+## How Prelude is different
+
+Most desktop launchers are excellent at opening apps, files, and web searches.
+Prelude keeps those basics, but is designed around work that begins in a
+terminal and increasingly spans several coding agents.
+
+| A conventional launcher | Prelude |
+|---|---|
+| Opens apps, files, and links | Also searches commands, shell history, clipboard objects, projects, sessions, skills, MCP servers, and live agent runs |
+| Runs a selected command immediately | Inserts it into the prompt, or copies it from the global panel, so it remains visible and editable |
+| Treats every result as text | Knows whether a result is a command or an object; objects open directly through macOS, while commands are handed back to you |
+| Adds AI as a chat box | Shows the operational state around local agents: runs, waiting questions, conversations, capabilities, ownership, and health |
+| Integrates with one assistant at a time | Normalizes Claude Code, Codex, pi, and OpenCode in one local inventory |
+| Offers fixed secondary actions | Builds a contextual `Ctrl+K` panel for the focused item and states exactly what `Enter` will do |
+
+Prelude is not a terminal dashboard and does not create a terminal for every
+action. The global panel is a hidden Ghostty Quick Terminal: objects open where
+they belong, while commands go to the clipboard for deliberate handoff.
+
+## Agent control plane
+
+Prelude treats agents as managed local objects rather than prompt providers.
+From one surface you can:
+
+- see which agents are **working, waiting, or no longer running**
+- answer a waiting question without finding the originating terminal
+- resume native Claude Code, Codex, and pi conversations
+- inspect Skill ownership and integrity across supported agents
+- archive, restore, copy, compare, or lend Skills for one run
+- compare MCP ownership, health, tools, and redacted definitions
+- archive and restore MCP servers in Prelude without disabling native configs
 - send local agent-to-human and agent-to-agent messages
+
+Archiving is a reversible Prelude preference: it never removes a Skill or
+changes an MCP definition. Its metadata contains only stable object keys—never
+paths, commands, definitions, or credentials. Shared run records likewise omit
+full prompts and private MCP definitions.
+
+The same state is available from the shell:
 
 ```sh
 prelude fleet
@@ -70,13 +87,31 @@ prelude say api-gateway "I changed the auth schema; rebase before editing"
 ```
 
 No separate server is required. Identity comes from the process tree and the
-current project; messages remain on the local machine.
+current project; messages stay on the local machine.
 
-### More than fuzzy search
+## Search without the noise
 
-Prelude understands the type of every result. That means a clipboard image can
-preview as pixels, a file can reveal itself in Finder, a session can resume in
-its native agent, and a process can expose its PID and a confirmed kill action.
+Large collections live behind explicit scopes, so an empty query remains a
+useful agent home instead of a wall of files and history.
+
+```text
+a:waiting           agents waiting for input
+s:is:pinned         pinned Claude, Codex, and pi conversations
+skill:is:archived   archived Skills, ready to restore
+mcp:is:archived     archived MCP servers, ready to restore
+/cnipa-ooa          invoke an installed Skill
+@claude explain …   ask an installed agent
+f:tag:work          files carrying the Finder tag “work”
+c:                  clipboard text, images, and Finder objects
+h:git rebase        complete shell history
+app:zed             installed applications
+10kg to lb          inline calculation and conversion
+:                   every available scope
+```
+
+Prelude is type-aware: a clipboard image previews as pixels, a file reveals in
+Finder, a Session resumes in its native agent, and a process exposes its PID
+before a confirmed kill action.
 
 | Key | Action |
 |---|---|
@@ -86,60 +121,26 @@ its native agent, and a process can expose its PID and a confirmed kill action.
 | `Cmd+Enter` | Reveal a file in Finder from the global panel |
 | `Escape` | Go back or close Prelude |
 
-## Install
+## Local and deliberate
 
-One command. No Rust toolchain, Homebrew setup, cloned repository, or manual
-shell editing:
+- Sensitive history and clipboard text are filtered; MCP details and exports
+  are redacted before becoming search data.
+- Destructive file, app, Skill, and inactive-Session actions confirm first and
+  move the item to the Trash.
+- Slow sources are cached. A failed source disappears instead of blocking the
+  launcher or printing into it.
+- Prelude's indexes, metadata, clipboard records, and message bus stay in its
+  XDG directories on your Mac.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/mikewang817/Prelude/main/install.sh | bash
-```
+Check an installation with `prelude global status` and optional integrations
+with `prelude doctor`.
 
-The installer downloads the native binary for your Mac, provides a compatible
-`fzf`, installs the official signed Ghostty app when needed, adds the zsh
-widget, and starts a login-persistent global panel.
-
-On the first install, macOS opens **Privacy & Security → Accessibility**. Turn
-on Ghostty and press Enter once. Prelude verifies Ghostty's actual global event
-tap before reporting success—it does not mistake “the process started” for
-“the shortcut works.”
-
-After that:
-
-- **`Cmd+Shift+Space`** opens Prelude immediately from anywhere.
-- **`Ctrl+R`** opens Prelude in every new zsh prompt.
-
-```sh
-prelude global status   # every global-launch requirement, verified
-prelude doctor          # complete optional-feature diagnostics
-```
-
-The installer is idempotent; run the same command again to upgrade or repair
-the integration. Building from source is documented in
-[Contributing](CONTRIBUTING.md).
-
-## Designed for trust
-
-- **Local-first:** indexes, clipboard records, agent state, and the message bus
-  live in Prelude's XDG directories on your Mac.
-- **Credential-aware:** secret-looking history, clipboard text, MCP details,
-  tags, and exports are filtered or redacted rather than becoming search data.
-- **Recoverable:** destructive file, app, skill, and inactive-session actions
-  move items to the Trash and confirm first.
-- **Failure-tolerant:** an unavailable source disappears instead of blocking or
-  printing errors into the launcher.
-
-## Go deeper
-
-The README is the front door. The detailed behavior and design records live
-here:
+## Documentation
 
 - [Search scopes and query grammar](docs/SEARCH.md)
 - [Actions and safety model](docs/ACTIONS.md)
-- [Global panel setup and architecture](docs/GLOBAL-HOTKEY.md)
+- [Global panel architecture](docs/GLOBAL-HOTKEY.md)
 - [Agent control plane](docs/AGENT-CONTROL-PLANE.md)
-- [Contributing](CONTRIBUTING.md)
+- [Build from source and contribute](CONTRIBUTING.md)
 
-Prelude is macOS-only, built in Rust on top of
-[fzf](https://github.com/junegunn/fzf), and licensed under
-[Apache-2.0](LICENSE).
+Prelude is macOS-only and licensed under [Apache-2.0](LICENSE).
