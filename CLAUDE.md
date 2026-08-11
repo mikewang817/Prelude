@@ -446,7 +446,11 @@ removed still loses the row.
 *acting*, because the case that matters cannot be seen before the first and
 everything after the second is expensive. Three outcomes: exit 0 with no
 records is an authoritative empty; a non-zero exit that still produced records
-is an answer; a non-zero exit with none is a refusal. What makes the last one
+is an answer; a non-zero exit with none is a refusal. Ahead of all three sits
+*unfinished* — never started, killed, killed by a signal, or truncated at the
+output cap — because a fragment must not replace a complete answer. The last
+two of those were the subtle ones: both make `ok()` false without being named,
+so having parsed a single record was enough to slip past the refusal test. What makes the last one
 subtle is that `Error: authentication required` splits on `": "` exactly as a
 server line does — it parsed as a server *named* `Error`, so "records were
 parsed" was true and a refusal replaced three real rows with one imaginary

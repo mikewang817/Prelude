@@ -547,8 +547,18 @@ fn mcp_item(
 /// A run that never started or had to be killed is never an answer, whatever
 /// it managed to print: a partial list must not replace a complete one.
 pub(crate) fn trusted(probe: &crate::exec::Output, agent: &str, parsed: usize) -> bool {
+    // Never finished. Whatever it printed is a fragment, and a fragment must
+    // not replace a complete answer — which is the rule the two middle cases
+    // here were quietly outside of. `truncated` and a `None` status both make
+    // `ok()` false, so a run that hit the output cap or was killed by a
+    // signal fell through to `refused` and passed it the moment it had parsed
+    // one record. Four conditions, one meaning: we do not know what the rest
+    // of the answer was.
+    let unfinished =
+        probe.spawn_failed || probe.timed_out || probe.truncated || probe.status.is_none();
+    // Finished, and said no: exited non-zero with nothing convincing.
     let refused = !probe.ok() && parsed == 0;
-    if probe.timed_out || probe.spawn_failed || refused {
+    if unfinished || refused {
         crate::exec::note_incomplete(agent);
         return false;
     }
@@ -1421,6 +1431,14 @@ mod tests {
         assert!(!trusted(&killed, "claude", 7), "a partial list is not an answer");
         let missing = Output { spawn_failed: true, ..Output::default() };
         assert!(!trusted(&missing, "claude", 0));
+
+        // The two that used to slip through, because both make `ok()` false
+        // and neither was named — so having parsed one record was enough to
+        // reach the `refused` test and pass it.
+        let cut_off = Output { status: Some(0), truncated: true, ..Output::default() };
+        assert!(!trusted(&cut_off, "claude", 7), "output that hit the cap is a fragment");
+        let signalled = Output { status: None, ..Output::default() };
+        assert!(!trusted(&signalled, "claude", 7), "a process killed by a signal never finished");
 
         // …and each refusal names the partition, which is what keeps its
         // cached rows through `cache::carry_over`.
