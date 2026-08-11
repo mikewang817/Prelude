@@ -1096,6 +1096,9 @@ pub fn rename_quicklink(old: &str, new: &str) -> Result<String, String> {
 pub fn retarget_quicklink(key: &str, target: &str) -> Result<String, String> {
     let key = normalize_quicklink_key(key)?;
     let (kind, stored) = resolve_quicklink_target(target)?;
+    // Read, change, write, like every other mutator here — and it reads twice,
+    // since the `url = ` cleanup below re-parses what it just changed.
+    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let text = read_for_write()?;
     let text = set_quicklink_field(&text, &key, "target", &stored)?;
     // The old entry may still carry a `url = ` line from a hand-written file;

@@ -196,6 +196,11 @@ fn codex_inventory(into: &mut Vec<Item>, checked_at: u64) {
         crate::exec::note_incomplete("codex");
         return;
     };
+    // Same rule, and the work behind it starts MCP servers — which is not
+    // something to do on the strength of an answer we do not trust.
+    if !crate::sources::agents::trusted(&probe, "codex", servers.len()) {
+        return;
+    }
     let mut rows = Vec::new();
     let out = &mut rows;
     for server in servers {
@@ -229,9 +234,7 @@ fn codex_inventory(into: &mut Vec<Item>, checked_at: u64) {
             Err(error) => out.push(cached_item("codex", name, "failed", checked_at, &[], error)),
         }
     }
-    if crate::sources::agents::trusted(&probe, "codex", rows.len()) {
-        into.extend(rows);
-    }
+    into.extend(rows);
 }
 
 fn claude_inventory(into: &mut Vec<Item>, checked_at: u64) {
@@ -240,18 +243,32 @@ fn claude_inventory(into: &mut Vec<Item>, checked_at: u64) {
     }
     let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
     let text = probe.stdout_text();
+    // The same reading of the same output as the inventory beside it. Its own
+    // one accepted `Error: authentication required` as a server called
+    // "Error", trusted the result because a row had been produced, and ran
+    // `claude mcp get Error` on the way there.
+    let servers = crate::sources::agents::parse_claude_list(&text);
+    // Decided before the work, not after it. The evidence is the parsed list
+    // and nothing downstream of it, and everything downstream is expensive:
+    // one `claude mcp get` per entry, then a server started per stdio
+    // definition. Judging at the end still discarded the rows — after having
+    // run `claude mcp get Error` against a server nobody has.
+    if !crate::sources::agents::trusted(
+        &probe,
+        "claude",
+        crate::sources::agents::claude_evidence(&probe, &servers),
+    ) {
+        return;
+    }
     let mut rows = Vec::new();
     let out = &mut rows;
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((name, rest)) = line.split_once(": ") else { continue };
-        if name.is_empty() || name.starts_with("claude.ai ") || crate::secrets::looks_secret(name) {
-            if !name.is_empty() && name.starts_with("claude.ai ") {
-                out.push(cached_item("claude", name, "unsupported", checked_at, &[], "owner-account tools are not exposed by the CLI"));
-            }
+    for server in &servers {
+        let name = server.name;
+        if name.starts_with("claude.ai ") {
+            out.push(cached_item("claude", name, "unsupported", checked_at, &[], "owner-account tools are not exposed by the CLI"));
             continue;
         }
-        if rest.starts_with("http://") || rest.starts_with("https://") {
+        if server.target.starts_with("http://") || server.target.starts_with("https://") {
             out.push(cached_item("claude", name, "unsupported", checked_at, &[], "http tools require owner authentication"));
             continue;
         }
@@ -267,9 +284,7 @@ fn claude_inventory(into: &mut Vec<Item>, checked_at: u64) {
             Err(error) => out.push(cached_item("claude", name, "failed", checked_at, &[], error)),
         }
     }
-    if crate::sources::agents::trusted(&probe, "claude", rows.len()) {
-        into.extend(rows);
-    }
+    into.extend(rows);
 }
 
 pub fn inventory() -> Vec<Item> {

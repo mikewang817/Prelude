@@ -555,18 +555,54 @@ pub(crate) fn trusted(probe: &crate::exec::Output, agent: &str, parsed: usize) -
     true
 }
 
-/// How many lines of a `claude mcp list` answer carry a health status.
+/// One line of `claude mcp list`, read once for every caller that needs it.
 ///
-/// The evidence half of `trusted`: an error message parses as a server line,
-/// a status does not appear by accident. Kept beside the parser it mirrors so
-/// the two cannot drift.
-#[cfg(test)]
-fn claude_rows_with_status(text: &str) -> usize {
+/// There were two readings of this output — the inventory's and the tool
+/// scanner's — and two readings of one format is one too many: they filtered
+/// differently, counted differently, and only one of them had been taught
+/// that an error message parses as a server. `Error: authentication required`
+/// splits on `": "` exactly as an entry does, so the other reading not only
+/// trusted it, it went on to run `claude mcp get Error` against a server
+/// nobody has.
+pub(crate) struct ClaudeServer<'a> {
+    pub name: &'a str,
+    pub target: &'a str,
+    /// The health `claude mcp list` prints after ` - `, or empty when the
+    /// line carried none.
+    pub status: &'a str,
+}
+
+pub(crate) fn parse_claude_list(text: &str) -> Vec<ClaudeServer<'_>> {
     text.lines()
-        .filter_map(|line| line.trim().split_once(": ").map(|(n, rest)| (n.to_string(), rest.to_string())))
-        .filter(|(name, _)| !name.is_empty() && !name.contains("Checking"))
-        .filter(|(_, rest)| rest.rsplit_once(" - ").is_some_and(|(_, s)| !s.trim().is_empty()))
-        .count()
+        .filter_map(|line| {
+            let (name, rest) = line.trim().split_once(": ")?;
+            if name.is_empty() || name.contains("Checking") || crate::secrets::looks_secret(name) {
+                return None;
+            }
+            let (target, status) = match rest.rsplit_once(" - ") {
+                Some((target, status)) => (target.trim(), status.trim()),
+                None => (rest.trim(), ""),
+            };
+            Some(ClaudeServer { name, target, status })
+        })
+        .collect()
+}
+
+/// How much of that answer counts as evidence that it *is* an answer.
+///
+/// A clean exit is taken at its word, including an empty list — an agent
+/// whose last server was removed has to be able to say so. A non-zero exit
+/// has to show a health status, which is the part of the format an error
+/// message cannot produce by accident. Rows without one are still displayed;
+/// only the decision to replace the cache needs the stronger evidence, so a
+/// format that stops printing statuses degrades to showing rows rather than
+/// to erasing them.
+pub(crate) fn claude_evidence(probe: &crate::exec::Output, servers: &[ClaudeServer]) -> usize {
+    if probe.ok() {
+        servers.len()
+    } else {
+        servers.iter().filter(|server| !server.status.is_empty()).count()
+    }
 }
 
 fn mcp_claude(into: &mut Vec<Item>, checked_at: u64) {
@@ -575,37 +611,13 @@ fn mcp_claude(into: &mut Vec<Item>, checked_at: u64) {
     }
     let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
     let text = probe.stdout_text();
-    // Parsed into its own list first: whether this replaces the cached rows
-    // depends on how many of them there are. See `trusted`.
+    let servers = parse_claude_list(&text);
+    if !trusted(&probe, "claude", claude_evidence(&probe, &servers)) {
+        return;
+    }
     let mut rows = Vec::new();
-    let out = &mut rows;
-    // Counted separately from the rows: how many lines carried a health
-    // status, which is the part of the format an error message cannot
-    // accidentally produce. `Error: authentication required` splits on `": "`
-    // exactly as a server line does — it parsed as a server *named* "Error",
-    // so "we parsed a record" was true and a refusal replaced three real rows
-    // with one imaginary one. What distinguishes them is the ` - status` that
-    // every entry of a real listing carries, because `claude mcp list` health
-    // checks each server as it prints it.
-    //
-    // A row without one is still shown. Only the decision to *replace the
-    // cache* needs the stronger evidence, so a future format that stops
-    // printing statuses degrades to showing rows rather than to erasing them.
-    let mut with_status = 0usize;
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((name, rest)) = line.split_once(": ") else { continue };
-        if name.is_empty() || name.contains("Checking") || crate::secrets::looks_secret(name) {
-            continue;
-        }
-        let (target, status) = match rest.rsplit_once(" - ") {
-            Some((t, s)) => (t.trim(), s.trim()),
-            None => (rest.trim(), ""),
-        };
-        if !status.is_empty() {
-            with_status += 1;
-        }
-        let low = status.to_lowercase();
+    for server in &servers {
+        let low = server.status.to_lowercase();
         let health = if low.contains("connect") && !low.contains("fail") {
             Health::Ok
         } else if low.contains("pending") || low.contains("approve") {
@@ -617,19 +629,20 @@ fn mcp_claude(into: &mut Vec<Item>, checked_at: u64) {
         };
         // claude.ai-hosted servers expose a display URL but their account
         // credentials are not a transferable local definition.
-        let portable = !name.starts_with("claude.ai ");
-        let transport = if !portable { "hosted" }
-            else if target.starts_with("http://") || target.starts_with("https://") { "http" }
-            else { "stdio" };
-        out.push(
-            mcp_item("claude", name, target, health, transport, checked_at)
-                .put("portable", portable.to_string())
+        let portable = !server.name.starts_with("claude.ai ");
+        let transport = if !portable {
+            "hosted"
+        } else if server.target.starts_with("http://") || server.target.starts_with("https://") {
+            "http"
+        } else {
+            "stdio"
+        };
+        rows.push(
+            mcp_item("claude", server.name, server.target, health, transport, checked_at)
+                .put("portable", portable.to_string()),
         );
     }
-    // The count that decides is the convincing one; see `with_status`.
-    if trusted(&probe, "claude", if probe.ok() { rows.len() } else { with_status }) {
-        into.extend(rows);
-    }
+    into.extend(rows);
 }
 
 /// codex has --json, which also reports auth_status and why it is disabled.
@@ -694,9 +707,7 @@ fn mcp_codex(into: &mut Vec<Item>, checked_at: u64) {
         }
         out.push(it);
     }
-    if trusted(&probe, "codex", rows.len()) {
-        into.extend(rows);
-    }
+    into.extend(rows);
 }
 
 fn enrich_mcp_matrix(items: &mut [Item]) {
@@ -1375,14 +1386,33 @@ mod tests {
 
         // And the count it is given has to be evidence, not merely a number.
         // That error line splits on `": "` exactly as a server line does, so
-        // the parser read a server *named* "Error" and the refusal replaced
-        // three real rows with one imaginary one. Only lines carrying a
-        // health status count when the exit was non-zero.
-        assert_eq!(claude_rows_with_status("Error: authentication required"), 0);
-        assert_eq!(
-            claude_rows_with_status("Checking MCP server health...\n\nnode_repl: /bin/x - ✓ Connected"),
-            1,
+        // the parser read a server *named* "Error", and "a record was parsed"
+        // was true while three real rows were replaced by one imaginary one.
+        let refused = parse_claude_list("Error: authentication required");
+        assert_eq!(refused.len(), 1, "it does parse — that is the whole trap");
+        assert_eq!(refused[0].name, "Error");
+        assert_eq!(claude_evidence(&ok(1), &refused), 0, "and it is not evidence");
+        assert!(!trusted(&ok(1), "claude", claude_evidence(&ok(1), &refused)));
+
+        // A real listing carries a health status on every entry, which is
+        // what an error message cannot produce by accident.
+        let real = parse_claude_list(
+            "Checking MCP server health...\n\nnode_repl: /bin/x - ✓ Connected\ndrive: /bin/y - ✘ Failed",
         );
+        assert_eq!(real.len(), 2);
+        assert_eq!(real[0].name, "node_repl");
+        assert_eq!(real[0].target, "/bin/x");
+        assert_eq!(real[0].status, "✓ Connected");
+        assert_eq!(claude_evidence(&ok(1), &real), 2);
+        assert!(trusted(&ok(1), "claude", claude_evidence(&ok(1), &real)));
+
+        // A clean exit is taken at its word, statuses or not — so a format
+        // that stops printing them degrades to showing rows, never to
+        // erasing them.
+        let statusless = parse_claude_list("node_repl: /bin/x");
+        assert_eq!(statusless.len(), 1);
+        assert_eq!(claude_evidence(&ok(0), &statusless), 1);
+        assert_eq!(claude_evidence(&ok(1), &statusless), 0);
 
         // Never started, or killed part-way: never an answer, whatever it
         // managed to print. A partial list must not replace a complete one.

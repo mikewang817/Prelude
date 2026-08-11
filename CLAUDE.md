@@ -442,8 +442,9 @@ reports. `exec::note_incomplete` names the partition that could not be asked and
 other partition is replaced wholesale so an agent whose last server was
 removed still loses the row.
 
-`sources::agents::trusted` decides, and it decides *after* parsing, because
-the case that matters cannot be seen before. Three outcomes: exit 0 with no
+`sources::agents::trusted` decides, and it decides after *parsing* and before
+*acting*, because the case that matters cannot be seen before the first and
+everything after the second is expensive. Three outcomes: exit 0 with no
 records is an authoritative empty; a non-zero exit that still produced records
 is an answer; a non-zero exit with none is a refusal. What makes the last one
 subtle is that `Error: authentication required` splits on `": "` exactly as a
@@ -455,6 +456,15 @@ are still displayed, so a format that stops printing statuses degrades to
 showing rows rather than to erasing them. Output that will not parse at all is
 never an answer, whatever the exit code — that is `codex mcp list --json`
 returning something unreadable, which is not the same as no servers.
+
+**One format, one parser.** `parse_claude_list` is shared by the inventory and
+the tool scanner because two readings of one output is one too many: they
+filtered differently, counted differently, and only one of them had learned
+that an error message parses as a server. The other trusted it *and* ran
+`claude mcp get Error` on the way — which is why the decision now happens
+before the per-server work rather than after it. Everything downstream of that
+parse costs a subprocess per entry and, in `mcp_tools`, a started MCP server;
+none of it should be spent on an answer that is about to be discarded.
 
 `exec::require` is `which` for the same reason. **PATH is not the same
 everywhere Prelude runs**: the panel is a Ghostty started by launchd and does
