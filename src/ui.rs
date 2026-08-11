@@ -24,10 +24,10 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
     let sep = format!("{DIM}   ·   {RESET}");
     let mut parts = vec![format!("{primary}{DIM}  Enter{RESET}")];
     if command_enter && item.is_some_and(|item| matches!(item.kind, Kind::File | Kind::Find)) {
-        parts.push(format!("Open folder{DIM}  Cmd+Enter{RESET}"));
+        parts.push(format!("Open folder{DIM}  Ctrl+Enter{RESET}"));
     }
     if command_enter && item.is_some_and(|item| terminal_directory(item).is_some()) {
-        parts.push(format!("Terminal{DIM}  Shift+Cmd+Enter{RESET}"));
+        parts.push(format!("Terminal{DIM}  Ctrl+Shift+Enter{RESET}"));
     }
     parts.push(format!("Actions{DIM}  Ctrl+K →{RESET}"));
     if crate::settings::preview_enabled() {
@@ -55,16 +55,20 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
 /// question in full, as rows, when it is asked.
 pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
 
-/// Ctrl remains the portable terminal vocabulary. The dedicated global panel
-/// has two deliberate macOS exceptions, both contextual to rows that have a
-/// directory and neither ever advertised on an inline terminal surface: its
-/// generated Ghostty config translates Cmd+Enter into Ctrl+G and
-/// Shift+Cmd+Enter into Ctrl+], which fzf can receive reliably where it can
-/// receive no Command key at all.
+/// Ctrl remains the portable terminal vocabulary, and the two directory
+/// shortcuts are Enter chords only in the fingers: the panel's generated
+/// Ghostty config translates Ctrl+Enter into private Ctrl+G and
+/// Ctrl+Shift+Enter into private Ctrl+], which is what fzf actually receives.
+/// It has to be a translation — fzf knows no `ctrl-enter`, because a bare
+/// Return carries no modifier a terminal application can read. Both are
+/// contextual to rows that have a directory and neither is ever advertised on
+/// an inline terminal surface, where Prelude owns no configuration.
 ///
 /// `ctrl-]` is 0x1d. Not 0x1f, which is `render::SEP` — the delimiter every
 /// rendered row already carries, and which fzf would therefore read as the
-/// start of a field rather than as a keypress.
+/// start of a field rather than as a keypress. And not Ctrl+[, which is 0x1b:
+/// that *is* Escape, the same byte, so binding it would take away the key
+/// that means "back" at every level.
 const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g,ctrl-]";
 
 /// How `→` says "open the action panel" without being an `--expect` key.
@@ -90,6 +94,15 @@ pub const OPEN_ACTIONS: &str = "prelude:open-actions";
 /// to, and `←` there would be a key that does nothing. The pickers bind both.
 pub const ARROW_INTO: &str = "right";
 pub const ARROW_BOTH: &str = "left,right";
+
+/// Whether a key name is one the launcher asks fzf to report.
+///
+/// Exists so a test can state what is *not* claimable — `ctrl-[` above all,
+/// which is Escape's own byte.
+#[cfg(test)]
+pub fn expects(key: &str) -> bool {
+    EXPECT.split(',').any(|k| k == key)
+}
 
 pub struct FzfOut {
     pub key: String,
@@ -363,7 +376,7 @@ pub fn search() -> i32 {
                     }
                 };
             }
-            // Shift+Cmd+Enter, translated by the panel's Ghostty config. It
+            // Ctrl+Shift+Enter, translated by the panel's Ghostty config. It
             // opens a *new* Ghostty standing in this row's directory, which
             // is the one thing the launcher cannot hand over as text: a
             // command to cd somewhere is only useful in a shell you already
@@ -391,10 +404,10 @@ pub(crate) fn containing_directory(item: &Item) -> Option<std::path::PathBuf> {
         .flatten()
 }
 
-/// The folder Shift+Cmd+Enter should stand a terminal in.
+/// The folder Ctrl+Shift+Enter should stand a terminal in.
 ///
 /// One meaning, applied consistently: *the directory this row is in*. For a
-/// file that is its parent, which is the same place Cmd+Enter opens in
+/// file that is its parent, which is the same place Ctrl+Enter opens in
 /// Finder; for a folder it is the folder itself, because a folder row is
 /// already at the place you would want the prompt to be, and sending a
 /// terminal to its parent instead would be the launcher being clever.

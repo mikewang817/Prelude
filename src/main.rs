@@ -1010,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn command_enter_is_only_advertised_for_files_and_opens_their_parent() {
+    fn the_directory_chords_are_advertised_only_where_they_exist() {
         use crate::item::{Item, Kind};
         let file = Item::new("/tmp/project/readme.md", Kind::Find)
             .put("path", "/tmp/project/readme.md");
@@ -1022,14 +1022,14 @@ mod tests {
         // Neither shortcut exists on the inline surface: Prelude owns the
         // panel's Ghostty configuration and nobody else's.
         let inline = crate::ui::footer_for_item("Open it", Some(&file), false);
-        assert!(!inline.contains("Cmd+Enter"));
+        assert!(!inline.contains("Ctrl+Enter"));
 
         // A folder has no *containing* folder worth opening — Enter already
         // opens it — but it is exactly where a terminal should stand.
         let folder = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
         let shown = crate::ui::footer_for_item("Open it", Some(&folder), true);
-        assert!(!shown.contains("Open folder"), "Cmd+Enter is for files");
-        assert!(shown.contains("Shift+Cmd+Enter"), "a folder is a place to stand");
+        assert!(!shown.contains("Open folder"), "the folder chord is for files");
+        assert!(shown.contains("Ctrl+Shift+Enter"), "a folder is a place to stand");
         assert_eq!(
             crate::ui::terminal_directory(&folder),
             Some(std::path::PathBuf::from("/tmp/project")),
@@ -1049,6 +1049,14 @@ mod tests {
         // Keys are spelled out; a glyph is only legible to somebody who
         // already knows it.
         assert!(!shown.contains('⇧'));
+        // Command is gone from both: these are Ctrl chords now.
+        assert!(!shown.contains("Cmd+"));
+
+        // Ctrl+[ can never join them. It is 0x1b — the same byte as Escape,
+        // which is how "back one level" reaches the launcher at all — so a
+        // terminal cannot tell the two apart and fzf rejects the name.
+        assert_eq!("\u{1b}", "\x1b");
+        assert!(!crate::ui::expects("ctrl-["));
     }
 
     #[test]

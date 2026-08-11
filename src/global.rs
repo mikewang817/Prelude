@@ -710,12 +710,13 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          working-directory = {directory}\n\
          keybind = global:{chord}=toggle_quick_terminal\n\
          # Escape is deliberately *not* bound here. See `quick_config`.\n\
-         # fzf cannot receive Command. Translate it to Prelude's private Ctrl+G\n\
+         # fzf knows no `ctrl-enter`: the modifier never reaches it, whatever\n\
+         # the terminal sends. Translate both chords to private control codes\n\
          # inside this dedicated panel; the person's normal Ghostty is untouched.\n\
-         keybind = cmd+enter=text:\\x07\n\
-         # …and Shift+Cmd+Enter to private Ctrl+]. Not Ctrl+_ (0x1f), which is\n\
+         keybind = ctrl+enter=text:\\x07\n\
+         # …and Ctrl+Shift+Enter to private Ctrl+]. Not Ctrl+_ (0x1f), which is\n\
          # the field delimiter every rendered row carries.\n\
-         keybind = shift+cmd+enter=text:\\x1d\n\
+         keybind = ctrl+shift+enter=text:\\x1d\n\
          command = {exe} _surface\n",
         chord = hotkey.canonical(),
         exe = exe.display(),
@@ -1757,7 +1758,7 @@ mod tests {
         // autohide when focus moves away. Both must survive.
         assert!(config.contains("keybind = global:cmd+shift+space=toggle_quick_terminal"));
         assert!(config.contains("quick-terminal-autohide = true"));
-        assert!(config.contains(r"keybind = cmd+enter=text:\x07"));
+        assert!(config.contains(r"keybind = ctrl+enter=text:\x07"));
         // Every surface enters through the marker gate. Quick terminals run
         // Prelude; ordinary windows are redirected to a normal Ghostty app.
         assert!(config.contains("command = /opt/homebrew/bin/prelude _surface"));

@@ -348,8 +348,8 @@ Prelude keeps that action but not the key: where useful, it is the first selecta
 below Enter's non-selectable header. Neither action is a fixed verb; both are
 per-item, and they are opposites — where one acts, the other hands you text. A
 test asserts they never coincide. The global panel has two narrower object
-shortcuts, not a generic secondary: Cmd+Enter on File/Find opens the
-containing directory in Finder, and Shift+Cmd+Enter opens a Ghostty standing
+shortcuts, not a generic secondary: Ctrl+Enter on File/Find opens the
+containing directory in Finder, and Ctrl+Shift+Enter opens a Ghostty standing
 in it. The second is the one thing this launcher cannot hand over as text — a
 `cd` is only useful in a shell you already have, and the point of the panel is
 not having one. `ui::terminal_directory` gives it a single meaning, *the
@@ -383,15 +383,24 @@ instead of the static one.
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
 Option+Enter comes through as a bare Enter — running the *primary* action,
-silently. Cmd never reaches a terminal application. The two directory
-shortcuts are honest only because Prelude owns the dedicated panel's Ghostty
-config: `cmd+enter=text:\\x07` and `shift+cmd+enter=text:\\x1d` translate them
-to private Ctrl+G and Ctrl+], `EXPECT` includes both, and the footer advertises
-them only when `PRELUDE_FULL_SURFACE` and a directory-bearing row are both
-true. Ctrl+] is 0x1d and deliberately not 0x1f, which is `render::SEP` — the
+silently. Cmd never reaches a terminal application, and neither does the
+modifier on a Return: fzf knows no `ctrl-enter`, because a bare Return carries
+nothing a terminal application can read. So the two directory shortcuts are
+Enter chords only in the fingers, and they are honest only because Prelude
+owns the dedicated panel's Ghostty config: `ctrl+enter=text:\\x07` and
+`ctrl+shift+enter=text:\\x1d` translate them to private Ctrl+G and Ctrl+],
+`EXPECT` includes both, and the footer advertises them only when
+`PRELUDE_FULL_SURFACE` and a directory-bearing row are both true.
+
+Ctrl+] is 0x1d and deliberately not 0x1f, which is `render::SEP` — the
 delimiter every rendered row carries, and which fzf would read as a field
-boundary rather than as a key. Never claim either on the zsh widget or alter
-the person's ordinary terminal config. The new window is opened through Launch
+boundary rather than as a key. **Ctrl+[ can never be one of these**: it is
+0x1b, the same byte as Escape, so no terminal can tell them apart and fzf
+refuses the name outright — claiming it would take away the key that means
+"back" at every level. A test pins that.
+
+Never claim either chord on the zsh widget or alter the person's ordinary
+terminal config. The new window is opened through Launch
 Services with `-n`, for the reasons `global.rs` already documents: executing
 the binary directly makes it a foreground application, and without a new
 instance macOS can deliver the launch to the hidden panel, which shares

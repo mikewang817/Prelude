@@ -187,8 +187,8 @@ prelude quicklink check
 | `Ctrl+R` | Search shell history with the text already typed; again to come back |
 | `Ctrl+K` | Open contextual actions |
 | `Ctrl+P` | Toggle Quick Look when enabled |
-| `Cmd+Enter` | Open a file's containing folder in Finder, from the global panel |
-| `Shift+Cmd+Enter` | Open a new Ghostty standing in that folder, from the global panel |
+| `Ctrl+Enter` | Open a file's containing folder in Finder, from the global panel |
+| `Ctrl+Shift+Enter` | Open a new Ghostty standing in that folder, from the global panel |
 | `→` | Open the focused row's actions, when nothing is typed |
 | `←` | Go back one level, when nothing is typed |
 | `Escape` | Go back one level; close Prelude at the outermost one |
