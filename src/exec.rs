@@ -126,6 +126,36 @@ pub fn lost_commands() -> usize {
     LOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The parts of an aggregated source this process could not ask.
+///
+/// `lost_commands` answers "did anything fail", which is enough for a source
+/// that is one question. It is not enough for one that is several: the MCP
+/// inventory asks every agent in turn and returns their rows together, so a
+/// `claude` that timed out beside a `codex` that answered produces a result
+/// that is *not empty* — and a not-empty result was written, taking every
+/// claude row with it. The launcher then showed a person with servers on two
+/// agents the servers on one, with nothing anywhere saying why.
+///
+/// A partition is named by the thing that was asked, which for every source
+/// that has this shape is the agent. `cache::write_refreshed` keeps the last
+/// good rows for the partitions named here and takes the fresh rows for the
+/// rest.
+static INCOMPLETE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Say that this part of the source could not be asked, and that its previous
+/// answer is therefore still the best one available.
+pub fn note_incomplete(partition: &str) {
+    if let Ok(mut set) = INCOMPLETE.lock() {
+        if !set.iter().any(|p| p == partition) {
+            set.push(partition.to_string());
+        }
+    }
+}
+
+pub fn incomplete_partitions() -> Vec<String> {
+    INCOMPLETE.lock().map(|set| set.clone()).unwrap_or_default()
+}
+
 /// Run a command and report what happened, including how it failed.
 pub fn capture(args: &[&str], timeout: Duration) -> Output {
     let Some((prog, rest)) = args.split_first() else {
@@ -320,6 +350,10 @@ pub fn require(name: &str) -> Option<std::path::PathBuf> {
     let found = which(name);
     if found.is_none() {
         LOST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Named, not merely counted: in an aggregated source this is the one
+        // partition that went missing, and everything already known about it
+        // has to survive the refresh.
+        note_incomplete(name);
     }
     found
 }

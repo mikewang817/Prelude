@@ -182,10 +182,16 @@ fn codex_inventory(out: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("codex").is_none() {
         return;
     }
-    let text = crate::exec::run(
+    // Same partition rule as the MCP inventory: an agent that could not be
+    // asked keeps its cached tools rather than losing them to an empty list.
+    let probe = crate::exec::capture(
         &["codex", "mcp", "list", "--json"],
         Duration::from_secs(20),
     );
+    if !crate::sources::agents::answered(&probe, "codex") {
+        return;
+    }
+    let text = probe.stdout_text();
     let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return };
     for server in servers {
         let name = server.get("name").and_then(|value| value.as_str()).unwrap_or("");
@@ -224,7 +230,11 @@ fn claude_inventory(out: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("claude").is_none() {
         return;
     }
-    let text = crate::exec::run(&["claude", "mcp", "list"], Duration::from_secs(30));
+    let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
+    if !crate::sources::agents::answered(&probe, "claude") {
+        return;
+    }
+    let text = probe.stdout_text();
     for line in text.lines() {
         let line = line.trim();
         let Some((name, rest)) = line.split_once(": ") else { continue };

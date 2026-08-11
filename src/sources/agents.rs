@@ -525,11 +525,39 @@ fn mcp_item(
 }
 
 /// `claude mcp list` prints `<name>: <target> - <status>` per server.
+/// Did this agent actually answer the question it was asked?
+///
+/// Three outcomes are *not* answers, and each one used to read as "this agent
+/// has no MCP servers":
+///
+/// * it never ran, or had to be killed — we did not finish asking, and a
+///   partial list is worse than the complete one already in the cache;
+/// * it refused, exiting non-zero with nothing on stdout — the shape of an
+///   authentication error, which reports on stderr and says nothing else;
+/// * (for a `--json` caller) it printed something unparseable, handled at the
+///   call site because only there is it known what parseable means.
+///
+/// A non-zero exit that still printed a list *is* an answer, and so is an
+/// empty list from a clean exit: an agent whose last server was removed has
+/// to be able to say so, or the launcher would show it forever.
+pub(crate) fn answered(probe: &crate::exec::Output, agent: &str) -> bool {
+    let refused = !probe.ok() && probe.stdout.iter().all(u8::is_ascii_whitespace);
+    if probe.timed_out || probe.spawn_failed || refused {
+        crate::exec::note_incomplete(agent);
+        return false;
+    }
+    true
+}
+
 fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("claude").is_none() {
         return;
     }
-    let text = crate::exec::run(&["claude", "mcp", "list"], Duration::from_secs(30));
+    let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
+    if !answered(&probe, "claude") {
+        return;
+    }
+    let text = probe.stdout_text();
     for line in text.lines() {
         let line = line.trim();
         let Some((name, rest)) = line.split_once(": ") else { continue };
@@ -568,8 +596,18 @@ fn mcp_codex(out: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("codex").is_none() {
         return;
     }
-    let text = crate::exec::run(&["codex", "mcp", "list", "--json"], Duration::from_secs(20));
-    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return };
+    let probe = crate::exec::capture(&["codex", "mcp", "list", "--json"], Duration::from_secs(20));
+    if !answered(&probe, "codex") {
+        return;
+    }
+    let text = probe.stdout_text();
+    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+        // Bytes we cannot read are not "no servers". Something answered, and
+        // we do not know what it said — the previous answer is still better
+        // than replacing it with nothing.
+        crate::exec::note_incomplete("codex");
+        return;
+    };
     for s in list {
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
         if name.is_empty() || crate::secrets::looks_secret(name) {

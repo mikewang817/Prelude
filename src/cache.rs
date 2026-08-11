@@ -262,8 +262,41 @@ pub fn write_refreshed(name: &str, items: &[Item], lost_before: usize) -> bool {
     if keeps_last_good(items.is_empty(), lost, || !read_cached(name).is_empty()) {
         return false;
     }
-    write_cached_if_changed(name, items);
-    true
+    // A source that asks several things reports which of them it could not
+    // ask. Their previous rows are carried across; every other partition is
+    // replaced wholesale, so an agent whose last server was removed still
+    // loses the row.
+    let incomplete = crate::exec::incomplete_partitions();
+    if incomplete.is_empty() {
+        write_cached_if_changed(name, items);
+        return true;
+    }
+    let merged = carry_over(read_cached(name), items, &incomplete);
+    write_cached_if_changed(name, &merged);
+    // Partial is not success: the source is left due, and rests before being
+    // asked again, so a `claude` missing from the panel's PATH is not probed
+    // on every launch for the rest of the day.
+    false
+}
+
+/// The field naming which part of an aggregated source a row came from.
+///
+/// Every source with this shape partitions by agent, because that is what is
+/// being asked. A row without one belongs to no partition and is never
+/// carried over — it can only have come from a source that reported no
+/// partitions at all.
+const PARTITION: &str = "agent";
+
+fn carry_over(cached: Vec<Item>, fresh: &[Item], incomplete: &[String]) -> Vec<Item> {
+    let mut out: Vec<Item> = cached
+        .into_iter()
+        .filter(|it| incomplete.iter().any(|p| p == it.get(PARTITION)))
+        .collect();
+    // Fresh rows win any tie: a partition that answered is authoritative for
+    // itself, even about a row the cache still holds under another partition.
+    out.retain(|it| !fresh.iter().any(|f| f.kind == it.kind && f.cmd == it.cmd));
+    out.extend(fresh.iter().cloned());
+    out
 }
 
 /// The rule itself, with no disk under it.
@@ -382,9 +415,22 @@ pub fn write_group(files: &[(std::path::PathBuf, Vec<u8>)]) {
 // stale, so the *next* gather spawned it again immediately: the cheapest way
 // to turn one broken agent CLI into a permanent background load.
 //
-// Two files per source answer both. A lease is claimed with `create_new`, so
-// the claim is the filesystem's to arbitrate rather than a check followed by
-// a race; a backoff records when it is worth trying again.
+// The claim is a `flock` held for the life of the refresh, and the answer to
+// "is somebody already doing this" is whether that lock is held. Nothing has
+// to decide when a holder has died, because nothing has to: the kernel drops
+// the lock when the process ends, however it ends — killed, crashed, or the
+// machine losing power. A backoff file records when a failing source is worth
+// asking again.
+//
+// This replaces a lease file carrying a pid and a maximum age, and the
+// maximum age was the flaw. It had to exceed the slowest legitimate refresh,
+// and `mcp-tools` has no such bound worth naming: `initialize` allows fifteen
+// seconds and each of up to ten `tools/list` pages allows twenty, so one
+// server can legitimately take three and a half minutes and several of them
+// take longer still. Any constant is therefore either too short — declaring a
+// working refresh dead and starting a second one beside it — or so long that
+// a genuinely dead holder blocks the source for the rest of the afternoon. A
+// lock has neither failure because it answers the question directly.
 
 fn refresh_dir() -> std::path::PathBuf {
     paths::cache().join("refresh")
@@ -398,22 +444,22 @@ fn backoff_file(name: &str) -> std::path::PathBuf {
     refresh_dir().join(format!("{name}.backoff"))
 }
 
-/// A lease older than this is assumed to belong to a process that died
-/// without cleaning up. It has to exceed the slowest legitimate refresh —
-/// `mcp-tools` starts servers and waits for them — or a slow refresh would be
-/// treated as dead while it was still working.
-const LEASE_MAX: Duration = Duration::from_secs(180);
-
 /// How long the slow tier is left alone after a refresh that learned nothing,
-/// doubling per consecutive failure up to `BACKOFF_MAX`. The first step is
-/// deliberately longer than any TTL here: the point is to stop asking a
-/// broken thing at the rate we would ask a working one.
+/// doubling per consecutive failure up to `BACKOFF_MAX`. The floor is per
+/// source and always at least twice its own interval; see `backoff_delay`.
 const BACKOFF_START: u64 = 60;
 const BACKOFF_MAX: u64 = 3600;
 
 /// At most this many slow sources refresh at once. Each is a subprocess, and
 /// several of them are subprocesses that start subprocesses; a laptop waking
 /// with every cache stale should not answer that with nine of them.
+///
+/// The slots are locks rather than a count taken before spawning. A count is
+/// advice — it is read by the process doing the spawning, which then exits,
+/// leaving nothing holding anything, so two gathers a moment apart could each
+/// count two and start two. `prelude fleet`, `watch` and any other entry
+/// point that refreshes were outside it entirely. A slot that is *held* is
+/// held against every process on the machine.
 const MAX_CONCURRENT_REFRESH: usize = 2;
 
 fn now_secs() -> u64 {
@@ -429,59 +475,29 @@ fn lease_is_live(name: &str) -> bool {
 }
 
 fn lease_is_live_in(dir: &std::path::Path, name: &str) -> bool {
-    let path = lease_file_in(dir, name);
-    let Ok(text) = std::fs::read_to_string(&path) else { return false };
-    let fresh = path
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < LEASE_MAX);
-    if !fresh {
-        // Nobody is coming back for it.
-        let _ = std::fs::remove_file(&path);
-        return false;
-    }
-    match text.split_whitespace().next().and_then(|p| p.parse::<i32>().ok()) {
-        Some(pid) if crate::exec::alive(pid) => true,
-        _ => {
-            let _ = std::fs::remove_file(&path);
-            false
-        }
-    }
+    crate::cache::lock_is_held(&lease_file_in(dir, name))
 }
 
-/// Claim the right to refresh this source, or report that somebody else has.
-///
-/// `create_new` is the whole mechanism: the check and the claim are one
-/// syscall, so two processes that decide to refresh at the same instant
-/// cannot both win. The loser exits rather than duplicating the work.
-fn claim_lease(name: &str) -> bool {
+/// Claim the right to refresh this source for as long as the guard lives.
+fn claim_lease(name: &str) -> Option<Lock> {
     claim_lease_in(&refresh_dir(), name)
 }
 
-fn claim_lease_in(dir: &std::path::Path, name: &str) -> bool {
+fn claim_lease_in(dir: &std::path::Path, name: &str) -> Option<Lock> {
     let _ = std::fs::create_dir_all(dir);
-    let path = lease_file_in(dir, name);
-    // A lease left by a dead process is cleared first, otherwise the source
-    // would be locked out until something happened to remove it.
-    lease_is_live_in(dir, name);
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            use std::io::Write;
-            let _ = writeln!(file, "{} {}", std::process::id(), now_secs());
-            true
-        }
-        Err(_) => false,
-    }
+    try_lock(&lease_file_in(dir, name), Duration::ZERO)
 }
 
-fn release_lease(name: &str) {
-    release_lease_in(&refresh_dir(), name)
-}
-
-fn release_lease_in(dir: &std::path::Path, name: &str) {
-    let _ = std::fs::remove_file(lease_file_in(dir, name));
+/// One of the global refresh slots, or nothing when both are busy.
+///
+/// Held for the life of the refresh alongside the per-source lease, so the
+/// limit binds across every process on the machine rather than within the one
+/// that happened to be counting.
+fn claim_slot() -> Option<Lock> {
+    let dir = refresh_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    (0..MAX_CONCURRENT_REFRESH)
+        .find_map(|n| try_lock(&dir.join(format!("slot.{n}")), Duration::ZERO))
 }
 
 /// When this source may be tried again, and how many times it has failed.
@@ -619,10 +635,11 @@ pub fn refresh_named(name: &str) -> bool {
         if *n == name {
             // Somebody else got here first. Two processes refreshing one
             // source produce one answer at twice the cost, and for `mcp` that
-            // cost is a network health check per server.
-            if !claim_lease(n) {
-                return true;
-            }
+            // cost is a network health check per server. Both guards are held
+            // for the whole refresh and released by the kernel when this
+            // process ends, whatever ends it.
+            let Some(_lease) = claim_lease(n) else { return true };
+            let Some(_slot) = claim_slot() else { return true };
             let before = crate::exec::lost_commands();
             let items = f();
             if write_refreshed(n, &items, before) {
@@ -633,7 +650,6 @@ pub fn refresh_named(name: &str) -> bool {
             } else {
                 record_failure(n);
             }
-            release_lease(n);
             return true;
         }
     }
@@ -723,22 +739,19 @@ pub fn gather() -> Vec<Item> {
     let sessions = timed("annotate", || crate::sources::running::annotate_sessions(sessions, &runs));
     timed("write sessions-linked", || write_cached_if_changed("sessions-linked", &sessions));
     timed("spawn refreshes", || {
-        // The lease is claimed by the refresh process itself, so this check is
-        // only an optimisation — but it is the one that matters, because the
-        // cost being avoided is a process spawn per stale source per launch.
-        let mut running = 0;
+        // Both the lease and the slot are claimed by the refresh process
+        // itself, where they can be held; this is only an optimisation, and
+        // the cost it avoids is a process spawn per stale source per launch.
+        // Nothing here is authoritative and nothing here needs to be — a
+        // process that spawns beyond the limit finds no slot and exits.
+        let mut spawned = 0;
         for (name, _) in SLOW {
-            if lease_is_live(name) {
-                running += 1;
-            }
-        }
-        for (name, _) in SLOW {
-            if running >= MAX_CONCURRENT_REFRESH {
+            if spawned >= MAX_CONCURRENT_REFRESH {
                 break;
             }
             if stale(name) && !resting(name) && !lease_is_live(name) {
                 spawn_self(&["_refresh", name]);
-                running += 1;
+                spawned += 1;
             }
         }
     });
@@ -991,6 +1004,49 @@ mod tests {
         assert!(!keeps_last_good(true, true, || false));
     }
 
+    /// The gap that survived the last round, and the only one that could make
+    /// the launcher run perfectly while quietly holding less data.
+    ///
+    /// The MCP inventory asks every agent and returns their rows together, so
+    /// a `claude` that timed out beside a `codex` that answered produced a
+    /// result that was *not empty* — and the empty-result guard only fires on
+    /// empty. The whole cache was replaced and every claude row went with it.
+    #[test]
+    fn a_partition_that_could_not_be_asked_keeps_the_rows_it_had() {
+        let mcp = |agent: &str, name: &str| {
+            Item::new(format!("{agent}:{name}"), crate::item::Kind::Mcp).put("agent", agent)
+        };
+        let cached = vec![
+            mcp("claude", "drive"),
+            mcp("claude", "gmail"),
+            mcp("codex", "node_repl"),
+        ];
+        // codex answered and now reports one different server; claude could
+        // not be asked at all.
+        let fresh = vec![mcp("codex", "chatcut")];
+        let merged = carry_over(cached.clone(), &fresh, &["claude".to_string()]);
+        let names: Vec<&str> = merged.iter().map(|it| it.cmd.as_str()).collect();
+        assert!(names.contains(&"claude:drive"), "claude rows must survive");
+        assert!(names.contains(&"claude:gmail"), "claude rows must survive");
+        assert!(names.contains(&"codex:chatcut"), "codex is authoritative for itself");
+        assert!(
+            !names.contains(&"codex:node_repl"),
+            "a partition that answered replaces its own rows, or a removed server never leaves"
+        );
+
+        // Nothing incomplete: the fresh result stands alone, whatever it drops.
+        let merged = carry_over(cached.clone(), &fresh, &[]);
+        assert_eq!(merged.len(), 1, "a complete refresh is authoritative");
+
+        // A fresh row wins a tie rather than being duplicated by the carry.
+        let merged = carry_over(cached, &[mcp("claude", "drive")], &["claude".to_string()]);
+        assert_eq!(
+            merged.iter().filter(|it| it.cmd == "claude:drive").count(),
+            1,
+            "the carried row and the fresh one must not both survive"
+        );
+    }
+
     /// A refresh that fails leaves the cache untouched and therefore still
     /// stale, so without a rest the next gather spawns it again at once —
     /// one broken agent CLI becoming a permanent background load.
@@ -1068,20 +1124,32 @@ mod tests {
     #[test]
     fn one_refresh_per_source_and_a_dead_holder_never_blocks_it() {
         let dir = scratch("lease");
-        assert!(claim_lease_in(&dir, "mcp"), "an unheld source must be claimable");
-        assert!(!claim_lease_in(&dir, "mcp"), "a held source must not be claimed twice");
-        assert!(claim_lease_in(&dir, "fleet"), "a lease is per source, not global");
-        release_lease_in(&dir, "mcp");
-        assert!(claim_lease_in(&dir, "mcp"), "a released source is claimable again");
+        let mcp = claim_lease_in(&dir, "mcp").expect("an unheld source must be claimable");
+        assert!(claim_lease_in(&dir, "mcp").is_none(), "a held source is not claimed twice");
+        assert!(claim_lease_in(&dir, "fleet").is_some(), "a lease is per source, not global");
+        assert!(lease_is_live_in(&dir, "mcp"));
 
-        // A lease naming a process that no longer exists is not a lease. Pid 0
-        // can never be one of ours, so it stands in for a holder that died
-        // without cleaning up — which is the case that would otherwise lock a
-        // source out of refreshing for good.
-        release_lease_in(&dir, "mcp");
-        std::fs::write(lease_file_in(&dir, "mcp"), "0 1\n").unwrap();
-        assert!(!lease_is_live_in(&dir, "mcp"));
-        assert!(claim_lease_in(&dir, "mcp"), "a dead holder must not lock a source out");
+        // The kernel releases it, so nothing has to decide when a holder died
+        // — which is what the old maximum lease age was guessing at, and could
+        // not guess well: `mcp-tools` can legitimately run for minutes.
+        drop(mcp);
+        assert!(!lease_is_live_in(&dir, "mcp"), "a dropped lease must free the source");
+        assert!(claim_lease_in(&dir, "mcp").is_some(), "and it is claimable again");
+    }
+
+    /// The concurrency limit has to bind across processes. Counting live
+    /// leases before spawning is advice: the counter exits, leaving nothing
+    /// holding anything, and every other entry point that refreshes was
+    /// outside the count altogether.
+    #[test]
+    fn the_refresh_slots_are_held_rather_than_counted() {
+        let held: Vec<_> = (0..MAX_CONCURRENT_REFRESH)
+            .map(|_| claim_slot().expect("a free slot"))
+            .collect();
+        assert_eq!(held.len(), MAX_CONCURRENT_REFRESH);
+        assert!(claim_slot().is_none(), "the limit must bind once every slot is held");
+        drop(held);
+        assert!(claim_slot().is_some(), "and free again when they are released");
     }
 
     /// Staleness is "how long since this source last answered", and it stopped
