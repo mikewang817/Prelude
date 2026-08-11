@@ -36,6 +36,35 @@ pub fn read_bounded(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Read at most `limit` bytes from the *end* of a file.
+///
+/// For an append-only file the prefix is the wrong half. A shell history is
+/// the case: reading the first 32MB of a 40MB history returns the commands
+/// somebody ran years ago and drops the ones they ran this morning, which is
+/// the exact opposite of what the source is for. Nobody would notice, either
+/// — the list would be full, just full of the wrong things.
+///
+/// The first line is discarded because a read that starts mid-file starts
+/// mid-record. At worst that costs one entry; keeping it would put half a
+/// command in the launcher.
+pub fn read_tail_bounded(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size <= limit {
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        return Some(buf);
+    }
+    file.seek(SeekFrom::Start(size - limit)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    match buf.iter().position(|b| *b == b'\n') {
+        Some(cut) => Some(buf.split_off(cut + 1)),
+        None => Some(buf),
+    }
+}
+
 /// What a small structured file is allowed to be: manifests, configs, the
 /// files a project describes itself with.
 pub const SMALL_FILE: u64 = 4 * 1024 * 1024;
@@ -137,5 +166,44 @@ pub fn tilde(p: &str) -> String {
         format!("~{}", &p[h.len()..])
     } else {
         p.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An append-only file's newest records are at the end, so a bounded read
+    /// of one has to come from the end. Reading the prefix of a large history
+    /// returns years-old commands and silently drops this morning's.
+    #[test]
+    fn a_bounded_read_of_an_append_only_file_keeps_the_newest_records() {
+        let dir = std::env::temp_dir().join(format!("prelude-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history");
+        let mut text = String::new();
+        for n in 0..2000 {
+            text.push_str(&format!("command number {n}\n"));
+        }
+        std::fs::write(&path, &text).unwrap();
+
+        // Under the limit: the whole file, unchanged.
+        let all = read_tail_bounded(&path, 1024 * 1024).unwrap();
+        assert_eq!(all, text.as_bytes());
+
+        // Over it: the tail, and never a half record at the front.
+        let tail = String::from_utf8(read_tail_bounded(&path, 500).unwrap()).unwrap();
+        assert!(tail.len() <= 500);
+        assert!(tail.contains("command number 1999"), "the newest record must survive");
+        assert!(!tail.contains("command number 0\n"), "the oldest must be the one dropped");
+        for line in tail.lines() {
+            assert!(line.starts_with("command number "), "a partial record survived: {line:?}");
+        }
+
+        // The prefix reader still exists for files that are not append-only,
+        // and still takes the front.
+        let head = String::from_utf8(read_bounded(&path, 500).unwrap()).unwrap();
+        assert!(head.starts_with("command number 0\n"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

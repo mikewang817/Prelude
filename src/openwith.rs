@@ -34,7 +34,7 @@ pub fn ensure_file() -> Result<std::path::PathBuf, String> {
         let text = "# Which application opens what, written by Prelude's ^K panel.\n\
                     # Keys are extensions without the dot; \"*\" is everything else.\n\
                     # Add rules from a file's Actions panel.\n\n[apps]\n";
-        crate::cache::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+        crate::cache::write_state(&path, text.as_bytes()).map_err(|e| e.to_string())?;
     }
     Ok(path)
 }
@@ -84,7 +84,7 @@ pub fn remember(ext: &str, app: &str) -> Result<(), String> {
         out.push_str(&format!("{} = {:?}\n", quoted_key(k), v));
     }
     let p = file();
-    crate::cache::write_atomic(&p, out.as_bytes()).map_err(|e| e.to_string())
+    crate::cache::write_state(&p, out.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn quoted_key(k: &str) -> String {

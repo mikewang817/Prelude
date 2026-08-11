@@ -578,14 +578,14 @@ pub fn ensure_quicklinks_file() -> Result<std::path::PathBuf, String> {
         if path.exists() {
             return Err(format!("{} is there but cannot be read", path.display()));
         }
-        crate::cache::write_atomic(&path, QUICKLINKS_DEFAULT.as_bytes())
+        crate::cache::write_state(&path, QUICKLINKS_DEFAULT.as_bytes())
             .map_err(|e| e.to_string())?;
         invalidate_quicklinks();
         return Ok(path);
     };
     let (text, changed) = add_web_search_defaults(current);
     if changed {
-        crate::cache::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+        crate::cache::write_state(&path, text.as_bytes()).map_err(|e| e.to_string())?;
         invalidate_quicklinks();
     }
     Ok(path)
@@ -913,6 +913,9 @@ pub(crate) fn append_quicklink(
 /// the template flow — so the reserved-word check and the duplicate check
 /// cannot be true in one of them and not another.
 pub fn create_quicklink_from(key: &str, draft: &QuicklinkDraft) -> Result<String, String> {
+    // Read, change, write — held across all three, so two keywords created
+    // at once do not keep one.
+    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let key = normalize_quicklink_key(key)?;
     ensure_quicklinks_file()?;
     let text = append_quicklink(read_for_write()?, &key, draft)?;
@@ -921,7 +924,7 @@ pub fn create_quicklink_from(key: &str, draft: &QuicklinkDraft) -> Result<String
 }
 
 fn write_quicklinks(text: &str) -> Result<(), String> {
-    crate::cache::write_atomic(&quicklinks_file(), text.as_bytes()).map_err(|e| e.to_string())?;
+    crate::cache::write_state(&quicklinks_file(), text.as_bytes()).map_err(|e| e.to_string())?;
     invalidate_quicklinks();
     Ok(())
 }
@@ -983,6 +986,7 @@ pub(crate) fn remove_quicklink_block(mut text: String, key: &str) -> Result<Stri
 }
 
 pub fn remove_quicklink(key: &str) -> Result<(), String> {
+    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let key = normalize_quicklink_key(key)?;
     let text = remove_quicklink_block(read_for_write()?, &key)?;
     write_quicklinks(&text)
@@ -1068,6 +1072,7 @@ pub(crate) fn rename_quicklink_key(text: &str, old: &str, new: &str) -> Result<S
 }
 
 pub fn rename_quicklink(old: &str, new: &str) -> Result<String, String> {
+    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let old = normalize_quicklink_key(old)?;
     let new = normalize_quicklink_key(new)?;
     let text = rename_quicklink_key(&read_for_write()?, &old, &new)?;
@@ -1096,6 +1101,7 @@ pub fn retarget_quicklink(key: &str, target: &str) -> Result<String, String> {
 }
 
 pub fn rename_quicklink_label(key: &str, name: &str) -> Result<(), String> {
+    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let key = normalize_quicklink_key(key)?;
     let name = crate::width::flatten(name.trim());
     if name.is_empty() {

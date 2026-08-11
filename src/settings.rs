@@ -301,20 +301,24 @@ fn update_pref_text(text: &str, key: &str, value: Option<&str>) -> String {
 fn write_pref(key: &str, value: &str) -> Result<(), String> {
     let value = validate_pref(key, value)?;
     let path = file();
+    // Read, change, write: two settings changed at the same moment from two
+    // windows kept one of them without this.
+    let _lock = crate::cache::lock_for_write(&path);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
         "# Prelude's own preferences, written by the set: panel.\n\
          # The matching environment variable still overrides any line here.\n"
             .into()
     });
     let out = update_pref_text(&text, key, Some(&value));
-    crate::cache::write_atomic(&path, out.as_bytes()).map_err(|e| e.to_string())
+    crate::cache::write_state(&path, out.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn remove_pref(key: &str) -> Result<(), String> {
     let path = file();
+    let _lock = crate::cache::lock_for_write(&path);
     let Ok(text) = std::fs::read_to_string(&path) else { return Ok(()) };
     let out = update_pref_text(&text, key, None);
-    crate::cache::write_atomic(&path, out.as_bytes()).map_err(|e| e.to_string())
+    crate::cache::write_state(&path, out.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn pref_source(key: &str, environment: &str) -> &'static str {
@@ -568,7 +572,7 @@ fn write_roots(lines: &[String]) -> Result<(), String> {
         out.push_str(l);
         out.push('\n');
     }
-    crate::cache::write_atomic(&roots_file(), out.as_bytes()).map_err(|e| e.to_string())
+    crate::cache::write_state(&roots_file(), out.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Each root with its own state, for the detail view and the remove picker.
@@ -1139,7 +1143,7 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
             for key in PREF_KEYS {
                 text = update_pref_text(&text, key, None);
             }
-            crate::cache::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+            crate::cache::write_state(&path, text.as_bytes()).map_err(|e| e.to_string())?;
             let variables: Vec<String> = PREF_KEYS
                 .iter()
                 .filter_map(|key| override_for(key).map(|variable| format!("${variable}")))

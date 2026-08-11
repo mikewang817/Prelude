@@ -12,6 +12,7 @@ cargo test                 # 170 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # p95 gather must stay under 40ms; non-zero when it does not
 ./target/release/prelude bench --json   # the same distribution, for a gate to record
+./target/release/prelude bench --process # a new process per sample: the launch a person meets
 ./target/release/prelude _dump       # empty-query agent home
 ./target/release/prelude _dump-root  # searchable root commands
 ./target/release/prelude _dump-all   # complete catalogue behind scopes
@@ -430,19 +431,46 @@ containers which have stopped is the opposite failure. A non-zero exit is
 deliberately *not* counted — a CLI answering "none configured" with status 1
 has told us something true.
 
+**An aggregated source fails in parts, and the guard above only sees the
+whole.** The MCP inventory asks every agent and returns their rows together,
+so a `claude` that timed out beside a `codex` that answered produces a result
+that is *not empty* — and the empty-result rule never fires. The whole cache
+was replaced and every claude row went with it: the launcher ran perfectly and
+quietly held less data, which is the only failure shape here that nobody
+reports. `exec::note_incomplete` names the partition that could not be asked,
+`sources::agents::answered` decides what counts (never ran, had to be killed,
+or exited non-zero with nothing on stdout — the shape of an auth error), and
+`cache::carry_over` keeps the last good rows for those partitions while every
+other partition is replaced wholesale, so an agent whose last server was
+removed still loses the row. A non-zero exit that still printed a list is an
+answer; so is a clean exit with no rows.
+
 `exec::require` is `which` for the same reason. **PATH is not the same
 everywhere Prelude runs**: the panel is a Ghostty started by launchd and does
 not inherit a login shell's PATH, so `claude` can be missing there and present
 in every terminal on the machine. Treated as an honest empty, that wiped the
 person's MCP servers out of the panel and left nothing to say why.
 
-**One refresh per source, and a rest after a failure.** Every stale source
-used to spawn `_refresh` on every gather with nothing coordinating them, so
-three shells meant three processes running the same network health check to
-write the same answer. A lease claimed with `create_new` makes the claim the
-filesystem's to arbitrate rather than a check followed by a race; a dead
-holder's lease is cleared rather than honoured, at most two run at once, and a
-failure records a rest that is always at least twice that source's own TTL —
+**One refresh per source, and a rest after a failure — both held by the
+kernel.** Every stale source used to spawn `_refresh` on every gather with
+nothing coordinating them, so three shells meant three processes running the
+same network health check to write the same answer. The claim is now a `flock`
+held for the life of the refresh, and the concurrency limit is two more locks
+rather than a count.
+
+Both were tried the other way first and both were wrong for the same reason: a
+file that *records* a claim needs somebody to decide when the claimant died. A
+lease with a maximum age has to exceed the slowest legitimate refresh, and
+`mcp-tools` has no such bound worth naming — fifteen seconds for `initialize`
+plus twenty for each of ten `tools/list` pages is three and a half minutes for
+*one* server — so any constant is either short enough to declare a working
+refresh dead and start a second beside it, or long enough that a dead holder
+blocks the source all afternoon. And a count taken before spawning is advice:
+the counter exits, nothing holds anything, and every other entry point that
+refreshes was outside the count entirely. A held lock has neither problem, and
+the kernel releases it however the process ends.
+
+A failure records a rest that is always at least twice that source's own TTL —
 `backoff_delay` derives it per source, because a flat constant equal to
 `mcp`'s sixty-second TTL was not a backoff at all.
 
@@ -497,6 +525,10 @@ bounded now, by total bytes rather than by count.
 did not create: a generated `package.json`, a monorepo `Makefile`, a shell
 history nobody has ever rotated. These formats are line-oriented and their
 parsers are too, so a bounded read is a shorter list rather than a broken one.
+For an append-only file the bound is taken from the *end* —
+`read_tail_bounded` — because the prefix of a 40MB history is the commands
+somebody ran years ago, and a list that is full of the wrong things is not a
+failure anybody notices.
 
 **Sources degrade to nothing.** A source that fails, or finds nothing,
 returns an empty list. Never blocks, never panics, never prints. Anything
@@ -875,6 +907,14 @@ servers itself and needs the identical treatment; without it a reader thread
 joins on a pipe that will never close and the refresh process hangs forever.
 Output is capped at `MAX_OUTPUT`: `read_to_end` on a pipe is an unbounded
 allocation controlled by another program.
+
+**`bench` measures the gather; `bench --process` measures the launch.** Forty
+calls to `gather` inside one process share a warm allocator, loaded code pages
+and every `OnceLock` the first call filled, which is the right instrument for
+"did a source get slower" and the wrong one for "what does pressing the key
+cost". `--process` spawns the real binary per sample and reports the launch
+beside the per-keystroke helpers, because both are paid where a person can
+feel them.
 
 **`bench` gates on p95, and exits non-zero when it fails.** The median was the
 gate, and a median cannot see what the budget exists to prevent: a launch that

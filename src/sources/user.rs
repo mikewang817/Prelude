@@ -137,7 +137,7 @@ cmd = "tar -czf {{name}}.tar.gz {{folder}}"
 pub fn ensure_snippets_file() -> Result<std::path::PathBuf, String> {
     let path = paths::config().join("snippets.toml");
     if !path.exists() {
-        crate::cache::write_atomic(&path, SNIPPETS_DEFAULT.as_bytes()).map_err(|e| e.to_string())?;
+        crate::cache::write_state(&path, SNIPPETS_DEFAULT.as_bytes()).map_err(|e| e.to_string())?;
     }
     Ok(path)
 }

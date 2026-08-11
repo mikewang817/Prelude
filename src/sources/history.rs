@@ -46,10 +46,12 @@ pub fn raw() -> &'static [String] {
         let Some(path) = candidates.into_iter().find(|p| p.exists()) else {
             return Vec::new();
         };
-        // A history file is append-only and nobody prunes it. Reading a
-        // bounded prefix keeps the source honest about its own cost; the
-        // parser is line-by-line, so a cut one is a shorter list.
-        let Some(bytes) = paths::read_bounded(&path, paths::LOG_FILE) else {
+        // A history file is append-only and nobody prunes it, so the bound is
+        // taken from the *end*. Reading the first 32MB of a 40MB history
+        // returns what somebody ran years ago and drops what they ran this
+        // morning — and the list would look full while being full of the
+        // wrong things, which is the kind of wrong nobody reports.
+        let Some(bytes) = paths::read_tail_bounded(&path, paths::LOG_FILE) else {
             return Vec::new();
         };
         let text = String::from_utf8_lossy(&unmetafy(&bytes)).into_owned();

@@ -354,10 +354,35 @@ fn swap(new: &Path) -> Result<PathBuf, String> {
     let _ = std::fs::set_permissions(&incoming, perms);
     let previous = dir.join("prelude.old");
     let _ = std::fs::remove_file(&previous);
-    std::fs::rename(&current, &previous).map_err(|e| format!("could not set the old binary aside: {e}"))?;
-    if let Err(e) = std::fs::rename(&incoming, &current) {
-        let _ = std::fs::rename(&previous, &current);
-        return Err(format!("could not put the new binary in place: {e}"));
+    // Link the backup rather than moving the binary out of the way.
+    //
+    // Moving it first leaves the installed path *not existing* between the
+    // two renames. It is a very short window and it is not a harmless one:
+    // this is the path the global panel's Ghostty runs on every press, and
+    // the LaunchAgent restarts on exit — so a chord pressed in that instant
+    // meets a missing file. A hard link puts a second name on the same inode
+    // instead, so `prelude` never stops resolving, and the single rename that
+    // follows replaces it atomically.
+    //
+    // The fallback is the old order, because a hard link can fail for real
+    // reasons — a filesystem that does not support them — and an update that
+    // refuses to proceed over that would be worse than one with a window a
+    // few microseconds wide.
+    match std::fs::hard_link(&current, &previous) {
+        Ok(()) => {
+            if let Err(e) = std::fs::rename(&incoming, &current) {
+                let _ = std::fs::remove_file(&previous);
+                return Err(format!("could not put the new binary in place: {e}"));
+            }
+        }
+        Err(_) => {
+            std::fs::rename(&current, &previous)
+                .map_err(|e| format!("could not set the old binary aside: {e}"))?;
+            if let Err(e) = std::fs::rename(&incoming, &current) {
+                let _ = std::fs::rename(&previous, &current);
+                return Err(format!("could not put the new binary in place: {e}"));
+            }
+        }
     }
     Ok(previous)
 }
