@@ -178,7 +178,7 @@ fn cached_item(
         .put("error", error)
 }
 
-fn codex_inventory(out: &mut Vec<Item>, checked_at: u64) {
+fn codex_inventory(into: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("codex").is_none() {
         return;
     }
@@ -188,11 +188,16 @@ fn codex_inventory(out: &mut Vec<Item>, checked_at: u64) {
         &["codex", "mcp", "list", "--json"],
         Duration::from_secs(20),
     );
-    if !crate::sources::agents::answered(&probe, "codex") {
-        return;
-    }
     let text = probe.stdout_text();
-    let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return };
+    let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+        // A clean exit whose output will not parse is not "no servers". This
+        // returned silently, so a malformed answer here — beside a claude
+        // that answered — replaced every cached codex tool list with nothing.
+        crate::exec::note_incomplete("codex");
+        return;
+    };
+    let mut rows = Vec::new();
+    let out = &mut rows;
     for server in servers {
         let name = server.get("name").and_then(|value| value.as_str()).unwrap_or("");
         if name.is_empty() || crate::secrets::looks_secret(name) {
@@ -224,17 +229,19 @@ fn codex_inventory(out: &mut Vec<Item>, checked_at: u64) {
             Err(error) => out.push(cached_item("codex", name, "failed", checked_at, &[], error)),
         }
     }
+    if crate::sources::agents::trusted(&probe, "codex", rows.len()) {
+        into.extend(rows);
+    }
 }
 
-fn claude_inventory(out: &mut Vec<Item>, checked_at: u64) {
+fn claude_inventory(into: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("claude").is_none() {
         return;
     }
     let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
-    if !crate::sources::agents::answered(&probe, "claude") {
-        return;
-    }
     let text = probe.stdout_text();
+    let mut rows = Vec::new();
+    let out = &mut rows;
     for line in text.lines() {
         let line = line.trim();
         let Some((name, rest)) = line.split_once(": ") else { continue };
@@ -259,6 +266,9 @@ fn claude_inventory(out: &mut Vec<Item>, checked_at: u64) {
             Ok(tools) => out.push(cached_item("claude", name, "ok", checked_at, &tools, "")),
             Err(error) => out.push(cached_item("claude", name, "failed", checked_at, &[], error)),
         }
+    }
+    if crate::sources::agents::trusted(&probe, "claude", rows.len()) {
+        into.extend(rows);
     }
 }
 

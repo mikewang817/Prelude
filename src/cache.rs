@@ -494,8 +494,17 @@ fn claim_lease_in(dir: &std::path::Path, name: &str) -> Option<Lock> {
 /// limit binds across every process on the machine rather than within the one
 /// that happened to be counting.
 fn claim_slot() -> Option<Lock> {
-    let dir = refresh_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    claim_slot_in(&refresh_dir())
+}
+
+/// Addressed by directory for the same reason the lease helpers are: a test
+/// that reaches into `~/.cache/prelude` is a test of whatever else is running
+/// on the machine. This one asserts that no slot is free once both are held,
+/// which the panel's own refresh thread can make true — so it passed alone
+/// and failed beside a `bench --process`, which is the worst way for a test
+/// to be wrong.
+fn claim_slot_in(dir: &std::path::Path) -> Option<Lock> {
+    let _ = std::fs::create_dir_all(dir);
     (0..MAX_CONCURRENT_REFRESH)
         .find_map(|n| try_lock(&dir.join(format!("slot.{n}")), Duration::ZERO))
 }
@@ -1143,13 +1152,19 @@ mod tests {
     /// outside the count altogether.
     #[test]
     fn the_refresh_slots_are_held_rather_than_counted() {
+        // Its own directory. Addressing the real one made this a test of
+        // whatever else was running: the panel's refresh thread holds these
+        // slots legitimately, so it passed alone and failed beside a
+        // `bench --process` — a test that reports the machine's state as the
+        // code's is worse than no test.
+        let dir = scratch("slots");
         let held: Vec<_> = (0..MAX_CONCURRENT_REFRESH)
-            .map(|_| claim_slot().expect("a free slot"))
+            .map(|_| claim_slot_in(&dir).expect("a free slot"))
             .collect();
         assert_eq!(held.len(), MAX_CONCURRENT_REFRESH);
-        assert!(claim_slot().is_none(), "the limit must bind once every slot is held");
+        assert!(claim_slot_in(&dir).is_none(), "the limit must bind once every slot is held");
         drop(held);
-        assert!(claim_slot().is_some(), "and free again when they are released");
+        assert!(claim_slot_in(&dir).is_some(), "and free again when they are released");
     }
 
     /// Staleness is "how long since this source last answered", and it stopped

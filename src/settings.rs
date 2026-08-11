@@ -449,6 +449,9 @@ pub fn add_root(raw: &str) -> Result<String, String> {
         ));
     }
     let tilde = crate::paths::tilde(&real.to_string_lossy());
+    // Held across the read and the write, so adding two roots at once keeps
+    // both — and so the duplicate check below cannot be raced past.
+    let _lock = crate::cache::lock_for_write(&roots_file());
     let mut lines = roots_lines();
     if lines.iter().any(|l| resolved(l).as_deref() == Some(&real)) {
         return Err(format!("{tilde} is already a search root"));
@@ -510,6 +513,7 @@ fn unescape(s: &str) -> String {
 pub fn remove_root(entry: &str) -> Result<(), String> {
     let readings = readings_of(entry);
     let wanted = readings.iter().find_map(|path| path.canonicalize().ok());
+    let _lock = crate::cache::lock_for_write(&roots_file());
     let mut removed = None;
     let lines: Vec<String> = roots_lines()
         .into_iter()

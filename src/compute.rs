@@ -572,6 +572,12 @@ pub(crate) fn add_web_search_defaults(mut text: String) -> (String, bool) {
 /// call this; the keystroke path reads and never writes.
 pub fn ensure_quicklinks_file() -> Result<std::path::PathBuf, String> {
     let path = quicklinks_file();
+    // The versioned default-block migration is read, change, write, and it
+    // runs once per gather from `quicklink_items` — so every shell and the
+    // panel reach it at once on the launch after an upgrade. Two of them
+    // appending the same block concurrently is exactly the lost update this
+    // guards, and the loss would be a keyword the person then never sees.
+    let _lock = crate::cache::lock_for_write(&path);
     let Some(current) = read_quicklinks_file() else {
         // Absent is a fresh install; unreadable is a file with contents in it
         // that we could not see. Only the first may be written to.
@@ -913,11 +919,16 @@ pub(crate) fn append_quicklink(
 /// the template flow — so the reserved-word check and the duplicate check
 /// cannot be true in one of them and not another.
 pub fn create_quicklink_from(key: &str, draft: &QuicklinkDraft) -> Result<String, String> {
-    // Read, change, write — held across all three, so two keywords created
-    // at once do not keep one.
-    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let key = normalize_quicklink_key(key)?;
+    // Before the lock, not inside it. `flock` is held per open file
+    // description, so a second request from *this* process conflicts with the
+    // first exactly as another process would — it does not deadlock, because
+    // the wait is bounded, but every creation would pay the whole 250ms bound
+    // and then proceed unlocked, which is the worst of both.
     ensure_quicklinks_file()?;
+    // Read, change, write — held across all three, so two keywords created at
+    // the same moment do not keep one.
+    let _lock = crate::cache::lock_for_write(&quicklinks_file());
     let text = append_quicklink(read_for_write()?, &key, draft)?;
     write_quicklinks(&text)?;
     Ok(key)

@@ -72,6 +72,9 @@ pub fn chosen_for(path: &str) -> Option<String> {
 /// Rewrites the file from the parsed table rather than appending, so choosing
 /// twice for the same extension replaces rather than accumulates.
 pub fn remember(ext: &str, app: &str) -> Result<(), String> {
+    // Read, change, write: two windows setting an open-with rule at the same
+    // moment kept one of them.
+    let _lock = crate::cache::lock_for_write(&file());
     let mut t = table();
     let key = if ext.is_empty() { ANY.to_string() } else { ext.to_ascii_lowercase() };
     t.entry(SECTION.to_string()).or_default().insert(key, app.to_string());

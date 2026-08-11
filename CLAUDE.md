@@ -437,13 +437,24 @@ so a `claude` that timed out beside a `codex` that answered produces a result
 that is *not empty* — and the empty-result rule never fires. The whole cache
 was replaced and every claude row went with it: the launcher ran perfectly and
 quietly held less data, which is the only failure shape here that nobody
-reports. `exec::note_incomplete` names the partition that could not be asked,
-`sources::agents::answered` decides what counts (never ran, had to be killed,
-or exited non-zero with nothing on stdout — the shape of an auth error), and
-`cache::carry_over` keeps the last good rows for those partitions while every
-other partition is replaced wholesale, so an agent whose last server was
-removed still loses the row. A non-zero exit that still printed a list is an
-answer; so is a clean exit with no rows.
+reports. `exec::note_incomplete` names the partition that could not be asked and
+`cache::carry_over` keeps the last good rows for those partitions, while every
+other partition is replaced wholesale so an agent whose last server was
+removed still loses the row.
+
+`sources::agents::trusted` decides, and it decides *after* parsing, because
+the case that matters cannot be seen before. Three outcomes: exit 0 with no
+records is an authoritative empty; a non-zero exit that still produced records
+is an answer; a non-zero exit with none is a refusal. What makes the last one
+subtle is that `Error: authentication required` splits on `": "` exactly as a
+server line does — it parsed as a server *named* `Error`, so "records were
+parsed" was true and a refusal replaced three real rows with one imaginary
+one. The count that decides is therefore the number of lines carrying a health
+status, which an error message cannot produce by accident; rows without one
+are still displayed, so a format that stops printing statuses degrades to
+showing rows rather than to erasing them. Output that will not parse at all is
+never an answer, whatever the exit code — that is `codex mcp list --json`
+returning something unreadable, which is not the same as no servers.
 
 `exec::require` is `which` for the same reason. **PATH is not the same
 everywhere Prelude runs**: the panel is a Ghostty started by launchd and does

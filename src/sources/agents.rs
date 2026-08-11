@@ -525,23 +525,29 @@ fn mcp_item(
 }
 
 /// `claude mcp list` prints `<name>: <target> - <status>` per server.
-/// Did this agent actually answer the question it was asked?
+/// May this agent's answer replace what is already cached for it?
 ///
-/// Three outcomes are *not* answers, and each one used to read as "this agent
-/// has no MCP servers":
+/// The question can only be settled *after* parsing, because the decisive
+/// case is a command that succeeded in the shell's sense and said nothing an
+/// inventory could be read out of. Three outcomes, and the middle one is what
+/// an earlier version of this got wrong by asking too early:
 ///
-/// * it never ran, or had to be killed — we did not finish asking, and a
-///   partial list is worse than the complete one already in the cache;
-/// * it refused, exiting non-zero with nothing on stdout — the shape of an
-///   authentication error, which reports on stderr and says nothing else;
-/// * (for a `--json` caller) it printed something unparseable, handled at the
-///   call site because only there is it known what parseable means.
+/// * **exit 0, zero records** — an authoritative empty. An agent whose last
+///   server was removed has to be able to say so, or the launcher shows it
+///   forever.
+/// * **non-zero exit, records parsed** — accept the records. Several of these
+///   CLIs report a warning through their status while still printing a
+///   perfectly good list.
+/// * **non-zero exit, zero records** — not an answer. This is the shape of
+///   `Error: authentication required`: a refusal, printed on either stream,
+///   which read as "this agent now has no servers" and took every cached row
+///   with it. Checking `stdout` for emptiness was not enough — the error text
+///   *is* stdout, and it is not an inventory.
 ///
-/// A non-zero exit that still printed a list *is* an answer, and so is an
-/// empty list from a clean exit: an agent whose last server was removed has
-/// to be able to say so, or the launcher would show it forever.
-pub(crate) fn answered(probe: &crate::exec::Output, agent: &str) -> bool {
-    let refused = !probe.ok() && probe.stdout.iter().all(u8::is_ascii_whitespace);
+/// A run that never started or had to be killed is never an answer, whatever
+/// it managed to print: a partial list must not replace a complete one.
+pub(crate) fn trusted(probe: &crate::exec::Output, agent: &str, parsed: usize) -> bool {
+    let refused = !probe.ok() && parsed == 0;
     if probe.timed_out || probe.spawn_failed || refused {
         crate::exec::note_incomplete(agent);
         return false;
@@ -549,15 +555,43 @@ pub(crate) fn answered(probe: &crate::exec::Output, agent: &str) -> bool {
     true
 }
 
-fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
+/// How many lines of a `claude mcp list` answer carry a health status.
+///
+/// The evidence half of `trusted`: an error message parses as a server line,
+/// a status does not appear by accident. Kept beside the parser it mirrors so
+/// the two cannot drift.
+#[cfg(test)]
+fn claude_rows_with_status(text: &str) -> usize {
+    text.lines()
+        .filter_map(|line| line.trim().split_once(": ").map(|(n, rest)| (n.to_string(), rest.to_string())))
+        .filter(|(name, _)| !name.is_empty() && !name.contains("Checking"))
+        .filter(|(_, rest)| rest.rsplit_once(" - ").is_some_and(|(_, s)| !s.trim().is_empty()))
+        .count()
+}
+
+fn mcp_claude(into: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("claude").is_none() {
         return;
     }
     let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
-    if !answered(&probe, "claude") {
-        return;
-    }
     let text = probe.stdout_text();
+    // Parsed into its own list first: whether this replaces the cached rows
+    // depends on how many of them there are. See `trusted`.
+    let mut rows = Vec::new();
+    let out = &mut rows;
+    // Counted separately from the rows: how many lines carried a health
+    // status, which is the part of the format an error message cannot
+    // accidentally produce. `Error: authentication required` splits on `": "`
+    // exactly as a server line does — it parsed as a server *named* "Error",
+    // so "we parsed a record" was true and a refusal replaced three real rows
+    // with one imaginary one. What distinguishes them is the ` - status` that
+    // every entry of a real listing carries, because `claude mcp list` health
+    // checks each server as it prints it.
+    //
+    // A row without one is still shown. Only the decision to *replace the
+    // cache* needs the stronger evidence, so a future format that stops
+    // printing statuses degrades to showing rows rather than to erasing them.
+    let mut with_status = 0usize;
     for line in text.lines() {
         let line = line.trim();
         let Some((name, rest)) = line.split_once(": ") else { continue };
@@ -568,6 +602,9 @@ fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
             Some((t, s)) => (t.trim(), s.trim()),
             None => (rest.trim(), ""),
         };
+        if !status.is_empty() {
+            with_status += 1;
+        }
         let low = status.to_lowercase();
         let health = if low.contains("connect") && !low.contains("fail") {
             Health::Ok
@@ -589,18 +626,21 @@ fn mcp_claude(out: &mut Vec<Item>, checked_at: u64) {
                 .put("portable", portable.to_string())
         );
     }
+    // The count that decides is the convincing one; see `with_status`.
+    if trusted(&probe, "claude", if probe.ok() { rows.len() } else { with_status }) {
+        into.extend(rows);
+    }
 }
 
 /// codex has --json, which also reports auth_status and why it is disabled.
-fn mcp_codex(out: &mut Vec<Item>, checked_at: u64) {
+fn mcp_codex(into: &mut Vec<Item>, checked_at: u64) {
     if crate::exec::require("codex").is_none() {
         return;
     }
     let probe = crate::exec::capture(&["codex", "mcp", "list", "--json"], Duration::from_secs(20));
-    if !answered(&probe, "codex") {
-        return;
-    }
     let text = probe.stdout_text();
+    let mut rows = Vec::new();
+    let out = &mut rows;
     let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
         // Bytes we cannot read are not "no servers". Something answered, and
         // we do not know what it said — the previous answer is still better
@@ -653,6 +693,9 @@ fn mcp_codex(out: &mut Vec<Item>, checked_at: u64) {
             // Agent upgrade; resolve from the owner CLI on explicit action.
         }
         out.push(it);
+    }
+    if trusted(&probe, "codex", rows.len()) {
+        into.extend(rows);
     }
 }
 
@@ -1303,6 +1346,56 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
 
 #[cfg(test)]
 mod tests {
+
+    /// The three cases, and the middle one is the whole reason this decision
+    /// happens after parsing rather than before it.
+    #[test]
+    fn an_agents_answer_is_trusted_only_when_it_is_one() {
+        use crate::exec::Output;
+        let ok = |code: i32| Output { status: Some(code), ..Output::default() };
+
+        // Exit 0 with nothing: an authoritative empty. The last server was
+        // removed and the row has to go, or the launcher shows it forever.
+        assert!(trusted(&ok(0), "claude", 0));
+        assert!(trusted(&ok(0), "claude", 3));
+
+        // Non-zero but it printed a usable list: take the list. These CLIs
+        // report warnings through their status while answering perfectly.
+        assert!(trusted(&ok(1), "claude", 3));
+
+        // Non-zero and nothing parseable — `Error: authentication required`.
+        // Checking stdout for emptiness could not see this: the error text
+        // *is* stdout, and it is not an inventory.
+        let auth_error = Output {
+            status: Some(1),
+            stdout: b"Error: authentication required\n".to_vec(),
+            ..Output::default()
+        };
+        assert!(!trusted(&auth_error, "claude", 0));
+
+        // And the count it is given has to be evidence, not merely a number.
+        // That error line splits on `": "` exactly as a server line does, so
+        // the parser read a server *named* "Error" and the refusal replaced
+        // three real rows with one imaginary one. Only lines carrying a
+        // health status count when the exit was non-zero.
+        assert_eq!(claude_rows_with_status("Error: authentication required"), 0);
+        assert_eq!(
+            claude_rows_with_status("Checking MCP server health...\n\nnode_repl: /bin/x - ✓ Connected"),
+            1,
+        );
+
+        // Never started, or killed part-way: never an answer, whatever it
+        // managed to print. A partial list must not replace a complete one.
+        let killed = Output { timed_out: true, status: None, ..Output::default() };
+        assert!(!trusted(&killed, "claude", 0));
+        assert!(!trusted(&killed, "claude", 7), "a partial list is not an answer");
+        let missing = Output { spawn_failed: true, ..Output::default() };
+        assert!(!trusted(&missing, "claude", 0));
+
+        // …and each refusal names the partition, which is what keeps its
+        // cached rows through `cache::carry_over`.
+        assert!(crate::exec::incomplete_partitions().iter().any(|p| p == "claude"));
+    }
     use super::*;
     use crate::capability::SkillCopy;
 
