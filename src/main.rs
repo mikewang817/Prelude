@@ -1018,10 +1018,37 @@ mod tests {
             crate::ui::containing_directory(&file).as_deref(),
             Some(std::path::Path::new("/tmp/project")),
         );
-        assert!(crate::ui::footer_for_item("Open it", Some(&file), true).contains("Cmd+Enter"));
-        assert!(!crate::ui::footer_for_item("Open it", Some(&file), false).contains("Cmd+Enter"));
+        assert!(crate::ui::footer_for_item("Open it", Some(&file), true).contains("Open folder"));
+        // Neither shortcut exists on the inline surface: Prelude owns the
+        // panel's Ghostty configuration and nobody else's.
+        let inline = crate::ui::footer_for_item("Open it", Some(&file), false);
+        assert!(!inline.contains("Cmd+Enter"));
+
+        // A folder has no *containing* folder worth opening — Enter already
+        // opens it — but it is exactly where a terminal should stand.
         let folder = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
-        assert!(!crate::ui::footer_for_item("Open it", Some(&folder), true).contains("Cmd+Enter"));
+        let shown = crate::ui::footer_for_item("Open it", Some(&folder), true);
+        assert!(!shown.contains("Open folder"), "Cmd+Enter is for files");
+        assert!(shown.contains("Shift+Cmd+Enter"), "a folder is a place to stand");
+        assert_eq!(
+            crate::ui::terminal_directory(&folder),
+            Some(std::path::PathBuf::from("/tmp/project")),
+            "a folder row stands the terminal in itself, not its parent",
+        );
+        assert_eq!(
+            crate::ui::terminal_directory(&file),
+            Some(std::path::PathBuf::from("/tmp/project")),
+            "a file row stands it where the file is",
+        );
+        // And nothing else offers it: a history entry has no directory that
+        // is *its*, and guessing one would stop the key meaning one thing.
+        for kind in [Kind::History, Kind::Agent, Kind::Session, Kind::Link, Kind::App] {
+            let it = Item::new("x", kind).put("path", "/tmp/project");
+            assert_eq!(crate::ui::terminal_directory(&it), None, "{kind:?}");
+        }
+        // Keys are spelled out; a glyph is only legible to somebody who
+        // already knows it.
+        assert!(!shown.contains('⇧'));
     }
 
     #[test]

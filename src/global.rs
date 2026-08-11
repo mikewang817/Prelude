@@ -278,6 +278,45 @@ fn ghostty_executable() -> Option<PathBuf> {
     ghostty_app().map(|app| app.join("Contents/MacOS/ghostty"))
 }
 
+/// Open a new Ghostty window standing in `directory`.
+///
+/// Through Launch Services with `-n`, for the two reasons this file already
+/// documents. Executing `Contents/MacOS/ghostty` directly leaves the process
+/// a foreground application even under `macos-hidden = always`; and `-n`
+/// forces a *new* instance, so macOS cannot deliver this launch to the hidden
+/// panel — which shares Ghostty's bundle identity and would answer it by
+/// routing through `_surface`.
+///
+/// The new instance reads the person's own Ghostty configuration, not the
+/// panel's: nothing on this path passes `--config-file`, so the window is the
+/// one they normally work in, standing somewhere else.
+pub fn open_directory(directory: &Path) -> Result<(), String> {
+    let Some(app) = ghostty_app() else {
+        return Err("Ghostty is not installed in /Applications or ~/Applications".into());
+    };
+    if !directory.is_dir() {
+        return Err(format!("{} is not a folder any more", crate::paths::tilde(&directory.to_string_lossy())));
+    }
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg("-n")
+        .arg("-a")
+        .arg(&app)
+        .arg("--args")
+        // One argument, not two: `--working-directory /path` would let a path
+        // beginning with a dash read as the next flag.
+        .arg(format!("--working-directory={}", directory.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("could not ask macOS to open Ghostty: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("macOS could not open Ghostty there".into())
+    }
+}
+
 fn quick_config_path() -> PathBuf {
     crate::paths::config().join(QUICK_CONFIG)
 }
@@ -674,6 +713,9 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          # fzf cannot receive Command. Translate it to Prelude's private Ctrl+G\n\
          # inside this dedicated panel; the person's normal Ghostty is untouched.\n\
          keybind = cmd+enter=text:\\x07\n\
+         # …and Shift+Cmd+Enter to private Ctrl+]. Not Ctrl+_ (0x1f), which is\n\
+         # the field delimiter every rendered row carries.\n\
+         keybind = shift+cmd+enter=text:\\x1d\n\
          command = {exe} _surface\n",
         chord = hotkey.canonical(),
         exe = exe.display(),

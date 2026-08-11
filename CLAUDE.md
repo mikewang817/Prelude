@@ -347,9 +347,14 @@ mode.** Graphical launchers often put a secondary action on its own key;
 Prelude keeps that action but not the key: where useful, it is the first selectable row
 below Enter's non-selectable header. Neither action is a fixed verb; both are
 per-item, and they are opposites — where one acts, the other hands you text. A
-test asserts they never coincide. The global panel has one narrower object
-shortcut, not a generic secondary: Cmd+Enter on File/Find opens the containing
-directory. Ctrl+P is different: Quick Look replaces
+test asserts they never coincide. The global panel has two narrower object
+shortcuts, not a generic secondary: Cmd+Enter on File/Find opens the
+containing directory in Finder, and Shift+Cmd+Enter opens a Ghostty standing
+in it. The second is the one thing this launcher cannot hand over as text — a
+`cd` is only useful in a shell you already have, and the point of the panel is
+not having one. `ui::terminal_directory` gives it a single meaning, *the
+directory this row is in*: a file's parent, and a folder itself, because a
+folder row is already where the prompt should be. Ctrl+P is different: Quick Look replaces
 the result area until Ctrl+P is pressed again, without selecting or acting on
 anything. The preview is hidden by default and never owns a permanent column.
 Clipboard rows are the deliberate contextual exception: while any real row is
@@ -378,12 +383,19 @@ instead of the static one.
 Ctrl, because only Ctrl reliably arrives. Unless told otherwise macOS spends
 Option on composing characters, so Option+K types `˚` into the search box and
 Option+Enter comes through as a bare Enter — running the *primary* action,
-silently. Cmd never reaches a terminal application. The containing-directory
-shortcut is honest only because Prelude owns the dedicated panel's Ghostty
-config: `cmd+enter=text:\\x07` translates it to private Ctrl+G, `EXPECT`
-includes `ctrl-g`, and the footer advertises Cmd+Enter only when
-`PRELUDE_FULL_SURFACE` and File/Find are both true. Never claim it on the zsh
-widget or alter the person's ordinary terminal config.
+silently. Cmd never reaches a terminal application. The two directory
+shortcuts are honest only because Prelude owns the dedicated panel's Ghostty
+config: `cmd+enter=text:\\x07` and `shift+cmd+enter=text:\\x1d` translate them
+to private Ctrl+G and Ctrl+], `EXPECT` includes both, and the footer advertises
+them only when `PRELUDE_FULL_SURFACE` and a directory-bearing row are both
+true. Ctrl+] is 0x1d and deliberately not 0x1f, which is `render::SEP` — the
+delimiter every rendered row carries, and which fzf would read as a field
+boundary rather than as a key. Never claim either on the zsh widget or alter
+the person's ordinary terminal config. The new window is opened through Launch
+Services with `-n`, for the reasons `global.rs` already documents: executing
+the binary directly makes it a foreground application, and without a new
+instance macOS can deliver the launch to the hidden panel, which shares
+Ghostty's bundle identity.
 
 **The line is not danger, it is whether there is anything to edit.** A
 command line goes onto the prompt — including agents, skills and sessions,

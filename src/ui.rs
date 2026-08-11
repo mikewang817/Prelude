@@ -26,6 +26,9 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
     if command_enter && item.is_some_and(|item| matches!(item.kind, Kind::File | Kind::Find)) {
         parts.push(format!("Open folder{DIM}  Cmd+Enter{RESET}"));
     }
+    if command_enter && item.is_some_and(|item| terminal_directory(item).is_some()) {
+        parts.push(format!("Terminal{DIM}  Shift+Cmd+Enter{RESET}"));
+    }
     parts.push(format!("Actions{DIM}  Ctrl+K →{RESET}"));
     if crate::settings::preview_enabled() {
         parts.push(format!("Preview{DIM}  Ctrl+P{RESET}"));
@@ -53,10 +56,16 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
 pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
 
 /// Ctrl remains the portable terminal vocabulary. The dedicated global panel
-/// has one deliberate macOS exception: its generated Ghostty config translates
-/// Cmd+Enter into Ctrl+G, which fzf can receive reliably. It is contextual to
-/// files and is never advertised on an inline terminal surface.
-const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g";
+/// has two deliberate macOS exceptions, both contextual to rows that have a
+/// directory and neither ever advertised on an inline terminal surface: its
+/// generated Ghostty config translates Cmd+Enter into Ctrl+G and
+/// Shift+Cmd+Enter into Ctrl+], which fzf can receive reliably where it can
+/// receive no Command key at all.
+///
+/// `ctrl-]` is 0x1d. Not 0x1f, which is `render::SEP` — the delimiter every
+/// rendered row already carries, and which fzf would therefore read as the
+/// start of a field rather than as a keypress.
+const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g,ctrl-]";
 
 /// How `→` says "open the action panel" without being an `--expect` key.
 ///
@@ -354,6 +363,22 @@ pub fn search() -> i32 {
                     }
                 };
             }
+            // Shift+Cmd+Enter, translated by the panel's Ghostty config. It
+            // opens a *new* Ghostty standing in this row's directory, which
+            // is the one thing the launcher cannot hand over as text: a
+            // command to cd somewhere is only useful in a shell you already
+            // have, and the point here is not having one.
+            "ctrl-]" => {
+                let Some(directory) = terminal_directory(&item) else { continue };
+                crate::frecency::bump(&item.cmd);
+                return match crate::global::open_directory(&directory) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        note(&error);
+                        2
+                    }
+                };
+            }
             "ctrl-g" => continue,
             _ => return apply_default(&item),
         }
@@ -364,6 +389,27 @@ pub(crate) fn containing_directory(item: &Item) -> Option<std::path::PathBuf> {
     matches!(item.kind, Kind::File | Kind::Find)
         .then(|| std::path::Path::new(item.get("path")).parent().map(std::path::Path::to_path_buf))
         .flatten()
+}
+
+/// The folder Shift+Cmd+Enter should stand a terminal in.
+///
+/// One meaning, applied consistently: *the directory this row is in*. For a
+/// file that is its parent, which is the same place Cmd+Enter opens in
+/// Finder; for a folder it is the folder itself, because a folder row is
+/// already at the place you would want the prompt to be, and sending a
+/// terminal to its parent instead would be the launcher being clever.
+///
+/// Nothing else answers. A history entry or an agent has no directory that is
+/// *its*, and a key that guesses one for them would stop meaning one thing.
+pub fn terminal_directory(item: &Item) -> Option<std::path::PathBuf> {
+    match item.kind {
+        Kind::File | Kind::Find => containing_directory(item),
+        Kind::Dir => {
+            let path = item.get("path");
+            (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+        }
+        _ => None,
+    }
 }
 
 /// Carry out whatever Enter means for this item.
