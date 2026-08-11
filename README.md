@@ -28,15 +28,16 @@ curl -fsSL https://raw.githubusercontent.com/mikewang817/Prelude/main/install.sh
 The installer supports Apple Silicon and Intel Macs. It downloads the latest
 checksum-verified Prelude release, reuses a compatible `fzf` or installs a
 private copy, installs the official Ghostty app in `~/Applications` when
-needed, adds a managed block to `~/.zshrc`, and installs the global panel as a
-LaunchAgent.
+needed, adds managed blocks to `~/.zshrc` and Ghostty's ordinary configuration,
+and installs the global panel as a LaunchAgent. The Ghostty block translates
+`Ctrl+Enter` and `Ctrl+Shift+Enter` only; uninstall removes it.
 
 On first install, enable Ghostty in **System Settings → Privacy & Security →
 Accessibility** when prompted. Prelude checks Ghostty's actual global event-tap
 result before reporting the shortcut ready.
 
 - **`Cmd+Shift+Space`** reveals the global panel from anywhere.
-- **`Ctrl+R`** opens the inline launcher in zsh shells started after installation.
+- **`Ctrl+R`** opens the same full launcher in zsh shells started after installation.
 
 Run the same installer command again to upgrade or repair the integration.
 Check it with `prelude global status`.
@@ -50,22 +51,24 @@ commands and coding agents.
 | Typical desktop launcher | Prelude |
 |---|---|
 | Searches apps, files, and links | Also indexes shell history, `$PATH`, project scripts, clipboard objects, sessions, Skills, MCP servers, and live Agent processes |
-| Executes a command as soon as it is selected | Hands command text back to the current zsh prompt, or copies it from the global panel |
+| Executes a command as soon as it is selected | Copies command text for review from either launcher entry point |
 | Treats results as interchangeable text | Opens files, folders, apps, and URLs directly through macOS while keeping shell commands editable |
 | Adds AI as another prompt box | Shows Agent inventory, live state, sessions, capability ownership, MCP health, and waiting questions |
 | Integrates with one assistant at a time | Uses one typed registry for Claude Code, Codex, pi, and OpenCode |
 
-There are two surfaces with one result model:
+There is one launcher surface with two ways in:
 
-- The **zsh widget** can insert a command or, for an explicit run action, submit
-  it to that shell.
-- The **global Ghostty panel** has no destination shell. Any command it hands
-  over is copied, then the panel closes so you can paste it where you intend.
-- External objects act directly on both surfaces. `Enter` states its current
-  behavior in the footer; `Ctrl+K` opens the alternatives.
+- **`Ctrl+R` in zsh** and the **global Ghostty chord** show the same full layout,
+  catalogue, labels, actions and directory shortcuts.
+- Commands are copied from either entry point; neither launcher edits or
+  submits a shell line. External objects act directly through macOS.
+- Both stand in the directory selected by `prelude global directory`, so
+  project-derived rows cannot change merely because a different key opened the
+  launcher.
 
-This avoids a launcher guessing which terminal, tab, pane, or working directory
-you meant.
+`Enter` states its current behavior in the footer; `Ctrl+K` opens the
+alternatives. This avoids a launcher guessing which terminal, tab, pane, or
+working directory you meant.
 
 ## Agent control plane
 
@@ -187,8 +190,8 @@ prelude quicklink check
 | `Ctrl+R` | Search shell history with the text already typed; again to come back |
 | `Ctrl+K` | Open contextual actions |
 | `Ctrl+P` | Toggle Quick Look when enabled |
-| `Ctrl+Enter` | Open a file's containing folder in Finder, from the global panel |
-| `Ctrl+Shift+Enter` | Open a new Ghostty standing in that folder, from the global panel |
+| `Ctrl+Enter` | Open a file's containing folder in Finder |
+| `Ctrl+Shift+Enter` | Open a new Ghostty standing in that folder |
 | `→` | Open the focused row's actions, when nothing is typed |
 | `←` | Go back one level, when nothing is typed |
 | `Escape` | Go back one level; close Prelude at the outermost one |
@@ -199,8 +202,8 @@ search: the first press opens Prelude, the second moves what you type into the
 
 ## Boundaries
 
-- Prelude is macOS-only. The global panel requires Ghostty; the inline launcher
-  requires zsh.
+- Prelude is macOS-only and uses Ghostty for both entry points; the shell
+  shortcut additionally requires zsh.
 - Prelude's own indexes, preferences, clipboard records, capability metadata,
   and message bus stay in its XDG directories. Agent CLIs, MCP checks, web
   searches, and currency conversion use the network only when explicitly asked.

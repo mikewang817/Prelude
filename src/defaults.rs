@@ -1,30 +1,29 @@
-//! What Enter does, and why it depends on where you are.
+//! What Enter does, and why it depends on what the row is.
 //!
-//! "Enter inserts, it does not execute" exists to stop a launcher from
-//! silently running destructive shell commands. It was over-generalised into
-//! "everything must go through the command line", which is wrong: the list
-//! holds two different kinds of thing.
+//! "Enter hands commands over; it does not execute them" stops a launcher
+//! from silently running destructive shell commands. It must not become
+//! "everything goes through a command line", because the list holds two
+//! different kinds of thing.
 //!
 //!   * **Commands** — history, scripts, $PATH, snippets, ports, processes.
-//!     Inserting is exactly right; you want to read them before they run.
+//!     Copying is right; you can read and edit them before they run.
 //!   * **Objects** — files, apps, links, skills, results. You wanted to *use*
-//!     the thing. Getting a path pasted onto your prompt is a step backwards,
-//!     and opening a file is harmless and reversible in a way that
+//!     the thing. Getting only a path copied is a step backwards, and opening
+//!     a file is harmless and reversible in a way that
 //!     `kill $(lsof -ti tcp:3000)` is not.
 //!
-//! There is one host. A command goes where the person can read it before it
-//! runs — onto the prompt at a shell, onto the clipboard from the panel — and
-//! an object is handed to the application that owns it. Prelude used to have a
-//! second host, the popup over an agent's input box, where every one of these
-//! answers inverted; that surface was tmux's and left with it.
+//! There is one handoff. A command goes to the clipboard where the person can
+//! read and edit it before it runs, whether Prelude was opened from a shell or
+//! from the global chord. An object is handed to the application that owns it.
+//! The two entry points must not produce two action vocabularies.
 
 use crate::item::{Item, Kind};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Default_ {
-    /// Put the command on the prompt for review. The original behaviour.
+    /// Hand the command over for review.
     Insert,
-    /// Put a path/name/result on the prompt rather than a command.
+    /// Hand over a path/name/result rather than a command.
     InsertText(Text),
     /// Do the obvious harmless thing to the object.
     Act(Verb),
@@ -50,38 +49,23 @@ pub enum Text {
 
 /// Where handed-over text lands.
 ///
-/// The zsh widget puts a command on the line you are standing at. The global
-/// panel has no line — it is not the destination, and it stands down as soon
-/// as it has answered — so what it hands over goes to the clipboard instead.
-///
-/// Enter does the same thing in both. What changes is what may honestly be
-/// *said* about it: every label here states whether it acts or hands you text,
-/// and "hands you text" is two different sentences in those two surfaces. It
-/// also changes what is worth offering, because "insert it" and "run it" are
-/// opposites only where there is a shell to run it in.
+/// Runtime entry points all use `Clipboard`: opening Prelude from a terminal
+/// and opening its Quick Terminal are one launcher, not two subtly different
+/// products. `Prompt` remains an explicit input to the pure action rules so
+/// their historical opposite can still be tested, but no launcher selects it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
-    /// A shell prompt, via the zsh widget.
+    /// The retired prompt-insertion surface, retained for pure rule tests.
+    #[allow(dead_code)]
     Prompt,
-    /// The global panel, which copies.
+    /// The launcher surface: commands copy, objects act.
     Clipboard,
 }
 
-/// The surface this process is drawing for.
-///
-/// Read at each entry point rather than threaded down from one: fzf's footer
-/// and preview helpers are separate processes, so the panel declares it in the
-/// environment of the launcher it starts and every descendant inherits it. An
-/// argument would have to be re-attached to each of those command lines.
-///
-/// Everything below takes it as a parameter regardless, so the rules stay
-/// decidable without a process to read it out of.
+/// The one runtime surface. Everything below still takes it as a parameter so
+/// action rules stay decidable without reading process state.
 pub fn surface() -> Surface {
-    if std::env::var_os("PRELUDE_TO_CLIPBOARD").is_some_and(|v| !v.is_empty()) {
-        Surface::Clipboard
-    } else {
-        Surface::Prompt
-    }
+    Surface::Clipboard
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,7 +102,7 @@ pub fn on_enter(item: &Item) -> Default_ {
     // Starting an agent with a prompt is a request for an answer, not for a
     // command to review. Run it here and show what it says. Resuming an
     // existing session is different — you want that in a real terminal, so
-    // it still goes onto the prompt.
+    // its resume command is copied for you to place there.
     if item.kind == Session && item.get("mode") == "start" {
         return Act(Verb::RunHere);
     }
@@ -130,7 +114,8 @@ pub fn on_enter(item: &Item) -> Default_ {
     }
     // A newer release. `prelude update` has no arguments anybody would add,
     // so there is nothing to hand over and nothing to edit — the reason
-    // commands go to the prompt does not apply, and the row's whole purpose
+    // commands are copied for review does not apply, and the row's whole
+    // purpose
     // is the thing it would have made you paste somewhere.
     if item.get("update") == "available" {
         return Act(Verb::RunHere);
@@ -215,7 +200,7 @@ pub fn on_secondary(item: &Item, surface: Surface) -> Option<Default_> {
         // came out of — are named in the panel rather than compressed into
         // one unlabelled opposite.
         Msg => return None,
-        // Primary inserts a command, so the secondary runs it.
+        // On the retired prompt surface, inserting and running are opposites.
         History | Script | Path | Snippet | Ssh | Container | Git | Sys => {
             Act(Verb::RunInShell)
         }
@@ -231,9 +216,8 @@ pub fn on_secondary(item: &Item, surface: Surface) -> Option<Default_> {
         File | Find | Config => InsertText(Text::AbsolutePath),
         App | Mcp | Skill => InsertText(Text::Name),
         Link => InsertText(Text::Name),
-        // Primary copies the result, so the secondary puts it on the prompt.
+        // These were text-vs-clipboard opposites on the prompt surface.
         Calc | Translate => Insert,
-        // Primary pastes it; the secondary puts it on the system clipboard.
         Clip => Act(Verb::CopyResult),
         Session => Act(Verb::CdThere),
         Dir => InsertText(Text::AbsolutePath),
@@ -246,7 +230,9 @@ pub fn on_secondary(item: &Item, surface: Surface) -> Option<Default_> {
     // "Insert it" and "run it" are opposites only where there is a shell to
     // run it in. On the clipboard they are the same bytes, and two rows
     // saying the same thing is worse than one.
-    if surface == Surface::Clipboard && alt == Act(Verb::RunInShell) {
+    if surface == Surface::Clipboard
+        && (alt == Act(Verb::RunInShell) || matches!(item.kind, Calc | Translate | Clip))
+    {
         return None;
     }
     Some(alt)
@@ -289,7 +275,6 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
             "hotkey" => "Change the chord…",
             "paneldir" => "Change the directory…",
             "key" => "Change the key…",
-            "height" => "Change the height…",
             "preview" => {
                 if item.fields.first().map(String::as_str) == Some("on") {
                     "Turn Quick Look off"
@@ -305,7 +290,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
             },
             "enter" => {
                 if item.fields.first().map(String::as_str) == Some("per kind") {
-                    "Switch to insert-everything"
+                    "Switch to copy-everything"
                 } else {
                     "Switch to per-kind"
                 }
@@ -345,7 +330,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
         };
     }
     if d == Default_::InsertText(Text::Name) && item.kind == Kind::Link {
-        return "Insert URL";
+        return if surface == Surface::Clipboard { "Copy URL" } else { "Insert URL" };
     }
     if d == Default_::Act(Verb::Open) && item.kind == Kind::Dir {
         return "Open in Finder";

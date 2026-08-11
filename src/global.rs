@@ -1,9 +1,10 @@
 //! Production macOS global hotkey integration.
 //!
 //! The latency-sensitive launcher remains a terminal program. This module is
-//! reached only through an explicit `prelude global ...` command and manages
-//! the hidden Ghostty instance that owns the chord and hosts the panel. No GUI
-//! framework or hotkey dependency is linked into the Prelude binary itself.
+//! reached through `prelude global ...` and panel/update startup. It manages
+//! the hidden Ghostty instance and the marked ordinary-Ghostty key block that
+//! keeps both launcher entry points identical. No GUI framework or hotkey
+//! dependency is linked into the Prelude binary itself.
 //!
 //! There is no terminal backend to choose. There was, while a press built a
 //! window to leave a command in; the panel copies instead, so the only
@@ -24,6 +25,13 @@ const LEGACY_DEFAULT_HOTKEY: &str = "cmd+space";
 /// loop. Ghostty registers the chord itself, so nothing of Prelude's runs at
 /// press time and there is no terminal to build.
 const QUICK_CONFIG: &str = "quick-terminal.ghostty";
+const TERMINAL_BINDINGS_START: &str = "# >>> Prelude launcher keys >>>";
+const TERMINAL_BINDINGS_END: &str = "# <<< Prelude launcher keys <<<";
+const TERMINAL_BINDINGS: &str = "# >>> Prelude launcher keys >>>\n\
+# Keep Prelude opened from a terminal identical to its Quick Terminal.\n\
+keybind = ctrl+enter=text:\\x07\n\
+keybind = ctrl+shift+enter=text:\\x1d\n\
+# <<< Prelude launcher keys <<<\n";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Hotkey {
@@ -238,6 +246,15 @@ fn effective_directory(config: &GlobalConfig) -> PathBuf {
         .unwrap_or_else(crate::paths::home)
 }
 
+fn available_directory(config: &GlobalConfig) -> PathBuf {
+    let directory = effective_directory(config);
+    if directory.is_dir() {
+        directory
+    } else {
+        crate::paths::home()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct GlobalStatus {
     pub schema: u8,
@@ -256,10 +273,11 @@ pub struct GlobalStatus {
     /// False when a source could not be read, so an absent owner means none
     /// was found rather than none exists.
     pub owner_checks_complete: bool,
-    /// Where the panel itself stands, and whether it is still there.
+    /// Where both launcher entry points stand, and whether it is still there.
     pub launch_directory: String,
     pub launch_directory_exists: bool,
     pub ghostty_available: Option<bool>,
+    pub terminal_bindings_installed: bool,
     pub zsh_widget_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event: Option<serde_json::Value>,
@@ -445,6 +463,13 @@ pub fn config_file() -> PathBuf {
     config_path()
 }
 
+/// The one directory both launcher entry points stand in.
+pub fn launch_directory() -> PathBuf {
+    configured()
+        .map(|config| available_directory(&config))
+        .unwrap_or_else(|_| crate::paths::home())
+}
+
 /// Set the chord from the settings panel, with the same validation, the same
 /// conflict check and the same panel restart the CLI performs.
 pub fn set_hotkey(value: &str) -> Result<String, String> {
@@ -479,6 +504,7 @@ pub fn restart_panel() -> Result<String, String> {
     if !quick_config_path().is_file() {
         return Err("the launcher panel is not installed; run `prelude global install`".into());
     }
+    ensure_terminal_bindings()?;
     // A rebuild can change both the parent loop and Prelude-owned Ghostty
     // bindings. Refresh while the old panel is still healthy, then replace it.
     write_quick_config(&quick_config_path())?;
@@ -729,7 +755,7 @@ fn generated_quick_config() -> Result<String, String> {
     let config = configured()?;
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not find the Prelude binary: {e}"))?;
-    Ok(quick_config(&exe, &config.hotkey, &effective_directory(&config)))
+    Ok(quick_config(&exe, &config.hotkey, &available_directory(&config)))
 }
 
 fn write_quick_config_body(destination: &Path, body: &str) -> Result<(), String> {
@@ -748,6 +774,119 @@ fn write_quick_config_body(destination: &Path, body: &str) -> Result<(), String>
 
 fn write_quick_config(destination: &Path) -> Result<(), String> {
     write_quick_config_body(destination, &generated_quick_config()?)
+}
+
+fn ghostty_config_path() -> PathBuf {
+    crate::paths::config()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("ghostty/config")
+}
+
+fn replace_terminal_bindings(text: &str, replacement: Option<&str>) -> Result<String, String> {
+    if let Some(start) = text.find(TERMINAL_BINDINGS_START) {
+        let tail = &text[start..];
+        let end = tail
+            .find(TERMINAL_BINDINGS_END)
+            .ok_or("the Prelude block in Ghostty's config has no closing marker")?
+            + start
+            + TERMINAL_BINDINGS_END.len();
+        let end = if text.as_bytes().get(end) == Some(&b'\n') { end + 1 } else { end };
+        if text[end..].contains(TERMINAL_BINDINGS_START)
+            || text[end..].contains(TERMINAL_BINDINGS_END)
+        {
+            return Err("Ghostty's config contains more than one Prelude key block".into());
+        }
+        let mut out = String::with_capacity(text.len() + replacement.map(str::len).unwrap_or(0));
+        out.push_str(&text[..start]);
+        if let Some(block) = replacement {
+            out.push_str(block);
+        }
+        out.push_str(&text[end..]);
+        return Ok(out);
+    }
+    if text.contains(TERMINAL_BINDINGS_END) {
+        return Err("the Prelude block in Ghostty's config has no opening marker".into());
+    }
+    let Some(block) = replacement else { return Ok(text.to_string()) };
+    let mut out = text.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(block);
+    Ok(out)
+}
+
+fn terminal_config_destination(path: &Path) -> Result<PathBuf, String> {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return Ok(path.to_path_buf());
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+    let target = std::fs::read_link(path)
+        .map_err(|e| format!("could not follow {}: {e}", path.display()))?;
+    Ok(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    })
+}
+
+fn write_terminal_config(path: &Path, text: &str) -> Result<(), String> {
+    let destination = terminal_config_destination(path)?;
+    let mode = std::fs::metadata(&destination).ok().map(|metadata| {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode()
+    });
+    crate::cache::write_atomic(&destination, text.as_bytes())
+        .map_err(|e| format!("could not update {}: {e}", destination.display()))?;
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(mode));
+    }
+    Ok(())
+}
+
+fn reload_all_ghostty_configs() {
+    let pids = crate::exec::run(&["/usr/bin/pgrep", "-x", "ghostty"], Duration::from_secs(2))
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect::<Vec<u32>>();
+    signal_config_reload(pids);
+}
+
+fn ensure_terminal_bindings() -> Result<bool, String> {
+    let path = ghostty_config_path();
+    let _lock = crate::cache::lock_for_write(&path)
+        .ok_or("Ghostty's config is busy; try again")?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = replace_terminal_bindings(&text, Some(TERMINAL_BINDINGS))?;
+    if updated == text {
+        return Ok(false);
+    }
+    write_terminal_config(&path, &updated)?;
+    reload_all_ghostty_configs();
+    Ok(true)
+}
+
+fn terminal_bindings_installed() -> bool {
+    let Ok(text) = std::fs::read_to_string(ghostty_config_path()) else { return false };
+    replace_terminal_bindings(&text, Some(TERMINAL_BINDINGS)).is_ok_and(|updated| updated == text)
+}
+
+fn remove_terminal_bindings() -> Result<bool, String> {
+    let path = ghostty_config_path();
+    let _lock = crate::cache::lock_for_write(&path)
+        .ok_or("Ghostty's config is busy; try again")?;
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let updated = replace_terminal_bindings(&text, None)?;
+    if updated == text {
+        return Ok(false);
+    }
+    write_terminal_config(&path, &updated)?;
+    reload_all_ghostty_configs();
+    Ok(true)
 }
 
 /// Bring Prelude-owned Ghostty settings forward with the binary that owns
@@ -769,9 +908,10 @@ pub fn refresh_panel_config_if_changed() -> Result<bool, String> {
     if !destination.is_file() {
         return Ok(false);
     }
+    let terminal_changed = ensure_terminal_bindings()?;
     let body = generated_quick_config()?;
     if std::fs::read(&destination).ok().as_deref() == Some(body.as_bytes()) {
-        return Ok(false);
+        return Ok(terminal_changed);
     }
     write_quick_config_body(&destination, &body)?;
     reload_quick_config();
@@ -779,6 +919,10 @@ pub fn refresh_panel_config_if_changed() -> Result<bool, String> {
 }
 
 fn reload_quick_config() {
+    signal_config_reload(instance_pids());
+}
+
+fn signal_config_reload(pids: Vec<u32>) {
     #[cfg(target_os = "macos")]
     const SIGUSR2: i32 = 31;
     #[cfg(not(target_os = "macos"))]
@@ -786,7 +930,7 @@ fn reload_quick_config() {
     unsafe extern "C" {
         unsafe fn kill(pid: i32, signal: i32) -> i32;
     }
-    for pid in instance_pids() {
+    for pid in pids {
         unsafe {
             let _ = kill(pid as i32, SIGUSR2);
         }
@@ -1032,6 +1176,7 @@ fn ensure_global_key_ready() -> Result<(), String> {
 }
 
 fn start_current() -> Result<(), String> {
+    ensure_terminal_bindings()?;
     if quick_config_path().is_file() {
         write_quick_config(&quick_config_path())?;
     }
@@ -1180,9 +1325,10 @@ fn install() -> Result<String, String> {
     // of an installation that looks successful while Cmd+Shift+Space does
     // nothing. Resolve the permission now and verify Ghostty's own result.
     ensure_global_key_ready()?;
+    ensure_terminal_bindings()?;
 
     let mut result = format!(
-        "installed {}\nhotkey: {}\npanel stands in: {}\n",
+        "installed {}\nhotkey: {}\nlauncher stands in: {}\nterminal directory keys: installed\n",
         destination.display(),
         config.hotkey.canonical(),
         effective_directory(&config).display(),
@@ -1200,6 +1346,7 @@ fn install() -> Result<String, String> {
 
 fn uninstall(reset: bool) -> Result<String, String> {
     stop_helper();
+    remove_terminal_bindings()?;
     let agent = launch_agent_path();
     if agent.exists() {
         let _ = launchctl(&["bootout", &domain(), &agent.to_string_lossy()]);
@@ -1220,9 +1367,9 @@ fn uninstall(reset: bool) -> Result<String, String> {
         }
     }
     Ok(if reset {
-        "removed the launcher panel and its Prelude-owned preferences".into()
+        "removed the launcher panel, terminal keybindings and Prelude-owned preferences".into()
     } else {
-        "removed the launcher panel; preferences retained".into()
+        "removed the launcher panel and terminal keybindings; preferences retained".into()
     })
 }
 
@@ -1398,7 +1545,7 @@ pub fn status() -> GlobalStatus {
         EventTapState::Pending => None,
     };
     GlobalStatus {
-        schema: 6,
+        schema: 7,
         app_installed: installed,
         launch_agent_installed: launch_agent_path().is_file(),
         helper_supervised: service_loaded(),
@@ -1413,6 +1560,7 @@ pub fn status() -> GlobalStatus {
         launch_directory: directory.to_string_lossy().into_owned(),
         launch_directory_exists: directory.is_dir(),
         ghostty_available: Some(ghostty_app().is_some()),
+        terminal_bindings_installed: terminal_bindings_installed(),
         zsh_widget_available: zsh_widget_available(),
         last_event: None,
     }
@@ -1472,6 +1620,15 @@ fn print_status(json: bool) -> i32 {
             },
         );
         line(
+            "terminal keybindings",
+            s.terminal_bindings_installed,
+            if s.terminal_bindings_installed {
+                "Ctrl+Enter and Ctrl+Shift+Enter match the Quick Terminal"
+            } else {
+                "run: prelude global start"
+            },
+        );
+        line(
             "zsh widget",
             s.zsh_widget_available,
             if s.zsh_widget_available {
@@ -1481,7 +1638,7 @@ fn print_status(json: bool) -> i32 {
             },
         );
         println!(
-            "  {} panel stands in  {}{}",
+            "  {} launcher stands in  {}{}",
             if s.launch_directory_exists { "✓" } else { "✗" },
             s.launch_directory,
             if s.launch_directory_exists {
@@ -1517,6 +1674,7 @@ fn print_status(json: bool) -> i32 {
         && s.accessibility_granted == Some(true)
         && s.hotkey_registered
         && s.ghostty_available == Some(true)
+        && s.terminal_bindings_installed
         && s.hotkey_owner.is_none()
     {
         0
@@ -1651,11 +1809,19 @@ mod tests {
         std::fs::write(&path, "hotkey = \"cmd+space\"\ndirectory = \"/tmp\"\n").unwrap();
         let config = config_from(&path).unwrap();
         assert_eq!(effective_directory(&config), PathBuf::from("/tmp"));
+        assert_eq!(available_directory(&config), PathBuf::from("/tmp"));
         assert!(!config_body(&config).contains("directory = \"\""));
         assert!(config_body(&config).contains("directory = \"/tmp\""));
 
         std::fs::write(&path, "directory = \"nope\"\n").unwrap();
         assert!(config_from(&path).unwrap_err().contains("absolute"));
+        let missing_path = temp("missing-directory");
+        let _ = std::fs::remove_dir_all(&missing_path);
+        let missing = GlobalConfig {
+            directory: Some(missing_path),
+            ..GlobalConfig::default()
+        };
+        assert_eq!(available_directory(&missing), home);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1817,6 +1983,39 @@ mod tests {
         assert!(config.contains("env = PATH="));
         assert!(config.contains("quick-terminal-position = center"));
         assert!(config.contains("quick-terminal-autohide = true"));
+    }
+
+    #[test]
+    fn ordinary_ghostty_gets_the_same_directory_chords_without_losing_its_config() {
+        let original = "font-size = 13\n# kept\n";
+        let installed = replace_terminal_bindings(original, Some(TERMINAL_BINDINGS)).unwrap();
+        assert!(installed.starts_with(original));
+        assert!(installed.contains(r"keybind = ctrl+enter=text:\x07"));
+        assert!(installed.contains(r"keybind = ctrl+shift+enter=text:\x1d"));
+        assert_eq!(
+            replace_terminal_bindings(&installed, Some(TERMINAL_BINDINGS)).unwrap(),
+            installed,
+            "install and update are idempotent",
+        );
+        assert_eq!(replace_terminal_bindings(&installed, None).unwrap(), original);
+        assert!(replace_terminal_bindings(TERMINAL_BINDINGS_START, Some(TERMINAL_BINDINGS))
+            .unwrap_err()
+            .contains("closing marker"));
+        assert!(replace_terminal_bindings(TERMINAL_BINDINGS_END, Some(TERMINAL_BINDINGS))
+            .unwrap_err()
+            .contains("opening marker"));
+        let duplicate = format!("{TERMINAL_BINDINGS}{TERMINAL_BINDINGS}");
+        assert!(replace_terminal_bindings(&duplicate, Some(TERMINAL_BINDINGS))
+            .unwrap_err()
+            .contains("more than one"));
+
+        let root = temp("ghostty-config-link");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("config");
+        std::os::unix::fs::symlink("real-config", &link).unwrap();
+        assert_eq!(terminal_config_destination(&link).unwrap(), root.join("real-config"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

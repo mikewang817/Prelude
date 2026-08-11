@@ -466,11 +466,7 @@ fn footer_for_line(line: &str) -> String {
         .as_ref()
         .map(|item| defaults::describe(item, defaults::surface()))
         .unwrap_or("Select");
-    ui::footer_for_item(
-        primary,
-        item.as_ref(),
-        std::env::var_os("PRELUDE_FULL_SURFACE").is_some_and(|value| !value.is_empty()),
-    )
+    ui::footer_for_item(primary, item.as_ref(), true)
 }
 
 /// Pure focus rule: every real clipboard row gets the same right-hand pane.
@@ -1033,6 +1029,11 @@ mod tests {
     }
 
     #[test]
+    fn every_launcher_level_uses_the_full_terminal() {
+        assert!(!include_str!("ui.rs").contains("--height"));
+    }
+
+    #[test]
     fn the_directory_chords_are_advertised_only_where_they_exist() {
         use crate::item::{Item, Kind};
         let file = Item::new("/tmp/project/readme.md", Kind::Find)
@@ -1042,8 +1043,8 @@ mod tests {
             Some(std::path::Path::new("/tmp/project")),
         );
         assert!(crate::ui::footer_for_item("Open it", Some(&file), true).contains("Open folder"));
-        // Neither shortcut exists on the inline surface: Prelude owns the
-        // panel's Ghostty configuration and nobody else's.
+        // The helper still makes capability explicit, even though both
+        // launcher entry points now pass true.
         let inline = crate::ui::footer_for_item("Open it", Some(&file), false);
         assert!(!inline.contains("Ctrl+Enter"));
 
@@ -1440,8 +1441,8 @@ mod tests {
         let row = crate::update::row("9.9.9");
         // It is a Sys row, and Sys hands its command over — which is right for
         // every other Sys row and wrong for this one: `prelude update` has no
-        // argument anybody would add, so the reason commands go to the prompt
-        // does not apply, and copying it made the row a detour to itself.
+        // argument anybody would add, so the reason commands copy for review
+        // does not apply; making the row a copy action was a detour to itself.
         assert_eq!(row.kind, crate::item::Kind::Sys);
         assert_eq!(on_enter(&crate::item::Item::new("df -h", crate::item::Kind::Sys)),
                    Default_::Insert, "an ordinary system command still hands over");
@@ -1848,11 +1849,11 @@ mod tests {
         use crate::defaults::{describe, describe_secondary, Surface};
         use crate::item::{Item, Kind};
         let it = Item::new("/tmp/x.txt", Kind::File).title("x.txt").put("path", "/tmp/x.txt");
-        let acts = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt);
+        let acts = crate::actions::actions_for(&it, crate::defaults::Surface::Clipboard);
         assert!(!acts.iter().any(|(id, ..)| *id == "default"));
-        assert!(!acts.iter().any(|(_, label, ..)| label == describe(&it, Surface::Prompt)));
+        assert!(!acts.iter().any(|(_, label, ..)| label == describe(&it, Surface::Clipboard)));
         assert_eq!(acts[0].0, "secondary");
-        assert_eq!(acts[0].1, describe_secondary(&it, Surface::Prompt).unwrap());
+        assert_eq!(acts[0].1, describe_secondary(&it, Surface::Clipboard).unwrap());
         assert_eq!(acts[0].2, "");
     }
 
@@ -1862,13 +1863,13 @@ mod tests {
     fn common_objects_have_intentional_action_menus() {
         use crate::item::{Item, Kind};
         let ids = |it: &Item| -> Vec<String> {
-            crate::actions::actions_for(it, crate::defaults::Surface::Prompt).iter().map(|(id, ..)| id.to_string()).collect()
+            crate::actions::actions_for(it, crate::defaults::Surface::Clipboard).iter().map(|(id, ..)| id.to_string()).collect()
         };
 
         let file = Item::new("/tmp/readme.md", Kind::File).put("path", "/tmp/readme.md");
         assert_eq!(
             ids(&file),
-            ["secondary", "openwith", "open", "reveal-finder", "copy-file", "copyabs", "openalways", "quicklink-create", "trash"]
+            ["secondary", "openwith", "open", "reveal-finder", "copy-file", "openalways", "quicklink-create", "trash"]
         );
 
         let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
@@ -1876,10 +1877,10 @@ mod tests {
 
         // A URL is where a `{q}` template comes from, so it carries both.
         let link = Item::new("https://example.com", Kind::Link).put("url", "https://example.com");
-        assert_eq!(ids(&link), ["secondary", "copy", "quicklink-create", "quicklink-template"]);
+        assert_eq!(ids(&link), ["secondary", "quicklink-create", "quicklink-template"]);
 
         let dir = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
-        assert_eq!(ids(&dir), ["secondary", "copy-file", "insert", "copy", "quicklink-create"]);
+        assert_eq!(ids(&dir), ["secondary", "copy-file", "insert", "quicklink-create"]);
 
         let linked = Item::new("/tmp/readme.md", Kind::File)
             .put("path", "/tmp/readme.md")
@@ -1914,13 +1915,20 @@ mod tests {
 
         let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
         let clip_ids = ids(&clip);
-        assert_eq!(clip_ids, ["secondary", "tr_en", "tr_zh"]);
+        assert_eq!(clip_ids, ["tr_en", "tr_zh"]);
 
         let image_clip = Item::new("'/tmp/image.png'", Kind::Clip)
             .put("clip_kind", "image")
             .put("path", "/tmp/image.png");
-        assert_eq!(ids(&image_clip), ["secondary", "openit", "reveal-finder", "copyabs"]);
+        assert_eq!(ids(&image_clip), ["openit", "reveal-finder", "copyabs"]);
         assert!(!clip_ids.iter().any(|id| id == "run" || id == "runhere"));
+
+        let run = Item::new("kill 7", Kind::Run).put("cwd", "/tmp/project");
+        assert!(!ids(&run).contains(&"cdrun".to_string()), "Enter already copies its cd");
+        let active = Item::new("claude --resume x", Kind::Session)
+            .put("cwd", "/tmp/project")
+            .put("active_run", "claude:7:1");
+        assert!(!ids(&active).contains(&"cdsession".to_string()), "Enter already copies its cd");
     }
 
     #[test]
@@ -2288,6 +2296,10 @@ mod tests {
             assert!(!ids.contains(&"run"), "{k:?} generic tail: {ids:?}");
             assert!(!ids.contains(&"secondary"), "{k:?} panel: {ids:?}");
         }
+        for k in [Kind::Calc, Kind::Translate, Kind::Clip] {
+            let it = Item::new("the same bytes", k);
+            assert_eq!(on_secondary(&it, Surface::Clipboard), None, "{k:?}");
+        }
         // …and the same rows are there at a prompt, where they mean something.
         let it = Item::new("deploy --prod", Kind::History);
         let ids: Vec<&str> = crate::actions::actions_for(&it, Surface::Prompt)
@@ -2307,6 +2319,7 @@ mod tests {
         let it = Item::new("claude", Kind::Agent).put("agent", "claude");
         assert_eq!(describe(&it, Surface::Prompt), "Insert into prompt");
         assert_eq!(describe(&it, Surface::Clipboard), "Copy the command");
+        assert_eq!(crate::defaults::surface(), Surface::Clipboard);
         // Acting is the same sentence in both: a file opens either way.
         let f = Item::new("/tmp/x.txt", Kind::File).put("path", "/tmp/x.txt");
         assert_eq!(describe(&f, Surface::Prompt), describe(&f, Surface::Clipboard));

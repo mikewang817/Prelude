@@ -55,18 +55,14 @@ enum After {
 /// zsh widget has always consumed and is worth having exactly one of. fzf
 /// draws on `/dev/tty`, so capturing stdout takes nothing away from it.
 ///
-/// The child is told two things about the surface it is drawing into, both by
-/// environment so that fzf's per-keystroke helpers inherit them for free:
-/// the window is entirely ours, and text it hands over will be copied rather
-/// than put on a prompt. The second is what keeps every label in the footer
-/// and the action panel honest.
+/// The child is told that the window is entirely ours. Text handoff no longer
+/// needs a surface declaration: every launcher entry point uses the clipboard.
 fn once() -> (i32, After) {
     let Ok(exe) = std::env::current_exe() else {
         return (2, After::Continue);
     };
     let Ok(out) = Command::new(exe)
         .env("PRELUDE_FULL_SURFACE", "1")
-        .env("PRELUDE_TO_CLIPBOARD", "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -94,8 +90,8 @@ fn once() -> (i32, After) {
     match verb {
         // INSERT and RUN are one thing here. The difference between them is
         // whether a shell should press Enter for you, and there is no shell in
-        // this surface to press it in — the distinction survives at the zsh
-        // widget, which is the only place it can mean anything.
+        // this surface to press it in. The protocol names survive only so a
+        // panel parent loaded from an older release remains compatible.
         "INSERT" | "RUN" => {
             crate::ui::copy(payload);
             println!("copied: {}", crate::width::flatten(payload));
@@ -203,7 +199,7 @@ mod tests {
         let body = source.split("fn once()").nth(1).expect("the launcher call");
         let body = &body[..body.find("\n/// `prelude _panel`").unwrap_or(body.len())];
         assert!(body.contains("PRELUDE_FULL_SURFACE"));
-        assert!(body.contains("PRELUDE_TO_CLIPBOARD"));
+        assert!(!body.contains("PRELUDE_TO_CLIPBOARD"));
     }
 
     /// Nothing in this module may reach for a terminal or a pane. Both used to

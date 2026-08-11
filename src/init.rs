@@ -21,14 +21,10 @@ _prelude_widget() {
   verb="${out%%$'\t'*}"
   payload="${out#*$'\t'}"
   case "$verb" in
-    INSERT)
-      # The whole point: put it on the prompt, let the human press Enter.
-      LBUFFER="$payload"
-      RBUFFER=""
-      ;;
-    RUN)
-      BUFFER="$payload"
-      zle accept-line
+    COPIED)
+      # Prelude performs the copy before returning, so a shell that loaded an
+      # older widget cannot accidentally put the command back on its prompt.
+      zle -M "prelude: copied to clipboard"
       ;;
     MSG)
       # Something was refused, or failed, and said why. `zle -M` prints
@@ -149,7 +145,8 @@ mod tests {
 
     #[test]
     fn the_widget_is_the_only_thing_this_shell_learns() {
-        // The three verbs, and nothing else. There used to be a second block
+        // Clipboard confirmation and refusal, and nothing else. There used
+        // to be a second block
         // here that bootstrapped a shell the panel had opened for a command,
         // reading the command out of a private file so it would not show up in
         // `ps`. The panel copies now: no window is opened, so no shell needs
@@ -157,10 +154,13 @@ mod tests {
         assert!(!ZSH.contains("PRELUDE_PRELOAD"));
         assert!(!ZSH.contains("prelude/preload"));
         assert!(!ZSH.contains("add-zle-hook-widget"));
-        // INSERT waits for a human to press Enter; RUN was agreed to in the
-        // launcher; MSG explains a refusal without touching the line.
-        assert!(ZSH.contains("LBUFFER=\"$payload\""));
-        assert!(ZSH.contains("zle accept-line"));
+        // The terminal widget and global panel use the same clipboard handoff;
+        // neither edits or submits the shell line. MSG still explains a
+        // refusal without touching it.
+        assert!(ZSH.contains("COPIED)"));
+        assert!(!ZSH.contains("pbcopy"));
+        assert!(!ZSH.contains("LBUFFER=\"$payload\""));
+        assert!(!ZSH.contains("zle accept-line"));
         assert!(ZSH.contains("zle -M \"prelude: $payload\""));
         assert!(!ZSH.contains("sleep "));
         assert!(!ZSH.contains("osascript"));

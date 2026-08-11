@@ -25,15 +25,13 @@ cargo clippy --release     # expected warning-free
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
 
-`PRELUDE_TO_CLIPBOARD=1` in front of any of them renders the panel's surface
-rather than the prompt's, which is how the two label sets and the two action
-lists are compared without pressing the chord:
+All launcher entry points use the clipboard surface. The internal doors render
+the same labels and action lists without needing a surface environment switch:
 
 ```sh
 LINE=$(prelude _dump | head -1)
-prelude _footer "$LINE"                        # Insert into prompt
-PRELUDE_TO_CLIPBOARD=1 prelude _footer "$LINE" # Copy the command
-PRELUDE_TO_CLIPBOARD=1 prelude _actions "$LINE"
+prelude _footer "$LINE"
+prelude _actions "$LINE"
 ```
 
 The agent-facing verbs (`ask --no-wait`, `tell`, `say`, `inbox`, `answer`,
@@ -244,7 +242,7 @@ answered `is not there` about a folder plainly on screen, which is the worst
 available wording: it names the one thing that was not wrong. Keep the literal
 reading first so a directory whose name really contains a backslash is not
 taken away by the convenience. `settings::readings_of` is shared by settings
-and computed local-path rows so the two surfaces cannot disagree. Path intent
+and computed local-path rows so launcher entry points cannot disagree. Path intent
 is lexical in `is_special`; only `dynamic_rows_with` touches the filesystem.
 An existing absolute, `~/`, `./`, `../`, `file:///` or slash-bearing relative
 path becomes a File, Folder or Application object, with ordinary Quick Look and
@@ -300,17 +298,17 @@ library and does the same walk in under 1ms. `files` stays FAST because a
 file you just created must be in `f:` on the very next press — the failure
 to avoid is a missing row.
 
-**One rule, two surfaces.** `defaults::Surface` is `Prompt` (the zsh widget)
-or `Clipboard` (the panel). It changes no behaviour — Enter does the same
-thing in both — only what may honestly be *said*: "Insert into prompt" is a
-lie about a panel that copies, so the labels switch, and the rows whose only
-content was "and submit it" disappear where nothing can submit. It is read
-from `PRELUDE_TO_CLIPBOARD` at each entry point rather than threaded down from
-one, because fzf's footer and preview helpers are separate processes and
-inherit the environment for free — but every rule below `surface()` takes it
-as a parameter, so the decisions stay testable without a process to read it
-out of. Do not reintroduce an env read inside a rule; a test that has to set a
-variable is a test that races every other test in the binary.
+**One rule, one surface, two ways in.** Ctrl+R in zsh and the global chord must
+show the same full layout, catalogue, labels, action list and directory chords.
+Both copy command text; neither edits or submits the shell line. Both stand in
+`global::launch_directory`, because gathering project rows from the invoking
+shell's cwd made the answer depend on which key opened Prelude.
+
+`defaults::surface()` therefore always returns `Clipboard`. `Surface::Prompt`
+remains only as an explicit input to pure historical-rule tests; no runtime
+entry point selects it. Keep every rule below `surface()` parameterised so it
+stays testable without process state, and do not reintroduce an environment
+switch that can make the two entry points diverge.
 
 **Escape means "back", one level at a time, and the arrows mean it only while
 there is nothing to type through.** The launcher is a stack — list, action
@@ -348,14 +346,14 @@ mode.** Graphical launchers often put a secondary action on its own key;
 Prelude keeps that action but not the key: where useful, it is the first selectable row
 below Enter's non-selectable header. Neither action is a fixed verb; both are
 per-item, and they are opposites — where one acts, the other hands you text. A
-test asserts they never coincide. The global panel has two narrower object
+test asserts they never coincide. The launcher has two narrower object
 shortcuts, not a generic secondary: Ctrl+Enter on File/Find opens the
 containing directory in Finder, and Ctrl+Shift+Enter opens a Ghostty standing
 in it. The second is the one thing this launcher cannot hand over as text — a
 `cd` is only useful in a shell you already have, and the point of the panel is
 not having one. `ui::terminal_directory` gives it a single meaning, *the
-directory this row is in*: a file's parent, and a folder itself, because a
-folder row is already where the prompt should be. Ctrl+P is different: Quick Look replaces
+directory this row is in*: a file's parent, and a folder itself. Ctrl+P is
+different: Quick Look replaces
 the result area until Ctrl+P is pressed again, without selecting or acting on
 anything. The preview is hidden by default and never owns a permanent column.
 Clipboard rows are the deliberate contextual exception: while any real row is
@@ -387,11 +385,11 @@ Option+Enter comes through as a bare Enter — running the *primary* action,
 silently. Cmd never reaches a terminal application, and neither does the
 modifier on a Return: fzf knows no `ctrl-enter`, because a bare Return carries
 nothing a terminal application can read. So the two directory shortcuts are
-Enter chords only in the fingers, and they are honest only because Prelude
-owns the dedicated panel's Ghostty config: `ctrl+enter=text:\\x07` and
-`ctrl+shift+enter=text:\\x1d` translate them to private Ctrl+G and Ctrl+],
-`EXPECT` includes both, and the footer advertises them only when
-`PRELUDE_FULL_SURFACE` and a directory-bearing row are both true.
+Enter chords only in the fingers. Prelude owns their translations in both the
+dedicated config and one marked ordinary-Ghostty block:
+`ctrl+enter=text:\\x07` and `ctrl+shift+enter=text:\\x1d` become private Ctrl+G
+and Ctrl+]. `EXPECT` includes both, and the footer advertises them whenever the
+focused row carries the corresponding directory.
 
 Ctrl+] is 0x1d and deliberately not 0x1f, which is `render::SEP` — the
 delimiter every rendered row carries, and which fzf would read as a field
@@ -400,36 +398,39 @@ boundary rather than as a key. **Ctrl+[ can never be one of these**: it is
 refuses the name outright — claiming it would take away the key that means
 "back" at every level. A test pins that.
 
-Never claim either chord on the zsh widget or alter the person's ordinary
-terminal config. The new window is opened through Launch
-Services with `-n`, for the reasons `global.rs` already documents: executing
+The chords are now part of both entry points. `global.rs` owns one marked,
+idempotent block in Ghostty's ordinary config containing exactly the two text
+translations, reloads it with `SIGUSR2`, and removes it on `global uninstall`;
+everything outside the markers remains the person's. This is the deliberate
+cost of making the terminal launcher and Quick Terminal literally one surface.
+The new window is opened through Launch Services with `-n`, for the reasons
+`global.rs` already documents: executing
 the binary directly makes it a foreground application, and without a new
 instance macOS can deliver the launch to the hidden panel, which shares
 Ghostty's bundle identity.
 
 **The line is not danger, it is whether there is anything to edit.** A
-command line goes onto the prompt — including agents, skills and sessions,
-which are the ones most often the *start* of a command (`--resume`, a model,
-a question). Safety is the second reason, not the first: `claude` is
-harmless and is still handed over. An object just happens, because nobody
-proofreads `open -a Zed foo.json`. Files therefore go to the application
-that owns them rather than to `$EDITOR`, folders go to Finder, and URLs go
-to the default browser. These external objects are passed directly to macOS
-Launch Services — never emitted as `open ...` shell commands, never written
-to the prompt or history. `openwith.rs` remembers file overrides per
-extension and `^K` is where they are made — that panel is the settings
-surface, not a second list of shortcuts.
+command line goes to the clipboard — including agents, skills and sessions,
+which are often the *start* of a command (`--resume`, a model, a question).
+Safety is the second reason, not the first: `claude` is harmless and is still
+handed over for review. An object just happens, because nobody proofreads
+`open -a Zed foo.json`. Files therefore go to the application that owns them
+rather than to `$EDITOR`, folders go to Finder, and URLs go to the default
+browser. These external objects are passed directly to macOS Launch Services —
+never emitted as `open ...` shell commands, never written to a prompt or
+history. `openwith.rs` remembers file overrides per extension and `^K` is where
+they are made — that panel is the settings surface, not a second list of
+shortcuts.
 
-**Commands are handed over, objects act.** Inserting a file path when you
-wanted to read the file is a step backwards; opening a file is harmless in a
-way that `kill $(lsof -ti tcp:3000)` is not. This does not vary by surface —
-a file opens from the panel exactly as it does from the prompt, because
-Launch Services is the destination either way. `^K` still offers the text.
+**Commands are handed over, objects act.** Copying a file path when you wanted
+to read the file is a step backwards; opening a file is harmless in a way that
+`kill $(lsof -ti tcp:3000)` is not. A file opens identically from either entry
+point because Launch Services is the destination. `^K` still offers the text.
 
 **A container is not a project, and `$HOME` is the one that bites.**
 `project::root` walks up for a marker and, finding none, used to take the
-current directory at its word. The global panel stands in `$HOME`, so "the
-files in this project" became `fd --max-depth 6` over the entire home
+current directory at its word. The configured launcher directory defaults to
+`$HOME`, so "the files in this project" became `fd --max-depth 6` over the entire home
 directory on every open — six levels into `~/Library`, which macOS protects as
 other applications' data. The symptom named neither Prelude nor the source: a
 TCC panel saying *"Ghostty would like to access data from other apps"*, because
@@ -604,8 +605,8 @@ than one that never claimed it.
 **The update row runs; it does not hand you the command.** It is a `Kind::Sys`
 row, and `Sys` hands its command over — right for every other one and wrong for
 this: `prelude update` takes no argument anybody would add, so the reason
-commands go to the prompt ("it is so often the *start* of a command") does not
-apply, and copying it made the row a detour to itself. `on_enter` checks the
+commands are copied ("they are often the *start* of a command") does not apply,
+and handing it over made the row a detour to itself. `on_enter` checks the
 `update` field before the kind, the footer says `Update now`, and `^K` keeps
 `Copy the command` because the opposite of acting is being handed the text.
 
@@ -1190,10 +1191,12 @@ credential cannot ride along in every search. Removing, renaming and
 re-pointing reach hand-written entries too, bounded by the section header
 rather than the markers; refusing them was the older behaviour and it said so
 with "that quicklink is managed in the config file", a sentence whose plain
-reading is the opposite of what it meant. Outside Prelude's
-config and caches, only explicit actions write user files: installing a skill
-copy, exporting a raw Session, or moving a selected file, application, skill
-copy or inactive native Session to the Trash. None is a default action.
+reading is the opposite of what it meant. Outside Prelude's config and caches,
+only explicit setup or actions write user files: `global install/start/update`
+own the marked two-key block in ordinary Ghostty config; capability install,
+raw Session export, and moving a selected file, application, skill copy or
+inactive native Session to the Trash are the other cases. None is a default
+launcher action.
 
 Deleting a skill copy is built so that being wrong is survivable rather than
 so that it cannot happen. It moves the directory to
@@ -1234,7 +1237,7 @@ editing the original is enough.
 
 There is a third route that needs no flag at all: hand the agent the skill's
 own file. A skill row therefore carries both bare forms in `^K` —
-`Insert the slash command` (`/name`) and `Point an agent at its file`
+`Copy the slash command` (`/name`) and `Point an agent at its file`
 (`Read <path> and follow it.`) — named, rather than one of them chosen for
 you. Prelude used to choose, by asking `pane_current_command` which agent the
 pane under the popup was running and handing its owner `/name` and everyone

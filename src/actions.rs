@@ -203,7 +203,9 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             v.push(a("details", "Show conversation details", it.get("opening")));
             if !it.get("cwd").is_empty() {
                 v.push(a("newsession", "Start fresh in this project", it.get("agent")));
-                v.push(a("cdsession", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
+                if it.get("active_run").is_empty() {
+                    v.push(a("cdsession", "Copy cd command", crate::paths::tilde(it.get("cwd"))));
+                }
             }
             if !it.get("file").is_empty() {
                 v.push(a("session-export", "Export raw conversation", "private Prelude exports folder"));
@@ -218,8 +220,8 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             }
             v
         }
-        // An agent CLI. Enter puts its name on the prompt, because that is
-        // where you add `--resume`, a model, or an opening question.
+        // An agent CLI. Enter copies its name, ready for `--resume`, a model,
+        // or an opening question in whichever terminal should run it.
         Kind::Agent => {
             let n = it.get("agent").to_string();
             let mut v = Vec::new();
@@ -263,9 +265,6 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             // than typing into a pane and it is the only delivery that does
             // not depend on where the agent happens to be running.
             v.push(a("say", "Leave it a message…", "waits in its inbox"));
-            if !it.get("cwd").is_empty() {
-                v.push(a("cdrun", "Insert cd command", crate::paths::tilde(it.get("cwd"))));
-            }
             if !it.get("pid").is_empty() {
                 v.push(a("copy", "Copy PID", it.get("pid")));
             }
@@ -302,7 +301,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
                     v.push(a("set-panel-restart", "Restart the panel", "picks up a rebuilt binary"));
                 }
                 "paneldir" => v.push(a("set-default", "Reset to $HOME", "")),
-                "preview" | "enter" | "key" | "height" => {
+                "preview" | "enter" | "key" => {
                     v.push(a("set-default", "Reset to the default", it.get("default")));
                     v.push(a("details", "What this changes", ""));
                 }
@@ -315,7 +314,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
                 let can_create = matches!(
                     it.get("setting"),
                     "roots" | "openwith" | "snippets" | "quicklinks" | "favorites"
-                        | "key" | "height" | "preview" | "enter"
+                        | "key" | "preview" | "enter"
                 );
                 // `set-open-file` is Enter for list-shaped settings. It asks
                 // the owning module to materialise a missing file first, so
@@ -332,7 +331,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             }
             v
         }
-        Kind::Config => open_actions(it.kind, it.get("path"), &editor),
+        Kind::Config => open_actions(it.kind, it.get("path"), &editor, surface),
         Kind::Port => vec![
             a("copy", "Copy PID", it.get("pid")),
             a("run", "Kill process…", format!("{} · pid {}", it.get("proc"), it.get("pid"))),
@@ -342,10 +341,10 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             a("run", "Kill process…", format!("{} · {}% CPU", it.get("name"), it.get("cpu"))),
         ],
         Kind::Container => vec![
-            a("logs", "Insert follow-logs command", format!("docker logs -f {}", it.get("name"))),
-            a("restart", "Insert restart command", format!("docker restart {}", it.get("name"))),
+            a("logs", "Copy follow-logs command", format!("docker logs -f {}", it.get("name"))),
+            a("restart", "Copy restart command", format!("docker restart {}", it.get("name"))),
             a("copy", "Copy container name", it.get("name")),
-            a("stop", "Insert stop command", format!("docker stop {}", it.get("name"))),
+            a("stop", "Copy stop command", format!("docker stop {}", it.get("name"))),
         ],
         Kind::Skill => {
             let target = first_nonempty(it, &["file", "dir"]);
@@ -359,7 +358,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             // to make that guess by asking tmux what the pane underneath was
             // running; with no pane underneath, the choice is yours.
             if !target.is_empty() {
-                v.push(a("skillcmd", "Insert the slash command", &it.cmd));
+                v.push(a("skillcmd", "Copy the slash command", &it.cmd));
                 v.push(a("skillfile", "Point an agent at its file", &target));
             }
             // Borrowing comes before copying: it is the lighter of the two,
@@ -367,7 +366,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             // a second copy of the skill on disk, to be maintained forever;
             // borrowing lasts exactly one run and leaves nothing behind.
             with_options(&mut v, it, "lend", "Prepare one-off run with {}",
-                         "Prepare one-off run with…", "inserts command · nothing installed");
+                         "Prepare one-off run with…", "copies command · nothing installed");
             with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
             if it.get("integrity") == "divergent" {
                 with_options(&mut v, it, "diff", "Compare {}", "Compare copies…",
@@ -420,12 +419,12 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             // find out, so that answer arrives when the action runs rather
             // than being guessed at here.
             with_options(&mut v, it, "lend", "Prepare one-off use with {}",
-                         "Prepare one-off use with…", &format!("inserts command · from {owner}"));
+                         "Prepare one-off use with…", &format!("copies command · from {owner}"));
             // Slot 7. Lending lasts one run; this is the other half, and it
             // uses the agent's own `mcp add` rather than editing anyone's
             // config file — the CLI knows the format and we do not have to.
-            with_options(&mut v, it, "install", "Insert install command for {}",
-                         "Insert install command…", "review before running");
+            with_options(&mut v, it, "install", "Copy install command for {}",
+                         "Copy install command…", "review before running");
             if crate::capability::mcp_variants(it).len() > 1 {
                 v.push(a("mcpcompare", "Compare Agent definitions", "redacted capability matrix"));
             }
@@ -437,19 +436,18 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             // it is not repeated as a selectable action here.
             // A row that says `⚠ not logged in` must offer a route forward.
             if matches!(it.get("health"), "auth" | "needsauth" | "failed") {
-                v.push(a("mcplogin", "Insert login command", format!("{owner} mcp login")));
+                v.push(a("mcplogin", "Copy login command", format!("{owner} mcp login")));
             }
-            // Configuration changes are inserted for review rather than run.
+            // Configuration changes are copied for review rather than run.
             if !target.is_empty() {
                 v.push(a("open", "Open owner configuration", &target));
             }
             v.push(a("copy", "Copy server name", ""));
-            v.push(a("mcpremove", "Insert remove command…", format!("{owner} mcp remove")));
+            v.push(a("mcpremove", "Copy remove command…", format!("{owner} mcp remove")));
             v
         }
-        Kind::File | Kind::Find => open_actions(it.kind, it.get("path"), &editor),
-        // Enter inserts the payload path(s); the secondary restores the
-        // original pasteboard object. Object clips also get Finder verbs,
+        Kind::File | Kind::Find => open_actions(it.kind, it.get("path"), &editor, surface),
+        // Enter copies the payload text. Object clips also get Finder verbs,
         // while only actual text can be translated.
         Kind::Clip if it.get("clip_kind") == "files" => vec![
             a("openit", "Open first file", it.get("path")),
@@ -469,12 +467,9 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             a("editsnips", "Edit snippets file", crate::paths::config().join("snippets.toml").to_string_lossy()),
             a("copy", "Copy raw", ""),
         ],
-        // Enter copies the translation and the secondary inserts it, so
-        // only the third row is new.
+        // Enter copies the translation, so only its original is new.
         Kind::Translate => vec![a("tr_src", "Copy the original", it.get("source"))],
-        // There are exactly two things to do with a number, and Enter and
-        // its counterpart already are both of them. The panel listed them
-        // again underneath: four rows, two actions.
+        // Copying the result is the whole intent, and Enter already does it.
         Kind::Calc => vec![],
         // A template quicklink is a Quicklink, and the block below gives it
         // the same rename, re-point and remove verbs as a fixed one. It used
@@ -495,28 +490,28 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             a("reveal-finder", "Reveal in Finder", it.get("path")),
             a("copy-file", "Copy application", it.get("path")),
             a("copy", "Copy application path", it.get("path")),
-            a("insert", "Insert open command", &it.cmd),
+            a("insert", "Copy open command", &it.cmd),
             a("trash", "Move to Trash…", "uninstalls it, recoverably"),
         ],
-        Kind::Dir => vec![
-            a("copy-file", "Copy folder", it.get("path")),
-            a("insert", "Insert cd command", &it.cmd),
-            a("copy", "Copy path", it.get("path")),
-        ],
-        Kind::Sys => vec![
-            a("copy", "Copy the command", ""),
-        ],
+        Kind::Dir => {
+            let mut v = vec![
+                a("copy-file", "Copy folder", it.get("path")),
+                a("insert", "Copy cd command", &it.cmd),
+            ];
+            if surface != crate::defaults::Surface::Clipboard {
+                v.push(a("copy", "Copy path", it.get("path")));
+            }
+            v
+        }
+        Kind::Sys if surface == crate::defaults::Surface::Clipboard => vec![],
+        Kind::Sys => vec![a("copy", "Copy the command", "")],
         // Enter opens the browser directly through Launch Services. The two
         // useful alternatives are text: hand it over, or copy it.
+        Kind::Link if surface == crate::defaults::Surface::Clipboard => vec![],
         Kind::Link => vec![a("copy", "Copy URL", it.get("url"))],
-        // History, scripts, $PATH, branches, folders. Enter inserts them and
-        // the secondary runs them, which is the whole of what they are — so
-        // this arm adds nothing and the generic tail below fills in `run`,
-        // `runhere` and `copy` where each still means something.
-        //
-        // It used to open with `Insert into prompt`, which is what Enter
-        // already does and was even labelled identically. A panel whose
-        // third row repeats its first is teaching you not to read it.
+        // History, scripts, $PATH and branches copy on Enter. The clipboard
+        // surface has no useful run-vs-handoff counterpart, so the generic
+        // tail below adds only genuinely different actions.
         _ => vec![],
     };
     // A quicklink names a stable object without changing what kind of object
@@ -657,10 +652,27 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
     if runnable && !runs_it && !acts.iter().any(|(id, ..)| *id == "run") {
         acts.push(a("run", "Run now", ""));
     }
-    // `copyabs` already copies the path, and for a file that is exactly what
-    // `copy` copies too — the same action twice, worded differently. Nor is
+    // `copyabs` already copies the path, and on the clipboard surface Enter
+    // or its named secondary already copies every handoff. Either would make
+    // generic `copy` the same action twice under different words. Nor is
     // there anything to copy off an agent row: `pi` is two letters you can
     // type faster than you can open this panel.
+    let clipboard_action_already_copies = surface == crate::defaults::Surface::Clipboard
+        && (matches!(
+            crate::defaults::on_enter(it),
+            Default_::Insert
+                | Default_::InsertText(_)
+                | Default_::Act(
+                    Verb::CopyResult
+                        | Verb::ResumeSession
+                        | Verb::RunSkill
+                        | Verb::Inspect
+                        | Verb::CdThere
+                )
+        ) || matches!(
+            crate::defaults::on_secondary(it, surface),
+            Some(Default_::Insert | Default_::InsertText(_) | Default_::Act(Verb::CopyResult))
+        ));
     let generic_copy_is_useful = matches!(
         it.kind,
         Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Ssh
@@ -668,6 +680,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             | Kind::Calc | Kind::Dir
     );
     if generic_copy_is_useful
+        && !clipboard_action_already_copies
         && !already(Verb::CopyResult)
         && !acts.iter().any(|(id, ..)| *id == "copy" || *id == "copyabs")
     {
@@ -719,7 +732,12 @@ pub fn needs_confirming(kind: Kind, id: &str) -> Option<(&'static str, &'static 
 /// This is the half of the launcher that behaves like Finder rather than a
 /// shell: open it another way, locate it, extract its path, or change what
 /// application owns its extension next time.
-fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
+fn open_actions(
+    kind: Kind,
+    path: &str,
+    editor: &str,
+    surface: crate::defaults::Surface,
+) -> Vec<Act> {
     let chosen = crate::openwith::chosen_for(path);
     let ext = crate::openwith::ext_of(path);
     let scope = if ext.is_empty() { "files like this".to_string() } else { format!(".{ext} files") };
@@ -731,9 +749,15 @@ fn open_actions(kind: Kind, path: &str, editor: &str) -> Vec<Act> {
         a("open", "Open in editor", editor),
         a("reveal-finder", "Reveal in Finder", parent_of(path)),
         a("copy-file", "Copy file", path),
-        a("copyabs", "Copy path", path),
-        (leak("openalways".into()), format!("Change default app for {scope}…"), "used next time".into()),
     ];
+    if surface != crate::defaults::Surface::Clipboard {
+        v.push(a("copyabs", "Copy path", path));
+    }
+    v.push((
+        leak("openalways".into()),
+        format!("Change default app for {scope}…"),
+        "used next time".into(),
+    ));
     // Slot 9. A skill could be deleted and the kind the launcher spends most
     // of its rows on could not. Not offered for a config: deleting the file
     // your agent is configured by, out of a fuzzy list, is a foot-gun with
@@ -1458,7 +1482,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             }
             ui::note(&format!("opened {} copies", copies.len()));
         }
-        "cdrun" => ui::emit("INSERT", &format!("cd {}", shq(it.get("cwd")))),
         // The pid, and only the pid. This used to kill the run's pane instead
         // when it had one, on the reasoning that killing the process leaves a
         // dead pane behind — which was true, and was also this launcher
@@ -1530,7 +1553,7 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             if !ui::confirm(
                 &format!("prepare replacement for {target_agent}?"),
                 "Prepare command",
-                "the command is inserted for review, not run",
+                "the command is copied for review, not run",
             ) {
                 return 130;
             }

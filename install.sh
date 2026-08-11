@@ -121,4 +121,4 @@ fi
 
 printf '\nReady.\n'
 printf '  Cmd+Shift+Space  opens Prelude anywhere\n'
-printf '  Ctrl+R           opens Prelude in a new zsh prompt\n\n'
+printf '  Ctrl+R           opens the same Prelude surface from zsh\n\n'

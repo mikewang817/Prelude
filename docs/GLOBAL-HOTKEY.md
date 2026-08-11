@@ -11,13 +11,17 @@ hidden Ghostty process. A keypress does not start Prelude, create an application
 instance, or open a login shell. Ghostty owns the global keybind and toggles its
 existing quick-terminal surface.
 
-The panel is not a destination terminal:
+The panel is not a destination terminal, and the zsh entry point uses the same
+surface rather than a prompt-oriented variant:
 
+- both fill the terminal, gather from the configured launcher directory, and
+  expose the same labels, actions and directory chords
 - files, folders, applications, and URLs act directly through macOS Launch
   Services
-- shell commands are copied to the system clipboard
-- after copying, Prelude shows a short confirmation for 1.2 seconds and closes
-  the surface so it does not cover the place where the command will be pasted
+- shell commands are copied to the system clipboard from either entry point
+- in the Quick Terminal, after copying, Prelude shows a short confirmation for
+  1.2 seconds and closes so it does not cover where the command will be pasted;
+  the zsh entry closes fzf and reports the copy below the existing shell line
 - `Escape` is not bound in the panel's Ghostty configuration. It reaches fzf
   alone, so Prelude can spend it one level at a time and close the panel only
   at the outermost one. Dismissal that does not depend on Prelude remains the
@@ -70,7 +74,7 @@ Only the global panel does this. The zsh widget's snapshot is never older than
 the keypress that made it. Every failure path degrades to the previous
 behavior: one snapshot per interaction.
 
-The generated Ghostty configuration sets:
+The generated dedicated Ghostty configuration sets:
 
 - `initial-window = false`
 - `macos-hidden = always`
@@ -82,6 +86,12 @@ The generated Ghostty configuration sets:
 - `ctrl+shift+enter=text:\x1d` for Prelude's private terminal-directory shortcut
 - `command = <installed-prelude> _surface`
 - `abnormal-command-exit-runtime = 0`
+
+Prelude also maintains one marked block in Ghostty's ordinary configuration,
+containing the same two `Ctrl+Enter` translations. This is what lets the zsh
+entry point advertise and receive the same directory chords. Existing content
+is preserved, writes are idempotent, Ghostty reloads the block with `SIGUSR2`,
+and `prelude global uninstall` removes it.
 
 `macos-hidden` makes the dedicated instance a macOS UI element, keeping it out
 of the Dock and app switcher. `initial-window = false` leaves it with no surface
@@ -136,7 +146,8 @@ The script:
 5. reuses Ghostty from `/Applications` or `~/Applications`, or verifies and
    installs the official Ghostty 1.3.1 app in `~/Applications`
 6. appends one marked PATH/`prelude init zsh` block to `~/.zshrc` when absent
-7. runs `prelude global install`
+7. runs `prelude global install`, which also installs the marked ordinary
+   Ghostty keybinding block
 
 The shell block affects zsh processes started after installation; the installer
 does not mutate the already-running shell. The global panel is started during
@@ -167,6 +178,7 @@ With default XDG paths:
 |---|---|
 | `~/.config/prelude/global.toml` | selected chord and optional panel directory |
 | `~/.config/prelude/quick-terminal.ghostty` | generated dedicated Ghostty configuration |
+| `~/.config/ghostty/config` | person's ordinary config; Prelude adds/removes only its marked two-key block |
 | `~/Library/LaunchAgents/app.prelude.hotkey.plist` | launchd supervision |
 | `~/.cache/prelude/global-hotkey.log` | Ghostty stdout |
 | `~/.cache/prelude/global-hotkey-error.log` | Ghostty stderr |
@@ -214,11 +226,12 @@ Behavior:
   running panel; only Ghostty's configured chord can do that.
 - `hotkey` reads or changes the chord. A successful installed-panel change
   restarts Ghostty; failure restores the previous config.
-- `directory` reads or changes where the panel process stands. The value must
-  be an existing absolute directory when set. `--default` returns to `$HOME`.
-- `uninstall` removes the generated Ghostty config and LaunchAgent but keeps
-  preferences/logs. `--reset` also removes `global.toml`, both logs, and the
-  event-tap record.
+- `directory` reads or changes where both launcher entry points stand. The
+  value must be an existing absolute directory when set. `--default` returns
+  to `$HOME`.
+- `uninstall` removes the generated Ghostty config, ordinary-Ghostty marked
+  block, and LaunchAgent but keeps preferences/logs. `--reset` also removes
+  `global.toml`, both logs, and the event-tap record.
 
 `prelude global backend` is intentionally rejected: the global panel copies
 commands and therefore has no destination terminal to choose.
@@ -247,7 +260,7 @@ silently replaced.
 
 ## Status
 
-`prelude global status --json` emits schema 6 with independent fields for:
+`prelude global status --json` emits schema 7 with independent fields for:
 
 - panel configuration file
 - LaunchAgent file
@@ -257,13 +270,15 @@ silently replaced.
 - verified hotkey registration
 - configured chord and known owner
 - completeness of owner checks
-- configured panel directory and its existence
+- configured launcher directory and its existence
 - Ghostty availability
+- ordinary-Ghostty directory-key binding installation
 - optional zsh-widget availability
 
 Text status returns success only when configuration, supervision, a running
-panel process, Accessibility, registration, Ghostty, and conflict checks are
-healthy. Install/start enforce the single-instance invariant; schema 6 does not
+panel process, Accessibility, registration, Ghostty, ordinary keybindings, and
+conflict checks are healthy. Install/start enforce the single-instance
+invariant; schema 7 does not
 expose an instance count. The zsh widget is displayed but is not required for
 the global panel.
 
@@ -305,8 +320,9 @@ prelude global stop
   the Quick Terminal.
 - Accessibility must be granted by the user.
 - Conflict-owner discovery is best effort for third-party event-tap apps.
-- The configured panel directory is global. Prelude does not infer a working
-  directory from the foreground application.
+- The configured launcher directory is global to both entry points. Prelude
+  does not infer a working directory from the foreground application or the
+  shell that opened it.
 - Live refresh cannot redraw a panel that is being used, because a reload
   resets the cursor. A panel left mid-query keeps the list it had until it is
   dismissed.

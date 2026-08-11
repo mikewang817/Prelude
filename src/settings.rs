@@ -5,9 +5,9 @@
 //! *discover* one: `roots.txt` decides what `f:` can find and was documented
 //! only in a README, defaulted from a hard-coded list, and had to be created by
 //! hand — with `prelude index` run afterwards from memory, since nothing said
-//! the index had gone stale. Four more lived only in environment variables that
-//! had to be exported before the `eval` line in `.zshrc`. A launcher that
-//! manages four agents' settings could not reach its own.
+//! the index had gone stale. Other preferences lived only in environment
+//! variables that had to be exported before the `eval` line in `.zshrc`.
+//! A launcher that manages four agents' settings could not reach its own.
 //!
 //! So settings are rows, in their own `set:` scope, and each one carries its
 //! current value on the row. That is the part that matters: a setting you
@@ -16,21 +16,20 @@
 //!
 //! **What is written, and what is only read.** Six settings own a file each
 //! and are edited through their own code (`roots.txt`, `global.toml`,
-//! `open.toml`, `snippets.toml`, `quicklinks.toml`, `favorites.txt`). The four
-//! that were environment-only get `settings.toml`, and the variable still wins
-//! where it is set — a variable is a per-invocation instruction and a file is a
-//! standing one, so the narrower must be able to override the broader.
+//! `open.toml`, `snippets.toml`, `quicklinks.toml`, `favorites.txt`). The
+//! environment-backed scalar preferences use `settings.toml`, and the variable
+//! still wins where it is set — a variable is a per-invocation instruction
+//! and a file is a standing one, so the narrower must override the broader.
 
 use crate::item::{Item, Kind};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_KEY: &str = "^R";
-const DEFAULT_HEIGHT: &str = "90%";
 const DEFAULT_PREVIEW: bool = true;
 const DEFAULT_CLASSIC_ENTER: bool = false;
 const DEFAULT_UPDATE: &str = "notify";
-const PREF_KEYS: &[&str] = &["key", "height", "preview", "classic_enter", "update"];
+const PREF_KEYS: &[&str] = &["key", "preview", "classic_enter", "update"];
 
 // ---------------------------------------------------------------------------
 // settings.toml — the preferences that had nowhere else to live
@@ -43,7 +42,6 @@ pub fn file() -> PathBuf {
 #[derive(Clone, Debug, Default)]
 struct Prefs {
     key: Option<String>,
-    height: Option<String>,
     preview: Option<bool>,
     classic_enter: Option<bool>,
     update: Option<String>,
@@ -68,7 +66,6 @@ fn prefs() -> &'static Prefs {
         let flag = |k: &str| get(k).and_then(|v| parse_bool(&v));
         Prefs {
             key: get("key").and_then(|v| validate_pref("key", &v).ok()),
-            height: get("height").and_then(|v| validate_pref("height", &v).ok()),
             preview: flag("preview"),
             classic_enter: flag("classic_enter"),
             update: get("update").and_then(|v| validate_pref("update", &v).ok()),
@@ -98,7 +95,6 @@ fn parse_bool(value: &str) -> Option<bool> {
 fn canonical_key(key: &str) -> Option<&'static str> {
     match key.trim().to_ascii_lowercase().replace('-', "_").as_str() {
         "key" | "launcher_key" => Some("key"),
-        "height" | "inline_height" => Some("height"),
         "preview" | "quicklook" | "quick_look" => Some("preview"),
         "enter" | "classic_enter" => Some("classic_enter"),
         "update" | "updates" | "auto_update" => Some("update"),
@@ -116,9 +112,7 @@ fn canonical_key(key: &str) -> Option<&'static str> {
 }
 
 /// Validate values before they can make it into an fzf argv or a zsh
-/// `bindkey` line. Previously `settings set height banana` reported success
-/// and made the next launcher fail somewhere else, which is the least useful
-/// place to explain a typo.
+/// `bindkey` line, so a typo is explained at the command that introduced it.
 fn validate_pref(key: &str, value: &str) -> Result<String, String> {
     let value = value.trim();
     match key {
@@ -130,19 +124,6 @@ fn validate_pref(key: &str, value: &str) -> Result<String, String> {
                 return Err("key must be a short zsh bindkey sequence such as ^R or ^T".into());
             }
             Ok(value.to_string())
-        }
-        "height" => {
-            let (number, percent) = value
-                .strip_suffix('%')
-                .map(|n| (n, true))
-                .unwrap_or((value, false));
-            let n = number.parse::<u16>().map_err(|_| {
-                "height is 20%–100%, or a fixed height of 3–500 lines".to_string()
-            })?;
-            if (percent && !(20..=100).contains(&n)) || (!percent && !(3..=500).contains(&n)) {
-                return Err("height is 20%–100%, or a fixed height of 3–500 lines".into());
-            }
-            Ok(if percent { format!("{n}%") } else { n.to_string() })
         }
         "update" => match value.trim().to_ascii_lowercase().as_str() {
             v @ ("off" | "notify" | "download" | "apply") => Ok(v.to_string()),
@@ -172,12 +153,6 @@ pub fn launcher_key() -> String {
     resolve(from_env, prefs().key.clone(), DEFAULT_KEY)
 }
 
-/// How much of the terminal the inline launcher uses.
-pub fn height() -> String {
-    let from_env = env("PRELUDE_HEIGHT").and_then(|v| validate_pref("height", &v).ok());
-    resolve(from_env, prefs().height.clone(), DEFAULT_HEIGHT)
-}
-
 /// Whether `Ctrl+P` Quick Look exists at all.
 pub fn preview_enabled() -> bool {
     if env("PRELUDE_NO_PREVIEW").is_some() {
@@ -205,7 +180,7 @@ pub fn parse_update_mode(value: &str) -> crate::update::Mode {
     }
 }
 
-/// The pre-2024 default: Enter inserts everything, whatever kind it is.
+/// The pre-2024 default: Enter hands over everything, whatever kind it is.
 pub fn classic_enter() -> bool {
     if env("PRELUDE_CLASSIC_ENTER").is_some() {
         return true;
@@ -324,7 +299,7 @@ fn remove_pref(key: &str) -> Result<(), String> {
 fn pref_source(key: &str, environment: &str) -> &'static str {
     let environment_value = env(environment);
     let valid_environment = environment_value.as_ref().is_some_and(|value| match key {
-        "key" | "height" => validate_pref(key, value).is_ok(),
+        "key" => validate_pref(key, value).is_ok(),
         // These variables are flags: any non-empty value intentionally means on.
         _ => true,
     });
@@ -335,7 +310,6 @@ fn pref_source(key: &str, environment: &str) -> &'static str {
     } else {
         let valid = match key {
             "key" => prefs().key.is_some(),
-            "height" => prefs().height.is_some(),
             "preview" => prefs().preview.is_some(),
             "classic_enter" => prefs().classic_enter.is_some(),
             _ => false,
@@ -733,7 +707,7 @@ pub fn items() -> Vec<Item> {
             "paneldir",
             "Panel directory",
             crate::paths::tilde(&global.directory),
-            &format!("{} · where the panel stands", global.directory_source),
+            &format!("{} · where both launchers stand", global.directory_source),
             EDIT_PROMPT,
         )
         .put("source", global.directory_source)
@@ -750,14 +724,6 @@ pub fn items() -> Vec<Item> {
         ("key", DEFAULT_KEY, "PRELUDE_KEY"),
     ));
     v.push(preference_row(
-        "height",
-        "Inline height",
-        height(),
-        "how much of the terminal",
-        EDIT_PROMPT,
-        ("height", DEFAULT_HEIGHT, "PRELUDE_HEIGHT"),
-    ));
-    v.push(preference_row(
         "preview",
         "Quick Look",
         if preview_enabled() { "on".into() } else { "off".into() },
@@ -768,7 +734,7 @@ pub fn items() -> Vec<Item> {
     v.push(preference_row(
         "enter",
         "What Enter does",
-        if classic_enter() { "insert everything".into() } else { "per kind".into() },
+        if classic_enter() { "copy everything".into() } else { "per kind".into() },
         "commands are handed over, objects act",
         EDIT_TOGGLE,
         ("classic_enter", "per kind", "PRELUDE_CLASSIC_ENTER"),
@@ -882,7 +848,7 @@ pub fn detail(it: &Item) -> Vec<String> {
             out.push("so a change reaches the next shell rather than this one.".into());
             setting_origin(it, &mut out);
         }
-        "height" | "preview" | "enter" => {
+        "preview" | "enter" => {
             setting_origin(it, &mut out);
         }
         _ => {
@@ -923,7 +889,7 @@ fn ensure_setting_file(it: &Item) -> Result<PathBuf, String> {
         "snippets" => crate::sources::user::ensure_snippets_file()?,
         "quicklinks" => crate::compute::ensure_quicklinks_file()?,
         "favorites" => crate::favorites::ensure_file()?,
-        "key" | "height" | "preview" | "enter" => {
+        "key" | "preview" | "enter" => {
             if !file().exists() {
                 crate::cache::write_atomic(
                     &file(),
@@ -1055,7 +1021,7 @@ fn toggle(it: &Item) -> i32 {
     let said = match (key, now) {
         ("preview", true) => "Quick Look on".to_string(),
         ("preview", false) => "Quick Look off".to_string(),
-        (_, true) => "Enter inserts everything".to_string(),
+        (_, true) => "Enter copies everything".to_string(),
         (_, false) => "Enter acts per kind".to_string(),
     };
     crate::ui::note(&if overridden {
@@ -1073,7 +1039,6 @@ fn prompt_for(it: &Item) -> i32 {
         "hotkey" => " global chord ",
         "paneldir" => " panel directory ",
         "key" => " launcher key ",
-        "height" => " inline height ",
         _ => " value ",
     };
     let Some(value) = crate::ui::prompt_line_initial(label, &current) else {
@@ -1097,11 +1062,6 @@ fn override_for(key: &str) -> Option<&'static str> {
         "key" if env("PRELUDE_KEY").is_some_and(|v| validate_pref("key", &v).is_ok()) => {
             Some("PRELUDE_KEY")
         }
-        "height"
-            if env("PRELUDE_HEIGHT").is_some_and(|v| validate_pref("height", &v).is_ok()) =>
-        {
-            Some("PRELUDE_HEIGHT")
-        }
         "preview" if env("PRELUDE_NO_PREVIEW").is_some() => Some("PRELUDE_NO_PREVIEW"),
         "update" if env("PRELUDE_UPDATE").is_some() => Some("PRELUDE_UPDATE"),
         "classic_enter" if env("PRELUDE_CLASSIC_ENTER").is_some() => {
@@ -1116,13 +1076,13 @@ fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
     match key {
         "hotkey" => crate::global::set_hotkey(raw_value),
         "paneldir" => crate::global::set_directory(raw_value),
-        key @ ("key" | "height" | "preview" | "classic_enter" | "update") => {
+        key @ ("key" | "preview" | "classic_enter" | "update") => {
             let value = validate_pref(key, raw_value)?;
             write_pref(key, &value)?;
             let shown = match (key, value.as_str()) {
                 ("preview", "true") => "preview = on".into(),
                 ("preview", "false") => "preview = off".into(),
-                ("classic_enter", "true") => "enter = insert everything".into(),
+                ("classic_enter", "true") => "enter = copy everything".into(),
                 ("classic_enter", "false") => "enter = per kind".into(),
                 ("key", value) => format!("key = {value} — bound in the next shell you open"),
                 (key, value) => format!("{key} = {value}"),
@@ -1152,7 +1112,7 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
                 .iter()
                 .filter_map(|key| override_for(key).map(|variable| format!("${variable}")))
                 .collect();
-            let message = "key, height, Quick Look, Enter and Updates restored to defaults";
+            let message = "key, Quick Look, Enter and Updates restored to defaults";
             Ok(if variables.is_empty() {
                 message.into()
             } else {
@@ -1161,11 +1121,10 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
         }
         "hotkey" => crate::global::set_hotkey("cmd+shift+space"),
         "paneldir" => crate::global::set_directory_default(),
-        key @ ("key" | "height" | "preview" | "classic_enter" | "update") => {
+        key @ ("key" | "preview" | "classic_enter" | "update") => {
             remove_pref(key)?;
             let default = match key {
                 "key" => DEFAULT_KEY,
-                "height" => DEFAULT_HEIGHT,
                 "preview" => "on",
                 "update" => DEFAULT_UPDATE,
                 _ => "per kind",
@@ -1247,7 +1206,7 @@ fn checks() -> Vec<Check> {
             }
         }
     }
-    for (key, variable) in [("key", "PRELUDE_KEY"), ("height", "PRELUDE_HEIGHT")] {
+    for (key, variable) in [("key", "PRELUDE_KEY")] {
         if let Some(value) = env(variable) {
             if let Err(message) = validate_pref(key, &value) {
                 out.push(Check {
@@ -1498,12 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_values_are_refused_before_they_reach_zsh_or_fzf() {
-        assert_eq!(validate_pref("height", "72%").as_deref(), Ok("72%"));
-        assert_eq!(validate_pref("height", "24").as_deref(), Ok("24"));
-        for bad in ["banana", "0%", "101%", "2"] {
-            assert!(validate_pref("height", bad).is_err(), "{bad}");
-        }
+    fn bad_values_are_refused_before_they_reach_zsh() {
         assert_eq!(validate_pref("preview", "off").as_deref(), Ok("false"));
         assert_eq!(validate_pref("classic_enter", "YES").as_deref(), Ok("true"));
         assert!(validate_pref("preview", "perhaps").is_err());
@@ -1512,14 +1466,14 @@ mod tests {
 
     #[test]
     fn editing_a_preference_preserves_the_rest_of_the_file() {
-        let before = "# why this is 70\nheight = \"70%\" # fits this screen\nunknown = \"future\"\n\n[future]\nvalue = \"kept\"\n";
-        let changed = update_pref_text(before, "height", Some("80%"));
-        assert!(changed.contains("# why this is 70"));
-        assert!(changed.contains("height = \"80%\"  # fits this screen"));
+        let before = "# why this is notify\nupdate = \"notify\" # stay quiet\nunknown = \"future\"\n\n[future]\nvalue = \"kept\"\n";
+        let changed = update_pref_text(before, "update", Some("download"));
+        assert!(changed.contains("# why this is notify"));
+        assert!(changed.contains("update = \"download\"  # stay quiet"));
         assert!(changed.contains("unknown = \"future\""));
         assert!(changed.contains("[future]\nvalue = \"kept\""));
-        let reset = update_pref_text(&changed, "height", None);
-        assert!(!reset.lines().any(|line| line.trim_start().starts_with("height")));
+        let reset = update_pref_text(&changed, "update", None);
+        assert!(!reset.lines().any(|line| line.trim_start().starts_with("update")));
         assert!(reset.contains("unknown = \"future\""));
     }
 

@@ -5,7 +5,7 @@ use crate::ansi::*;
 use crate::exec::shq;
 use crate::item::{Item, Kind};
 use crate::render::{self, SEP};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::{Command, Stdio};
 
 /// Enter does the obvious thing, ^K reaches every alternative, ^P briefly
@@ -61,8 +61,9 @@ pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: cli
 /// Ctrl+Shift+Enter into private Ctrl+], which is what fzf actually receives.
 /// It has to be a translation — fzf knows no `ctrl-enter`, because a bare
 /// Return carries no modifier a terminal application can read. Both are
-/// contextual to rows that have a directory and neither is ever advertised on
-/// an inline terminal surface, where Prelude owns no configuration.
+/// contextual to rows that have a directory. Prelude installs the same two
+/// translations in ordinary Ghostty, so both launcher entry points receive
+/// the same private control codes.
 ///
 /// `ctrl-]` is 0x1d. Not 0x1f, which is `render::SEP` — the delimiter every
 /// rendered row already carries, and which fzf would therefore read as the
@@ -144,20 +145,10 @@ pub fn env_flag(name: &str) -> bool {
 }
 
 pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
-    // Two surfaces:
-    //   PRELUDE_FULL_SURFACE  the window is already ours — the global panel,
-    //                         which exists to hold this and nothing else — so
-    //                         fill it. `--height` would use a fraction of an
-    //                         already-small window and waste the rest.
-    //   inline                N lines under the prompt, fzf-style.
-    let mut modes: Vec<Vec<String>> = Vec::new();
-    if env_flag("PRELUDE_FULL_SURFACE") {
-        modes.push(vec![]);
-    } else {
-        // Most of the terminal, not half of it: a launcher that shows twelve
-        // rows out of two thousand is making you scroll for no reason.
-        modes.push(vec![format!("--height={}", crate::settings::height())]);
-    }
+    // One launcher layout in both windows. The shell entry used to be a 90%
+    // inline popup while the Quick Terminal filled its surface, which made the
+    // same binary read as two products before an action was even chosen.
+    let modes: Vec<Vec<String>> = vec![vec![]];
     let _ = cols;
 
     let mut last = FzfOut { key: String::new(), item: None, failed: true, stderr: String::new() };
@@ -206,6 +197,11 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
 }
 
 pub fn search() -> i32 {
+    // The panel has a configured standing directory and a shell has whatever
+    // directory its prompt happens to be in. Using both made project scripts,
+    // files and Git rows differ between two otherwise identical launchers.
+    // One configured directory gives both entry points one catalogue.
+    let _ = std::env::set_current_dir(crate::global::launch_directory());
     crate::clipd::ensure_running();
     let items = crate::cache::gather();
     if items.is_empty() {
@@ -266,9 +262,7 @@ pub fn search() -> i32 {
     args.push("--bind".into());
     args.push(format!("enter:transform:{} _enter {{2}}", shq(&me)));
     // Say what Enter will do to *this* row, since the answer depends on what
-    // kind of thing it is. Where the answer *lands* — a prompt or the
-    // clipboard — the helper inherits from our environment, so nothing about
-    // the surface has to travel on its argv.
+    // kind of thing it is. Every helper uses the same clipboard vocabulary.
     // `focus` fires on cursor movement and on a search-result update — but
     // *not* when `reload` replaces the whole list and the cursor stays where
     // it already was, on the first row. Every scope entry is such a reload, so
@@ -580,13 +574,25 @@ pub fn fill_placeholders(cmd: &str) -> String {
     out
 }
 
-/// The contract with whatever started us: one line, VERB<TAB>payload.
+/// Hand text to the launcher parent.
 ///
-/// Deliberately the same line for both callers. The zsh widget puts an INSERT
-/// on the prompt and submits a RUN; the panel has no prompt and copies either.
-/// Deciding that here would mean this process needing to know which surface it
-/// is, and it does not: it reports, and the caller delivers.
+/// The dedicated panel parent receives its original one-line protocol because
+/// it owns copy-and-close. An ordinary terminal invocation has no such parent,
+/// so it copies here and emits only a `COPIED` notification for the zsh widget.
 pub fn emit(verb: &str, cmd: &str) {
+    // The dedicated panel parent already owns copy-and-close, so preserve its
+    // protocol. At a shell there may be either the current zsh widget or one
+    // loaded before this release; copy here and return a notification verb
+    // both can safely ignore rather than letting an old widget insert text.
+    if matches!(verb, "INSERT" | "RUN") && !env_flag("PRELUDE_FULL_SURFACE") {
+        copy(cmd);
+        if std::io::stdout().is_terminal() {
+            eprintln!("copied: {}", crate::width::flatten(cmd));
+        } else {
+            println!("COPIED\t{}", crate::width::flatten(cmd));
+        }
+        return;
+    }
     println!("{verb}\t{cmd}");
 }
 
@@ -704,12 +710,7 @@ pub fn pick_raw(
     args.push(format!(
         "change:transform:[ -n {{q}} ] && echo 'unbind({ARROW_BOTH})' || echo 'rebind({ARROW_BOTH})'"
     ));
-    let mut modes: Vec<Vec<String>> = Vec::new();
-    if env_flag("PRELUDE_FULL_SURFACE") {
-        modes.push(vec![]);
-    } else {
-        modes.push(vec!["--height=90%".into()]);
-    }
+    let modes: Vec<Vec<String>> = vec![vec![]];
     for mode in modes {
         let mut cmd = Command::new("fzf");
         cmd.args(&args).args(&mode)
