@@ -84,6 +84,10 @@ fn main() -> ExitCode {
         ["doctor", rest @ ..] => doctor::dispatch(rest),
         ["bench"] => bench(false),
         ["bench", "--json"] => bench(true),
+        // The same launch measured the way a person meets it: one new process
+        // per sample, startup included, plus the per-keystroke helpers.
+        ["bench", "--process"] => bench_process(false),
+        ["bench", "--process", "--json"] | ["bench", "--json", "--process"] => bench_process(true),
         // Where the money goes, phase by phase. The rule this serves: the
         // floor is the slowest FAST source and the local work under it is
         // free — so the profile has to be re-read after every win, because
@@ -630,6 +634,83 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
     let rank = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
     sorted[rank.min(sorted.len() - 1)]
+}
+
+/// What a launch costs when it is a launch: a new process, from `main`.
+///
+/// `bench` calls `gather` forty times inside one process, which measures the
+/// gather and nothing else — the second call reuses parsed history, a warm
+/// allocator, loaded code pages and every `OnceLock` the first one filled. It
+/// is the right instrument for "did this source get slower" and the wrong one
+/// for "what does pressing the key cost", and only one of those is the thing
+/// a person feels.
+fn bench_process(json: bool) -> i32 {
+    let me = std::env::current_exe().unwrap_or_default();
+    let list = paths::cache().join("list.txt");
+    let list = list.to_string_lossy().into_owned();
+    // A gather has to have happened for the helpers to have a list to filter.
+    let _ = cache::gather();
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        // Startup, gather and render, which is the whole of what a press pays
+        // before anything is on screen.
+        ("launch  (_dump)", vec!["_dump"]),
+        // Then the per-keystroke helpers, which are paid again on every
+        // keystroke and are therefore the other half of how this feels.
+        ("keystroke  root query", vec!["_dynamic", "git", &list, "120", "30"]),
+        ("keystroke  s: scope", vec!["_dynamic", "s:prelude", &list, "120", "30"]),
+        ("keystroke  f: scope", vec!["_dynamic", "f:readme", &list, "120", "30"]),
+        ("keystroke  binding", vec!["_bind", "git", &list, "120", "30"]),
+    ];
+    let mut over = false;
+    let mut rows = Vec::new();
+    for (label, args) in cases {
+        let mut times = Vec::with_capacity(BENCH_RUNS);
+        for _ in 0..BENCH_RUNS {
+            let t = std::time::Instant::now();
+            let ran = std::process::Command::new(&me)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if ran.is_err() {
+                eprintln!("prelude: could not run {label}");
+                return 2;
+            }
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p95 = percentile(&times, 95.0);
+        // The launch is the one with a budget; the helpers are reported so a
+        // regression in them is visible, and each keystroke pays about 2ms of
+        // fork and exec that no amount of work here can remove.
+        if label.starts_with("launch") && p95 >= GATHER_BUDGET_MS {
+            over = true;
+        }
+        rows.push((label, times[0], percentile(&times, 50.0), p95, times[times.len() - 1]));
+    }
+    if json {
+        let body: Vec<String> = rows
+            .iter()
+            .map(|(label, min, p50, p95, max)| {
+                format!(
+                    "{{\"case\":\"{label}\",\"runs\":{BENCH_RUNS},\"min\":{min:.3},\
+                     \"p50\":{p50:.3},\"p95\":{p95:.3},\"max\":{max:.3}}}"
+                )
+            })
+            .collect();
+        println!("{{\"processes\":[{}],\"budget_ms\":{GATHER_BUDGET_MS:.1},\"over\":{over}}}", body.join(","));
+    } else {
+        println!("per process, {BENCH_RUNS} runs each — startup included");
+        for (label, min, p50, p95, max) in &rows {
+            println!("  {label:<24} min {min:5.1}ms  p50 {p50:5.1}ms  p95 {p95:5.1}ms  max {max:5.1}ms");
+        }
+        println!(
+            "budget: {GATHER_BUDGET_MS:.0}ms at p95 for a launch  ->  {}",
+            if over { "OVER" } else { "OK" }
+        );
+    }
+    i32::from(over)
 }
 
 fn bench(json: bool) -> i32 {
