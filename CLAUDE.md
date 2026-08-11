@@ -20,7 +20,8 @@ cargo clippy --release     # expected warning-free
 
 `_surface`, `_panel`, `_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`,
 `_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_hist`, `_tab`, `_refresh`,
-`_refresh-path`, `_copy-skill`, `_rm-skill`, `_lend-skill`, `_lend-mcp`, `_actions` are internal entry points. They
+`_refresh-path`, `_refresh-panel-after-update`, `_restart-panel-after-update`, `_copy-skill`,
+`_rm-skill`, `_lend-skill`, `_lend-mcp`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
 
@@ -611,13 +612,22 @@ apply, and copying it made the row a detour to itself. `on_enter` checks the
 **But it cannot restart the panel from inside the panel.** `stop_helper` pkills
 the Ghostty instance this process descends from, so restarting mid-update kills
 the process tree doing the updating — after the binary has already been
-swapped, leaving a panel that is down rather than new. It does not need to:
-closing the surface is enough, because the next press runs `<installed prelude>
-_surface`, which by then *is* the new binary. `apply` therefore checks
-`PRELUDE_FULL_SURFACE` and skips the restart, and `apply_default` emits a
-`CLOSE` verb the panel loop turns into `After::Close`. The zsh widget has no
-case for `CLOSE` and ignores it, which is the correct behaviour there: nothing
-in a terminal needs closing, and `restart_panel` runs normally.
+swapped, leaving a panel that is down rather than new. The newly installed
+binary instead regenerates the managed Ghostty config and sends the dedicated
+instance `SIGUSR2`, which reloads changed bindings without killing its child.
+Then `apply_default` emits a `CLOSE` verb the panel loop turns into
+`After::Close`; the next press runs the new `_surface`. The zsh widget has no
+case for `CLOSE` and ignores it, which is correct there.
+
+**The updater cannot describe the release that replaced it.** An atomic swap
+changes the path on disk, not the process already executing `apply`, so calling
+that process's `restart_panel` writes the old release's Ghostty config and can
+put a retired binding back beside the new binary and footer. After a swap, the
+old process therefore invokes an internal door on the newly installed binary:
+outside the panel that binary regenerates the config and restarts the dedicated
+instance; inside it takes the reload-in-place path above. `panel::run` repeats
+the config comparison before fzf starts as the recovery path for upgrading
+from an older release whose updater did not know this handoff.
 
 **The redirect is eventually consistent, and the rate limit was never the
 constraint.** `fetch_latest` used the `/releases/latest` redirect *instead of*

@@ -457,6 +457,38 @@ pub fn dispatch(args: &[&str]) -> i32 {
     }
 }
 
+const REFRESH_PANEL_AFTER_UPDATE: &str = "_refresh-panel-after-update";
+const RESTART_PANEL_AFTER_UPDATE: &str = "_restart-panel-after-update";
+
+fn post_install_action(full_surface: bool) -> &'static str {
+    if full_surface {
+        REFRESH_PANEL_AFTER_UPDATE
+    } else {
+        RESTART_PANEL_AFTER_UPDATE
+    }
+}
+
+/// Ask the binary just put on disk to finish its own installation.
+///
+/// Continuing here would run the previous release's `global.rs`: it can swap
+/// the executable, but it cannot generate a managed Ghostty configuration for
+/// settings introduced by the executable that replaced it.
+fn finish_with_installed_binary(installed: &Path, action: &str) -> Result<(), String> {
+    let output = std::process::Command::new(installed)
+        .arg(action)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("could not start the installed Prelude: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim().lines().last().unwrap_or("post-update setup failed");
+    Err(detail.to_string())
+}
+
 fn apply(version: &str) -> i32 {
     let staged = match stage(version) {
         Ok(p) => p,
@@ -467,6 +499,15 @@ fn apply(version: &str) -> i32 {
     };
     let binary = match extract(&staged) {
         Ok(p) => p,
+        Err(e) => {
+            eprintln!("prelude: {e}");
+            return 2;
+        }
+    };
+    // Remember the invocation path before replacing what it names. Calling it
+    // afterwards starts the newly installed bytes, not this old process.
+    let installed = match install_path() {
+        Ok(path) => path,
         Err(e) => {
             eprintln!("prelude: {e}");
             return 2;
@@ -484,19 +525,22 @@ fn apply(version: &str) -> i32 {
     prune_staged("");
     println!("  installed {version}; the previous binary is at {}", previous.display());
     // The panel is the whole reason this module exists: leaving it on the old
-    // binary is the state an update is supposed to end, not create. But when
-    // the update is running *inside* the panel, restarting it means killing
-    // the process tree we are in — `stop_helper` pkills the Ghostty instance
-    // this process descends from. Closing the surface achieves the same end
-    // safely: the next press runs `<installed prelude> _surface`, which is now
-    // the binary just installed. `ui::apply_default` emits the CLOSE.
-    if crate::ui::env_flag("PRELUDE_FULL_SURFACE") {
-        println!("  this panel is closing; the next press runs {version}");
-    } else {
-        match crate::global::restart_panel() {
-            Ok(said) => println!("  {said}"),
-            Err(e) => println!("  the panel was not restarted ({e}); run:  prelude global start"),
-        }
+    // binary is the state an update is supposed to end, not create. More
+    // subtly, *this* process is still the old binary after the atomic swap, so
+    // asking its `global.rs` to regenerate Ghostty's managed configuration
+    // would put the old release's bindings back. The installed binary must
+    // finish its own installation.
+    //
+    // Outside the panel it replaces the dedicated instance, updating both the
+    // parent loop and Ghostty's settings. Inside the panel that replacement
+    // would kill the updater along with its ancestor; the new binary instead
+    // rewrites the config and asks Ghostty to reload it in place, and the
+    // normal CLOSE handoff ends this old surface.
+    let full_surface = crate::ui::env_flag("PRELUDE_FULL_SURFACE");
+    match finish_with_installed_binary(&installed, post_install_action(full_surface)) {
+        Ok(()) if full_surface => println!("  this panel is closing; the next press runs {version}"),
+        Ok(()) => println!("  panel restarted; it now runs {version}"),
+        Err(e) => println!("  panel setup did not finish ({e}); run:  prelude global start"),
     }
     0
 }
@@ -567,6 +611,15 @@ mod tests {
         // The redirect's shape.
         let url = "https://github.com/mikewang817/Prelude/releases/tag/v0.8.2";
         assert_eq!(url.rsplit_once("/tag/").map(|(_, t)| t.trim_start_matches('v')), Some("0.8.2"));
+    }
+
+    #[test]
+    fn the_new_binary_finishes_its_own_panel_installation() {
+        // Replacing Ghostty from inside its quick terminal kills the updater.
+        // Everywhere else the replacement is required, because the old panel
+        // parent is still serving keypresses even after its path was swapped.
+        assert_eq!(post_install_action(true), REFRESH_PANEL_AFTER_UPDATE);
+        assert_eq!(post_install_action(false), RESTART_PANEL_AFTER_UPDATE);
     }
 
     #[test]

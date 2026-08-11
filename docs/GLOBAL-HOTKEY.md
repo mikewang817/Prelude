@@ -78,7 +78,8 @@ The generated Ghostty configuration sets:
 - a centered `62% × 58%` Quick Terminal
 - autohide and move-to-current-Space behavior
 - `global:<chord>=toggle_quick_terminal`, and deliberately no Escape binding
-- `cmd+enter=text:\x07` for Prelude's private file-parent shortcut
+- `ctrl+enter=text:\x07` for Prelude's private file-parent shortcut
+- `ctrl+shift+enter=text:\x1d` for Prelude's private terminal-directory shortcut
 - `command = <installed-prelude> _surface`
 - `abnormal-command-exit-runtime = 0`
 
@@ -267,6 +268,20 @@ expose an instance count. The zsh widget is displayed but is not required for
 the global panel.
 
 ## Build and upgrade note
+
+`prelude update` swaps the executable atomically, then asks the newly installed
+binary—not the old updater still executing in memory—to regenerate Prelude's
+managed Ghostty configuration. From an ordinary terminal the new binary also
+restarts the dedicated instance. From inside the panel it reloads Ghostty's
+configuration in place with `SIGUSR2`, then closes the old surface; the next
+press starts the new panel parent. Panel startup repeats the comparison as a
+recovery path for an upgrade performed by a release too old to know this
+handoff.
+
+This distinction matters when a release changes a Prelude-owned Ghostty
+binding. Before the handoff existed, the old updater successfully installed and
+started the new binary but rewrote the configuration using its own old binding
+table, leaving the new footer and the old keys on the same screen.
 
 `cargo build --release` does not replace an installed binary and does not
 restart the long-lived `_panel` parent. The child launcher may appear updated

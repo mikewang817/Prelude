@@ -67,6 +67,29 @@ fn main() -> ExitCode {
         // Kept as an internal test/debug door; generated Ghostty configuration
         // enters through `_surface` so ordinary windows never become Prelude.
         ["_panel"] => panel::run(),
+        // The updater keeps executing the release it just replaced. These
+        // doors let the bytes newly installed on disk generate and activate
+        // their own managed Ghostty configuration instead of asking the old
+        // release to guess it. The refresh-only form is safe inside the panel;
+        // replacing the panel there would kill the updater with its ancestor.
+        ["_refresh-panel-after-update"] => {
+            match global::refresh_panel_config_if_changed() {
+                Ok(_) => 0,
+                Err(error) => {
+                    eprintln!("prelude: {error}");
+                    2
+                }
+            }
+        }
+        ["_restart-panel-after-update"] => {
+            match global::restart_panel() {
+                Ok(_) => 0,
+                Err(error) => {
+                    eprintln!("prelude: {error}");
+                    2
+                }
+            }
+        }
         // `paste [pane]` typed the result into a tmux pane instead of
         // returning it. Nothing types into anything now, and a command that
         // silently became an ordinary search would be worse than one that

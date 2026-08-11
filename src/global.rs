@@ -725,11 +725,14 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
     )
 }
 
-fn write_quick_config(destination: &Path) -> Result<(), String> {
+fn generated_quick_config() -> Result<String, String> {
     let config = configured()?;
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not find the Prelude binary: {e}"))?;
-    let body = quick_config(&exe, &config.hotkey, &effective_directory(&config));
+    Ok(quick_config(&exe, &config.hotkey, &effective_directory(&config)))
+}
+
+fn write_quick_config_body(destination: &Path, body: &str) -> Result<(), String> {
     crate::cache::write_atomic(destination, body.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", destination.display()))?;
     let path = destination.to_string_lossy().into_owned();
@@ -741,6 +744,53 @@ fn write_quick_config(destination: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("Ghostty rejected the generated launcher configuration: {e}"))?;
     Ok(())
+}
+
+fn write_quick_config(destination: &Path) -> Result<(), String> {
+    write_quick_config_body(destination, &generated_quick_config()?)
+}
+
+/// Bring Prelude-owned Ghostty settings forward with the binary that owns
+/// them, without replacing the Ghostty process the caller may be running in.
+///
+/// `prelude update` necessarily begins as the old binary. If that process
+/// writes the managed configuration after swapping itself on disk, it writes
+/// the old release's bindings — exactly how 0.8.13 acquired its new Ctrl
+/// footer beside 0.8.12's old Command bindings. The newly installed binary
+/// calls this door after the swap. Panel startup calls it too, so the first
+/// release carrying this repair can recover from an older updater that did
+/// not know the door existed.
+///
+/// Ghostty reloads configuration on SIGUSR2. That is safe from inside its
+/// quick-terminal process tree, unlike stopping the dedicated instance, and
+/// applies a changed keybind before fzf starts reading keys.
+pub fn refresh_panel_config_if_changed() -> Result<bool, String> {
+    let destination = quick_config_path();
+    if !destination.is_file() {
+        return Ok(false);
+    }
+    let body = generated_quick_config()?;
+    if std::fs::read(&destination).ok().as_deref() == Some(body.as_bytes()) {
+        return Ok(false);
+    }
+    write_quick_config_body(&destination, &body)?;
+    reload_quick_config();
+    Ok(true)
+}
+
+fn reload_quick_config() {
+    #[cfg(target_os = "macos")]
+    const SIGUSR2: i32 = 31;
+    #[cfg(not(target_os = "macos"))]
+    const SIGUSR2: i32 = 12;
+    unsafe extern "C" {
+        unsafe fn kill(pid: i32, signal: i32) -> i32;
+    }
+    for pid in instance_pids() {
+        unsafe {
+            let _ = kill(pid as i32, SIGUSR2);
+        }
+    }
 }
 
 fn rollback_install(destination: &Path, backup: &Path, agent: &Path, old_agent: Option<&[u8]>) {

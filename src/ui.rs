@@ -510,10 +510,11 @@ fn act(item: &Item, verb: crate::defaults::Verb) -> i32 {
             let code = crate::runhere::run_item(item);
             // An update replaces the binary this panel is running, and it
             // cannot restart the panel from inside it — stopping the panel
-            // kills the process tree the update is running in. It does not
-            // need to: closing the surface is enough, because the next press
-            // starts `<installed prelude> _surface`, which is by then the new
-            // binary. The zsh widget ignores a verb it has no case for.
+            // kills the process tree the update is running in. `update`
+            // already asked the newly installed binary to regenerate and
+            // reload Ghostty's config in place; closing this old surface is
+            // the remaining step, so the next press starts the new `_surface`.
+            // The zsh widget ignores a verb it has no case for.
             if code == 0 && item.get("update") == "available" {
                 emit("CLOSE", "press the chord again to come back on the new version");
             }

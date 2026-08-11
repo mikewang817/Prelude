@@ -120,6 +120,15 @@ fn once() -> (i32, After) {
 
 /// `prelude _panel` — the process the quick terminal runs.
 pub fn run() -> i32 {
+    // An updater is necessarily the release being replaced. It can restart
+    // this process from the new binary on disk, but it cannot generate a
+    // Ghostty configuration containing settings it has never heard of. The
+    // new panel repairs that handoff before fzf can receive a key; SIGUSR2
+    // reloads Ghostty in place, so doing this inside its process tree is safe.
+    if let Err(error) = crate::global::refresh_panel_config_if_changed() {
+        eprintln!("prelude: could not refresh the panel configuration: {error}");
+    }
+
     // Nothing is on screen yet and the process about to serve keypresses is
     // this one, so this is the only moment an update can be applied without
     // creating the exact state it exists to prevent: a new binary and a panel
