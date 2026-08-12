@@ -446,6 +446,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             v.push(a("mcpremove", "Copy remove command…", format!("{owner} mcp remove")));
             v
         }
+        Kind::Find if it.get("index_kind") == "folder" => folder_actions(it),
         Kind::File | Kind::Find => open_actions(it.kind, it.get("path"), &editor, surface),
         // Enter copies the payload text. Object clips also get Finder verbs,
         // while only actual text can be translated.
@@ -493,16 +494,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             a("insert", "Copy open command", &it.cmd),
             a("trash", "Move to Trash…", "uninstalls it, recoverably"),
         ],
-        Kind::Dir => {
-            let mut v = vec![
-                a("copy-file", "Copy folder", it.get("path")),
-                a("insert", "Copy cd command", &it.cmd),
-            ];
-            if surface != crate::defaults::Surface::Clipboard {
-                v.push(a("copy", "Copy path", it.get("path")));
-            }
-            v
-        }
+        Kind::Dir => folder_actions(it),
         Kind::Sys if surface == crate::defaults::Surface::Clipboard => vec![],
         Kind::Sys => vec![a("copy", "Copy the command", "")],
         // Enter opens the browser directly through Launch Services. The two
@@ -598,7 +590,17 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
     // useful, specific label, so they do not get a generic secondary row.
     let specific_alternative = matches!(
         it.kind,
-        Kind::Run | Kind::Msg | Kind::Session | Kind::App | Kind::Skill | Kind::Mcp | Kind::Setting
+        Kind::Run
+            | Kind::Msg
+            | Kind::Session
+            | Kind::App
+            | Kind::Skill
+            | Kind::Mcp
+            | Kind::Setting
+            | Kind::File
+            | Kind::Find
+            | Kind::Dir
+            | Kind::Config
     );
     if !specific_alternative {
         if let Some(label) = crate::defaults::describe_secondary(it, surface) {
@@ -732,13 +734,24 @@ pub fn needs_confirming(kind: Kind, id: &str) -> Option<(&'static str, &'static 
 /// This is the half of the launcher that behaves like Finder rather than a
 /// shell: open it another way, locate it, extract its path, or change what
 /// application owns its extension next time.
+fn folder_actions(it: &Item) -> Vec<Act> {
+    vec![
+        a("reveal-finder", "Reveal in parent", it.get("path")),
+        a("terminal-here", "Open terminal here", it.get("path")),
+        a("copy", "Copy path", it.get("path")),
+        a("copy-file", "Copy folder", it.get("path")),
+        a("insert", "Copy cd command", &it.cmd),
+    ]
+}
+
 fn open_actions(
     kind: Kind,
     path: &str,
     editor: &str,
-    surface: crate::defaults::Surface,
+    _surface: crate::defaults::Surface,
 ) -> Vec<Act> {
     let chosen = crate::openwith::chosen_for(path);
+    let parent = parent_of(path);
     let ext = crate::openwith::ext_of(path);
     let scope = if ext.is_empty() { "files like this".to_string() } else { format!(".{ext} files") };
     let mut v = vec![
@@ -747,12 +760,11 @@ fn open_actions(
             None => "currently the system default".into(),
         }),
         a("open", "Open in editor", editor),
-        a("reveal-finder", "Reveal in Finder", parent_of(path)),
+        a("reveal-finder", "Reveal in Finder", path),
+        a("terminal-folder", "Open terminal in containing folder", &parent),
+        a("copyabs", "Copy path", path),
         a("copy-file", "Copy file", path),
     ];
-    if surface != crate::defaults::Surface::Clipboard {
-        v.push(a("copyabs", "Copy path", path));
-    }
     v.push((
         leak("openalways".into()),
         format!("Change default app for {scope}…"),
@@ -1472,7 +1484,7 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             let copies = crate::sources::agents::copy_paths(it);
             let mut failed = Vec::new();
             for (agent, dir) in &copies {
-                if let Err(e) = crate::openwith::open_now(dir, None) {
+                if let Err(e) = crate::openwith::open_finder_now(dir) {
                     failed.push(format!("{agent}: {e}"));
                 }
             }
@@ -1520,6 +1532,16 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         }
         "reveal-finder" => {
             if let Err(e) = crate::openwith::reveal_now(&target) {
+                ui::note(&e);
+                return 2;
+            }
+        }
+        "terminal-here" | "terminal-folder" => {
+            let Some(directory) = ui::terminal_directory(it) else {
+                ui::note("that row has no folder to open a terminal in");
+                return 2;
+            };
+            if let Err(e) = crate::global::open_directory(&directory) {
                 ui::note(&e);
                 return 2;
             }

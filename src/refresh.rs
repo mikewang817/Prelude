@@ -139,7 +139,7 @@ fn rebuild(widths: &[usize], tw: usize, cols: usize) {
     }
     let root = crate::compute::root_items(&items);
     let home = crate::compute::home_items(&items);
-    let root_feed = crate::render::render_with(&root, cols, Some(widths), Some(tw));
+    let root_feed = crate::render::render_general(&root, cols);
     let home_feed = crate::render::render_with(&home, cols, Some(widths), Some(tw));
     let cache = crate::paths::cache();
     let mut snapshot = vec![
@@ -161,10 +161,15 @@ fn fingerprint() -> u64 {
     let data = crate::paths::data();
     let cache = crate::paths::cache();
     let config = crate::paths::config();
-    let watched: [PathBuf; 11] = [
+    let watched: [PathBuf; 13] = [
         // What a person changes and expects to see immediately.
         data.join("clipboard.jsonl"),
         config.join("quicklinks.toml"),
+        // Search roots and the atomically replaced file/folder index. Root
+        // edits schedule a builder; its completed generation must become
+        // visible without requiring the panel to be closed and reopened.
+        config.join("roots.txt"),
+        cache.join("fileindex.txt"),
         // A question an agent is blocked on is the most urgent row there is.
         data.join("bus"),
         // The slow tier, refreshed detached: its caches land without anyone

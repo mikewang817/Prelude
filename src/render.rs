@@ -123,6 +123,81 @@ pub fn render(items: &[Item], width: usize) -> String {
     render_with(items, width, None, None)
 }
 
+/// General Search is a semantic three-column table, regardless of where a row
+/// came from: object name, object type, then context. It previously concatenated
+/// the catalogue renderer, the file renderer, and one-off dynamic renderers;
+/// each placed the type at a different x-coordinate, so no amount of tuning a
+/// single width could align the combined list.
+pub fn render_general(items: &[Item], width: usize) -> String {
+    let usable = width.max(48) - 8;
+    let lw = label_width();
+    let wanted_title = (usable * 26 / 100).clamp(24, 42);
+    let max_title = usable.saturating_sub(lw + 3 + 12).max(12);
+    let tw = wanted_title.min(max_title);
+    let detail_width = usable.saturating_sub(tw + 2 + lw + 3).max(1);
+    let mut out = String::with_capacity(items.len() * 112);
+
+    for item in items {
+        let filesystem = matches!(item.kind, Kind::File | Kind::Find | Kind::Dir)
+            && !item.get("path").is_empty();
+        let title = if filesystem && !item.is_quicklink() {
+            std::path::Path::new(item.get("path"))
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&item.title)
+        } else {
+            &item.title
+        };
+        let title = dtrunc(&flatten(title), tw);
+        let (color, label) = item.style();
+
+        let detail = if filesystem && !item.is_quicklink() {
+            let parent = std::path::Path::new(item.get("path"))
+                .parent()
+                .map(|parent| crate::paths::tilde(&parent.to_string_lossy()))
+                .filter(|parent| !parent.is_empty())
+                .unwrap_or_else(|| item.subtitle.clone());
+            let tags = item
+                .get("tags")
+                .split('\u{1e}')
+                .filter(|tag| !tag.is_empty())
+                .map(|tag| format!("#{tag}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if tags.is_empty() {
+                dtrunc_middle(&flatten(&parent), detail_width)
+            } else {
+                let tag_budget = (detail_width * 45 / 100).max(8).min(detail_width);
+                let tag_text = format!(" · {}", dtrunc(&tags, tag_budget.saturating_sub(3)));
+                let parent_width = detail_width.saturating_sub(dwidth(&tag_text));
+                format!("{}{}", dtrunc_middle(&flatten(&parent), parent_width), tag_text)
+            }
+        } else {
+            let context = if item.fields.is_empty() {
+                item.subtitle.clone()
+            } else {
+                item.fields.iter().map(|field| flatten(field)).collect::<Vec<_>>().join(" · ")
+            };
+            dtrunc(&context, detail_width)
+        };
+
+        out.push_str(&title);
+        out.push_str(&" ".repeat((tw + 2).saturating_sub(dwidth(&title)).max(1)));
+        out.push_str(color);
+        out.push_str(&pad_to(label, lw, false));
+        out.push_str(RESET);
+        if !detail.is_empty() {
+            out.push_str(&format!("{DIM} · {detail}{RESET}"));
+        }
+        out.push(SEP);
+        out.push_str(&serde_json::to_string(item).unwrap_or_default());
+        out.push('\n');
+    }
+    out.pop();
+    out
+}
+
 /// File search is one stable three-column form: full filename where possible,
 /// then kind, then the parent path. The general catalogue uses percentile
 /// widths because descriptions and process fields compete for space; applying
@@ -298,8 +373,40 @@ pub fn parse_line(line: &str) -> Option<Item> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_files;
+    use super::{render_files, render_general, SEP};
     use crate::item::{Item, Kind};
+
+    #[test]
+    fn general_search_has_one_type_column_for_every_result_family() {
+        let rows = vec![
+            Item::new("set:", Kind::Search)
+                .title("Prelude Settings")
+                .fields(["set:", "search roots, hotkey, keys and rules"]),
+            Item::new("cd /tmp/Prelude", Kind::Find)
+                .title("Prelude")
+                .put("path", "/tmp/Prelude")
+                .put("index_kind", "folder"),
+            Item::new("/tmp/Prelude/prelude.png", Kind::Find)
+                .title("prelude.png")
+                .put("path", "/tmp/Prelude/prelude.png")
+                .put("index_kind", "file"),
+            Item::new("https://example.com", Kind::Link)
+                .title("prelude")
+                .fields(["Search Google", "www.google.com"]),
+            Item::new("/natural-chinese-writing", Kind::Skill)
+                .title("natural-chinese-writing")
+                .fields(["pi", "never used", "Chinese writing"]),
+        ];
+        let rendered = render_general(&rows, 160);
+        let mut positions = Vec::new();
+        for line in rendered.lines() {
+            let visible = line.split(SEP).next().unwrap();
+            let item = super::parse_line(line).unwrap();
+            let color = item.style().0;
+            positions.push(crate::width::dwidth(visible.split(color).next().unwrap()));
+        }
+        assert!(positions.iter().all(|position| *position == positions[0]), "{positions:?}");
+    }
 
     #[test]
     fn file_search_spends_space_on_the_filename_and_middle_truncates_its_parent() {

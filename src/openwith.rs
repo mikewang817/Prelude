@@ -166,6 +166,47 @@ pub fn open_default_now(path: &str) -> Result<(), String> {
     open_now(path, chosen_for(path).as_deref())
 }
 
+/// Arguments for a folder that explicitly belongs to Finder rather than to
+/// whichever application Launch Services happens to associate with it.
+pub fn finder_open_args(target: &str) -> Vec<String> {
+    vec!["-b".into(), "com.apple.finder".into(), target.into()]
+}
+
+/// Finder can become active and immediately lose focus again when Prelude's
+/// quick-terminal closes and macOS restores the previously active app. Run the
+/// activation just after that handoff instead of racing it synchronously.
+fn activate_finder_after_panel() -> Result<(), String> {
+    // `open -a Finder` uses Launch Services and needs no Automation consent.
+    // The shell carries only this fixed command; no path or user text reaches
+    // it, and it outlives the launcher long enough to win the focus handoff.
+    Command::new("/bin/sh")
+        .args(["-c", "sleep 0.15; exec /usr/bin/open -a Finder"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not bring Finder to the front: {e}"))
+}
+
+/// Open a folder in Finder and make Finder the foreground application.
+pub fn open_finder_now(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("nothing to open in Finder".into());
+    }
+    let status = Command::new("/usr/bin/open")
+        .args(finder_open_args(path))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not ask Finder to open it: {e}"))?;
+    if !status.success() {
+        return Err("Finder could not open it".into());
+    }
+    activate_finder_after_panel()
+}
+
 /// Launch an application. Ghostty is deliberately a new instance so Prelude's
 /// hidden quick-terminal process cannot receive the ordinary window request.
 pub fn launch_now(path: &str) -> Result<(), String> {
@@ -194,7 +235,10 @@ pub fn reveal_now(path: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .status()
         .map_err(|e| format!("could not ask Finder to reveal it: {e}"))?;
-    if status.success() { Ok(()) } else { Err("Finder could not reveal it".into()) }
+    if !status.success() {
+        return Err("Finder could not reveal it".into());
+    }
+    activate_finder_after_panel()
 }
 
 /// Show the installed applications and return the one picked.

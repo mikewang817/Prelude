@@ -14,26 +14,87 @@ use std::process::{Command, Stdio};
 /// belong in ^K, and a hidden one-key view is not discoverable.
 ///
 /// Keys are spelled out rather than drawn as glyphs — a row of symbols is
-/// only legible to someone who already knows what they mean. And since Enter
-/// does something different per item, the row has to say which.
-pub fn footer_for(primary: &str) -> String {
-    footer_for_item(primary, None, false)
+/// only legible to someone who already knows what they mean. The keys occupy
+/// one dim row and their meanings one cyan row below it. Fixed column widths
+/// keep the two rows paired and prevent the footer from jumping when focus
+/// moves between a file and a folder.
+const FOOTER_GAP: usize = 4;
+const PRIMARY_FOOTER_WIDTH: usize = 16;
+
+struct FooterColumn<'a> {
+    key: &'static str,
+    action: &'a str,
+    width: usize,
 }
 
-pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) -> String {
-    let sep = format!("{DIM}   ·   {RESET}");
-    let mut parts = vec![format!("{primary}{DIM}  Enter{RESET}")];
-    if command_enter && item.is_some_and(|item| matches!(item.kind, Kind::File | Kind::Find)) {
-        parts.push(format!("Open folder{DIM}  Ctrl+Enter{RESET}"));
+pub fn footer_for(primary: &str, terminal_width: usize) -> String {
+    footer_for_item(primary, None, false, terminal_width)
+}
+
+pub fn footer_for_item(
+    primary: &str,
+    item: Option<&Item>,
+    command_enter: bool,
+    terminal_width: usize,
+) -> String {
+    let mut columns = vec![FooterColumn {
+        key: "Enter",
+        action: primary,
+        width: PRIMARY_FOOTER_WIDTH,
+    }];
+    if command_enter && item.is_some_and(revealable_path) {
+        let label = if item.is_some_and(is_folder) { "Reveal in parent" } else { "Reveal" };
+        columns.push(FooterColumn { key: "Ctrl+Enter", action: label, width: 16 });
     }
     if command_enter && item.is_some_and(|item| terminal_directory(item).is_some()) {
-        parts.push(format!("Terminal{DIM}  Ctrl+Shift+Enter{RESET}"));
+        let label = if item.is_some_and(is_folder) { "Terminal here" } else { "Terminal in folder" };
+        columns.push(FooterColumn { key: "Ctrl+Shift+Enter", action: label, width: 18 });
     }
-    parts.push(format!("Actions{DIM}  Ctrl+K →{RESET}"));
+    if command_enter && item.is_some_and(|item| path_to_copy(item).is_some()) {
+        columns.push(FooterColumn { key: "Ctrl+Option+Enter", action: "Copy path", width: 17 });
+    }
+    columns.push(FooterColumn { key: "Ctrl+K →", action: "Actions", width: 8 });
     if crate::settings::preview_enabled() {
-        parts.push(format!("Preview{DIM}  Ctrl+P{RESET}"));
+        columns.push(FooterColumn { key: "Ctrl+P", action: "Preview", width: 7 });
     }
-    parts.join(&sep)
+
+    // Borders, pointer and scrollbar consume a handful of the terminal's
+    // columns. When the remainder is narrow, remove discovery aids first and
+    // filesystem verbs only as a last resort, always from whole paired
+    // columns rather than clipping one row independently of the other.
+    let available = terminal_width.saturating_sub(8);
+    for key in [
+        "Ctrl+P",
+        "Ctrl+K →",
+        "Ctrl+Option+Enter",
+        "Ctrl+Shift+Enter",
+        "Ctrl+Enter",
+    ] {
+        let used = columns.iter().map(|column| column.width).sum::<usize>()
+            + FOOTER_GAP * columns.len().saturating_sub(1);
+        if used <= available {
+            break;
+        }
+        if let Some(at) = columns.iter().position(|column| column.key == key) {
+            columns.remove(at);
+        }
+    }
+
+    let gap = " ".repeat(FOOTER_GAP);
+    let keys = columns
+        .iter()
+        .map(|column| crate::width::pad_to(column.key, column.width, false))
+        .collect::<Vec<_>>()
+        .join(&gap);
+    let actions = columns
+        .iter()
+        .map(|column| {
+            let action = crate::width::dtrunc(column.action, column.width);
+            crate::width::pad_to(&action, column.width, false)
+        })
+        .collect::<Vec<_>>()
+        .join(&gap);
+    format!("{DIM}{keys}{RESET}\n{CYAN}{actions}{RESET}")
 }
 
 /// The prefix language, stated once, where it cannot be missed.
@@ -55,13 +116,13 @@ pub fn footer_for_item(primary: &str, item: Option<&Item>, command_enter: bool) 
 /// question in full, as rows, when it is asked.
 pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
 
-/// Ctrl remains the portable terminal vocabulary, and the two directory
-/// shortcuts are Enter chords only in the fingers: the panel's generated
-/// Ghostty config translates Ctrl+Enter into private Ctrl+G and
-/// Ctrl+Shift+Enter into private Ctrl+], which is what fzf actually receives.
+/// The three object shortcuts are Enter chords only in the fingers: the
+/// panel's generated Ghostty config translates Ctrl+Enter into private Ctrl+G,
+/// Ctrl+Shift+Enter into private Ctrl+], and Ctrl+Option+Enter into private
+/// Ctrl+Y, which is what fzf actually receives.
 /// It has to be a translation — fzf knows no `ctrl-enter`, because a bare
 /// Return carries no modifier a terminal application can read. Both are
-/// contextual to rows that have a directory. Prelude installs the same two
+/// contextual to rows that carry a filesystem path. Prelude installs the same
 /// translations in ordinary Ghostty, so both launcher entry points receive
 /// the same private control codes.
 ///
@@ -70,7 +131,7 @@ pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: cli
 /// start of a field rather than as a keypress. And not Ctrl+[, which is 0x1b:
 /// that *is* Escape, the same byte, so binding it would take away the key
 /// that means "back" at every level.
-const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g,ctrl-]";
+const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g,ctrl-],ctrl-y";
 
 /// How `→` says "open the action panel" without being an `--expect` key.
 ///
@@ -202,6 +263,10 @@ pub fn search() -> i32 {
     // files and Git rows differ between two otherwise identical launchers.
     // One configured directory gives both entry points one catalogue.
     let _ = std::env::set_current_dir(crate::global::launch_directory());
+    // A fresh install or changed root prepares its shared index immediately,
+    // without making the first filename the person types be the trigger. The
+    // previous generation remains usable while this detached builder runs.
+    crate::compute::ensure_fileindex();
     crate::clipd::ensure_running();
     let items = crate::cache::gather();
     if items.is_empty() {
@@ -222,7 +287,7 @@ pub fn search() -> i32 {
     let tw = render::title_width(&items, cols);
     let widths = render::column_widths(&items, render::middle_budget(cols, tw));
     let root = crate::compute::root_items(&items);
-    let root_feed = render::render_with(&root, cols, Some(&widths), Some(tw));
+    let root_feed = render::render_general(&root, cols);
     let home = crate::compute::home_items(&items);
     let home_feed = render::render_with(&home, cols, Some(&widths), Some(tw));
 
@@ -247,7 +312,7 @@ pub fn search() -> i32 {
     let me = std::env::current_exe().unwrap_or_default();
     let me = me.to_string_lossy().into_owned();
 
-    let mut args = base_args("⌕ ", " Prelude ", Some(&footer_for("Select")));
+    let mut args = base_args("⌕ ", " Prelude ", Some(&footer_for("Select", cols)));
     args.push(format!("--header={HINTS}"));
     args.push(format!("--expect={EXPECT}"));
     args.push("--bind".into());
@@ -256,9 +321,6 @@ pub fn search() -> i32 {
         shq(&me),
         shq(&static_path.to_string_lossy())
     ));
-    // These two act *inside* the launcher and deliberately do not exit it:
-    // execute() hands the terminal over and comes back; execute-silent()
-    // doesn't even repaint. This is what lets you do several things per open.
     args.push("--bind".into());
     args.push(format!("enter:transform:{} _enter {{2}}", shq(&me)));
     // Say what Enter will do to *this* row, since the answer depends on what
@@ -287,6 +349,11 @@ pub fn search() -> i32 {
     args.push(format!("focus:{on_focus}"));
     args.push("--bind".into());
     args.push(format!("load:{on_focus}"));
+    // Resizing can change how many complete shortcut columns fit. Re-run the
+    // same helper with fzf's exported FZF_COLUMNS rather than letting either
+    // footer row be clipped independently.
+    args.push("--bind".into());
+    args.push(format!("resize:{on_focus}"));
     // `→` enters the action panel, the same door `^K` opens. `_bind` unbinds
     // it whenever a query exists; see ARROW_KEYS.
     args.push("--bind".into());
@@ -299,8 +366,6 @@ pub fn search() -> i32 {
     args.push("esc:transform:[ -n {q} ] && echo clear-query || echo abort".into());
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
-    args.push("--bind".into());
-    args.push(format!("ctrl-y:execute-silent({} _copy {{2}})", shq(&me)));
     // The key that used to be history search still is: pressed *inside* the
     // launcher it moves the query into `h:`, carrying whatever was typed, and
     // pressed again it carries the text back out. Ctrl+R twice at a shell is
@@ -359,10 +424,9 @@ pub fn search() -> i32 {
                 emit("RUN", &item.cmd);
                 return 0;
             }
-            "ctrl-g" if matches!(item.kind, Kind::File | Kind::Find) => {
+            "ctrl-g" if revealable_path(&item) => {
                 crate::frecency::bump(&item.cmd);
-                let Some(directory) = containing_directory(&item) else { return 2 };
-                return match crate::openwith::open_now(&directory.to_string_lossy(), None) {
+                return match crate::openwith::reveal_now(item.get("path")) {
                     Ok(()) => 0,
                     Err(error) => {
                         note(&error);
@@ -386,16 +450,35 @@ pub fn search() -> i32 {
                     }
                 };
             }
+            "ctrl-y" => {
+                let Some(path) = path_to_copy(&item) else { continue };
+                crate::frecency::bump(&item.cmd);
+                emit("INSERT", path);
+                return 0;
+            }
             "ctrl-g" => continue,
             _ => return apply_default(&item),
         }
     }
 }
 
+fn is_folder(item: &Item) -> bool {
+    item.kind == Kind::Dir || item.get("index_kind") == "folder"
+}
+
+fn revealable_path(item: &Item) -> bool {
+    matches!(item.kind, Kind::File | Kind::Find | Kind::Dir) && !item.get("path").is_empty()
+}
+
+pub fn path_to_copy(item: &Item) -> Option<&str> {
+    revealable_path(item).then(|| item.get("path"))
+}
+
 pub(crate) fn containing_directory(item: &Item) -> Option<std::path::PathBuf> {
-    matches!(item.kind, Kind::File | Kind::Find)
-        .then(|| std::path::Path::new(item.get("path")).parent().map(std::path::Path::to_path_buf))
-        .flatten()
+    if !matches!(item.kind, Kind::File | Kind::Find) || is_folder(item) {
+        return None;
+    }
+    std::path::Path::new(item.get("path")).parent().map(std::path::Path::to_path_buf)
 }
 
 /// The folder Ctrl+Shift+Enter should stand a terminal in.
@@ -409,14 +492,11 @@ pub(crate) fn containing_directory(item: &Item) -> Option<std::path::PathBuf> {
 /// Nothing else answers. A history entry or an agent has no directory that is
 /// *its*, and a key that guesses one for them would stop meaning one thing.
 pub fn terminal_directory(item: &Item) -> Option<std::path::PathBuf> {
-    match item.kind {
-        Kind::File | Kind::Find => containing_directory(item),
-        Kind::Dir => {
-            let path = item.get("path");
-            (!path.is_empty()).then(|| std::path::PathBuf::from(path))
-        }
-        _ => None,
+    if is_folder(item) {
+        let path = item.get("path");
+        return (!path.is_empty()).then(|| std::path::PathBuf::from(path));
     }
+    containing_directory(item)
 }
 
 /// Carry out whatever Enter means for this item.
@@ -451,8 +531,8 @@ fn act(item: &Item, verb: crate::defaults::Verb) -> i32 {
         Open => {
             let p = first_of(item, &["path", "file", "config"]);
             let p = if p.is_empty() { item.cmd.clone() } else { p };
-            let result = if item.kind == Kind::Dir {
-                crate::openwith::open_now(&p, None)
+            let result = if is_folder(item) {
+                crate::openwith::open_finder_now(&p)
             } else {
                 crate::openwith::open_default_now(&p)
             };

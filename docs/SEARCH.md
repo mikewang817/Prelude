@@ -39,18 +39,30 @@ requested.
 
 ## Ordinary root search
 
-Once a non-special query is typed, fzf searches a smaller root catalogue:
+Once a non-special query is typed, fzf searches a smaller root catalogue.
+Every ordinary result uses one semantic three-column layout—**name**, **type**,
+then **context**—so static Agent/Skill/Search rows, local files and folders,
+Quicklinks, and the web fallback share one type column. Explicit scopes retain
+specialized layouts such as the wider name/path treatment in `f:` and `dir:`.
+
+The root catalogue contains:
 
 - unanswered questions
 - Agent, Run, Skill, and MCP inventory rows
-- scope commands such as `Past Conversations` and `Search Files`
+- scope commands such as `Past Conversations` and `Files & Folders`
 - every Quicklink, fixed and template alike
 
 Session and Config objects themselves are not in root search; their visible
-scope commands lead to `s:` and `cfg:`. Large sources such as files, history,
-applications, and `$PATH` commands also require their scope. For example, exact
-`f` produces the `Search Files` command; Enter changes the query to `f:` rather
-than matching every file containing the letter.
+scope commands lead to `s:` and `cfg:`. History, applications, and `$PATH`
+commands also require their scope. Files and folders are the deliberate
+exception: any ordinary query of at least two characters adds at most ten
+local matches, while exact `f` still opens the longer `f:` view.
+
+Local matching uses the object's own name and Finder tags. A parent path is
+shown only as context and does not make a child match. Thus `OpenGhostty`
+returns `OpenGhosttyFromAnyFolder`, not every `main.swift` beneath it. A query
+containing `/`, such as `OpenGhostty/main`, explicitly opts into ordered path
+component matching.
 
 Clearing the query returns to the Agent home. Type `:` to list every scope.
 
@@ -63,8 +75,8 @@ providers (`g` → `g `). On any other row Tab does nothing.
 
 ## The web search under every query
 
-Because root search deliberately excludes the large sources, an ordinary
-sentence such as `git commit` can match nothing in it. Every query therefore
+Because root search deliberately excludes most large sources, an ordinary
+sentence such as `git commit` can still match nothing local. Every query therefore
 carries one computed web-search row, which is what makes a result of `0/58`
 impossible:
 
@@ -93,12 +105,12 @@ and can save it as a Quicklink.
 | `r:` | live Runs only |
 | `s:` | Claude Code, Codex, and pi Sessions |
 | `skill:` | non-archived Skills merged across Agent directories |
-| `f:` | current-project files plus the explicit file index |
+| `f:` | current-project files plus indexed files and folders |
 | `c:` | clipboard text, Finder file lists, and images |
 | `h:` | up to 3,000 recent unique non-secret shell-history commands |
 | `app:` | installed macOS applications |
 | `cmd:` | `$PATH` executables and built-in system commands |
-| `dir:` | zoxide results and directories recovered from shell history |
+| `dir:` | indexed folders, promoted by zoxide and recent `cd` use |
 | `proj:` | current-project scripts, project files, and Git rows |
 | `ssh:` | hosts from `~/.ssh/config` |
 | `snip:` | snippets from `snippets.toml` |
@@ -214,21 +226,26 @@ are:
 These explicit asks may use the Agent provider's network. They are not part of
 the per-keystroke inventory gather.
 
-## Files and Finder tags
+## Files, folders, and Finder tags
 
-`f:` combines two sets:
+Ordinary search combines a small result from two sets:
 
-- files below the current project root, gathered with the project source
-- paths stored by the explicit `prelude index` command
+- live files below the current project root
+- files and folders stored by Prelude's shared index
+
+`f:` shows a longer combined list; `dir:` restricts it to folders and merges in
+zoxide/recent-`cd` evidence for ranking. Empty folders are indexed too.
 
 Search roots come from `~/.config/prelude/roots.txt`; when absent or empty, the
 built-ins are `~/App`, `~/Documents`, and `~/Desktop`. Adding or removing a root
-does not rebuild the index automatically.
+starts a background rebuild automatically. The previous index stays searchable
+until the new generation is atomically complete. `prelude index` remains an
+explicit repair/rebuild command, not a normal setup step.
 
-`prelude index` uses `fd`/`fdfind` when available, otherwise `find`, with a
-maximum depth of 7. It then asks Foundation for Finder tags and stores bounded,
-credential-filtered names beside each path. Ordinary terms match paths or tags;
-`tag:` matches tags only:
+The index walks to a maximum depth of 7 without following symlinks and respects
+ignore files. It asks Foundation for Finder tags and stores bounded,
+credential-filtered names beside each path. Ordinary terms match object names
+or tags; `tag:` matches tags only:
 
 ```text
 f:invoice
@@ -236,8 +253,10 @@ f:tag:work
 f:tag:"Project Alpha"
 ```
 
-Each indexed query returns at most 60 rows. No Spotlight, `mdfind`, `mdls`, or
-Finder-tag subprocess runs on a keystroke.
+Ordinary search returns at most 10 filesystem rows; `f:` and `dir:` return at
+most 100. Exact names rank first, then prefixes, substrings, tags, and fuzzy
+subsequences; folders get a small tie-break advantage. No Spotlight, `mdfind`,
+`mdls`, or Finder-tag subprocess runs on a keystroke.
 
 An explicitly typed existing local path does not require the index. Absolute,
 `~/`, `./`, `../`, `file:///`, and slash-bearing relative paths are recognized.

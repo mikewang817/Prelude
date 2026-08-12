@@ -255,18 +255,25 @@ is not tidiness: indexing `~` is seven levels of `fd` through `~/Library`,
 which macOS protects as other applications' data, and the dialog that results
 names the terminal rather than Prelude.
 
-Search roots and the file index are separate rows: root edits are immediate,
-while rebuilding is an explicit operation that may take a minute. Nothing here
-may read the file index to draw a row. Its size is recorded beside it when it
-is built; an index from an older build has no record, so the first reader counts
-it once and writes the number down rather than re-reading a megabyte on every
-gather. Finder tags are part of that explicit rebuild: one JXA process asks
+Search roots and the file/folder index are separate rows: root edits are
+immediate and schedule a detached rebuild. The previous generation remains
+searchable until the new one is complete and atomically replaces it; a held
+kernel lock collapses simultaneous first-search/root-edit requests into one
+builder. `prelude index` is the explicit repair door, not a normal setup step.
+Nothing in Settings may read the full index to draw a row. Versioned file and
+folder counts are recorded beside it; an old file-only generation is readable
+but never blessed as current, so the first search upgrades it in the
+background. Finder tags are part of the rebuild: one JXA process asks
 Foundation for `NSURLTagNamesKey`, secret-looking or unbounded names are
-rejected, and the bounded names are stored beside the path. `f:` may match them
-normally or exclusively with `tag:`; it must never launch `mdfind`, `mdls` or
-another metadata process on a keystroke. Settings gather may use file checks
-and stats, never `pgrep` or another subprocess; live panel status belongs to
-explicit `prelude global status`.
+rejected, and the bounded names are stored beside the path. Ordinary search
+matches the object's own name or tags and mixes in at most ten rows; parent
+paths are display-only unless the query explicitly contains `/`. `f:` and
+`dir:` may return up to one hundred. All three scan the complete index while
+maintaining only a bounded Top-K heap; a broad term must not allocate/sort every
+matching row. They must never launch `mdfind`, `mdls` or another metadata
+process on a keystroke. Settings gather may use file checks and stats, never
+`pgrep` or another subprocess; live panel status belongs to explicit
+`prelude global status`.
 
 ## The rules that matter
 
@@ -299,7 +306,7 @@ file you just created must be in `f:` on the very next press — the failure
 to avoid is a missing row.
 
 **One rule, one surface, two ways in.** Ctrl+R in zsh and the global chord must
-show the same full layout, catalogue, labels, action list and directory chords.
+show the same full layout, catalogue, labels, action list and filesystem chords.
 Both copy command text; neither edits or submits the shell line. Both stand in
 `global::launch_directory`, because gathering project rows from the invoking
 shell's cwd made the answer depend on which key opened Prelude.
@@ -341,15 +348,17 @@ Enter is already a completion — scope commands and providers, `tab_completion`
 varies by row. Both are bindings, not `--expect` keys, for the reason `→` is
 not; both go through `fzf_action_arg` because a query can contain `)`.
 
-**Two general action keys: Enter is primary, Ctrl+K is the panel. Ctrl+P is a
-mode.** Graphical launchers often put a secondary action on its own key;
-Prelude keeps that action but not the key: where useful, it is the first selectable row
-below Enter's non-selectable header. Neither action is a fixed verb; both are
-per-item, and they are opposites — where one acts, the other hands you text. A
-test asserts they never coincide. The launcher has two narrower object
-shortcuts, not a generic secondary: Ctrl+Enter on File/Find opens the
-containing directory in Finder, and Ctrl+Shift+Enter opens a Ghostty standing
-in it. The second is the one thing this launcher cannot hand over as text — a
+**Two general action keys: Enter is primary, Ctrl+K is the panel. Filesystem
+rows add three explicit Enter chords. Ctrl+P is a mode.** Graphical launchers
+often put a secondary action on its own key; Prelude keeps that action but not
+the key: where useful, it is the first selectable row below Enter's
+non-selectable header. Neither action is a fixed verb; both are per-item, and
+they are opposites — where one acts, the other hands you text. A test asserts
+they never coincide. Filesystem rows add three narrower object shortcuts, not
+a generic secondary: Ctrl+Enter reveals the selected file or folder in Finder,
+Ctrl+Shift+Enter opens a Ghostty in a file's parent or the folder itself, and
+Ctrl+Option+Enter copies the exact absolute path and closes the launcher. The
+second is the one thing this launcher cannot hand over as text — a
 `cd` is only useful in a shell you already have, and the point of the panel is
 not having one. `ui::terminal_directory` gives it a single meaning, *the
 directory this row is in*: a file's parent, and a folder itself. Ctrl+P is
@@ -384,12 +393,12 @@ Option on composing characters, so Option+K types `˚` into the search box and
 Option+Enter comes through as a bare Enter — running the *primary* action,
 silently. Cmd never reaches a terminal application, and neither does the
 modifier on a Return: fzf knows no `ctrl-enter`, because a bare Return carries
-nothing a terminal application can read. So the two directory shortcuts are
-Enter chords only in the fingers. Prelude owns their translations in both the
-dedicated config and one marked ordinary-Ghostty block:
-`ctrl+enter=text:\\x07` and `ctrl+shift+enter=text:\\x1d` become private Ctrl+G
-and Ctrl+]. `EXPECT` includes both, and the footer advertises them whenever the
-focused row carries the corresponding directory.
+nothing a terminal application can read. So the filesystem shortcuts are Enter chords only in the fingers. Prelude owns
+their translations in both the dedicated config and one marked
+ordinary-Ghostty block: `ctrl+enter=text:\\x07`,
+`ctrl+shift+enter=text:\\x1d`, and `ctrl+alt+enter=text:\\x19` become private
+Ctrl+G, Ctrl+], and Ctrl+Y. `EXPECT` includes all three, and the footer advertises
+them only when the focused row carries the corresponding path.
 
 Ctrl+] is 0x1d and deliberately not 0x1f, which is `render::SEP` — the
 delimiter every rendered row carries, and which fzf would read as a field
@@ -701,8 +710,9 @@ was broken, which is most of the time. It came from an acceptance criterion in
 Sessions are on the home now, which they never were before. An ordinary query
 searches all of that plus Search commands and fixed Quicklinks —
 never the thousands of files, history entries, apps, clipboard rows and
-`$PATH` commands underneath. Exact `f` shows one Search Files command; `f:`
-opens its results. `:` lists every scope, and clearing restores the home. Keep
+`$PATH` commands underneath. Ordinary queries now mix in at most ten local
+file/folder name matches; exact `f` shows one Files & Folders command and `f:`
+opens the longer result set. `:` lists every scope, and clearing restores the home. Keep
 `home.txt`, the root-command `list.txt` and the complete scoped item cache on
 one gathered snapshot and one layout — a scope must never gather a source on
 each keystroke, and `a:waiting`, `a:failed`, `a:claude Prelude`, `a:using X`
@@ -1193,7 +1203,7 @@ rather than the markers; refusing them was the older behaviour and it said so
 with "that quicklink is managed in the config file", a sentence whose plain
 reading is the opposite of what it meant. Outside Prelude's config and caches,
 only explicit setup or actions write user files: `global install/start/update`
-own the marked two-key block in ordinary Ghostty config; capability install,
+own the marked three-key block in ordinary Ghostty config; capability install,
 raw Session export, and moving a selected file, application, skill copy or
 inactive native Session to the Trash are the other cases. None is a default
 launcher action.

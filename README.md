@@ -30,7 +30,7 @@ checksum-verified Prelude release, reuses a compatible `fzf` or installs a
 private copy, installs the official Ghostty app in `~/Applications` when
 needed, adds managed blocks to `~/.zshrc` and Ghostty's ordinary configuration,
 and installs the global panel as a LaunchAgent. The Ghostty block translates
-`Ctrl+Enter` and `Ctrl+Shift+Enter` only; uninstall removes it.
+`Ctrl+Enter`, `Ctrl+Shift+Enter`, and `Ctrl+Option+Enter`; uninstall removes it.
 
 On first install, enable Ghostty in **System Settings → Privacy & Security →
 Accessibility** when prompted. Prelude checks Ghostty's actual global event-tap
@@ -120,7 +120,8 @@ skill:is:archived         archived Skills, ready to restore
 mcp:is:archived           archived MCP servers, ready to restore
 /cnipa-ooa                run an installed Skill and show its answer
 @claude explain this      ask an installed Agent and show its answer
-f:tag:work                indexed files carrying a Finder tag
+Prelude                    files and folders named Prelude
+f:tag:work                 indexed files and folders carrying a Finder tag
 c:                        clipboard text, Finder objects, and images
 ql:                       keywords you saved yourself
 h:git rebase              recent, filtered shell history
@@ -129,10 +130,12 @@ app:zed                   installed applications
 :                         every available scope
 ```
 
-Large collections stay behind their scope, so a root query searches a small
-catalogue rather than every file on the disk. Whatever you type also carries a
-web search on the last row, which is what stops an unmatched query from being
-an empty box:
+Ordinary queries also add at most ten matching local files or folders. Their
+own names and Finder tags match; parent paths are display context, so searching
+`OpenGhostty` returns the folder named `OpenGhosttyFromAnyFolder`, not every
+`main.swift` below it. Large non-file collections stay behind their scopes.
+Whatever you type also carries a web search on the last row, which stops an
+unmatched query from being an empty box:
 
 ```text
 git commit                the query itself · Search Google · Enter opens it
@@ -190,8 +193,9 @@ prelude quicklink check
 | `Ctrl+R` | Search shell history with the text already typed; again to come back |
 | `Ctrl+K` | Open contextual actions |
 | `Ctrl+P` | Toggle Quick Look when enabled |
-| `Ctrl+Enter` | Open a file's containing folder in Finder |
-| `Ctrl+Shift+Enter` | Open a new Ghostty standing in that folder |
+| `Ctrl+Enter` | Reveal a file or folder in Finder |
+| `Ctrl+Shift+Enter` | Open Ghostty in the file's parent or the selected folder |
+| `Ctrl+Option+Enter` | Copy the absolute path and close Prelude |
 | `→` | Open the focused row's actions, when nothing is typed |
 | `←` | Go back one level, when nothing is typed |
 | `Escape` | Go back one level; close Prelude at the outermost one |

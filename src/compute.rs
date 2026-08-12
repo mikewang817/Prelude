@@ -758,6 +758,7 @@ pub fn quicklink_draft(it: &Item) -> Result<Option<QuicklinkDraft>, String> {
         return Ok(None);
     }
     let (kind, raw) = match it.kind {
+        Kind::Find if it.get("index_kind") == "folder" => ("folder", it.get("path")),
         Kind::File | Kind::Find => ("file", it.get("path")),
         Kind::Config => ("config", it.get("path")),
         Kind::Dir => ("folder", it.get("path")),
@@ -779,7 +780,7 @@ pub fn quicklink_draft(it: &Item) -> Result<Option<QuicklinkDraft>, String> {
             .map_err(|_| "that target is not there any more".to_string())?;
         crate::paths::tilde(&real.to_string_lossy())
     };
-    let name = if matches!(it.kind, Kind::Dir) {
+    let name = if kind == "folder" {
         raw.trim_end_matches('/').rsplit('/').next().unwrap_or(&it.title).to_string()
     } else {
         crate::width::flatten(&it.title)
@@ -1611,12 +1612,12 @@ const SCOPES: &[ScopeDef] = &[
     ScopeDef { scope: Scope::Running, prefix: "r:", title: "Running Agents", desc: "working and waiting now" },
     ScopeDef { scope: Scope::Sessions, prefix: "s:", title: "Past Conversations", desc: "all agent sessions" },
     ScopeDef { scope: Scope::Skills, prefix: "skill:", title: "Skills", desc: "all installed agent capabilities" },
-    ScopeDef { scope: Scope::Files, prefix: "f:", title: "Search Files", desc: "project and indexed roots" },
+    ScopeDef { scope: Scope::Files, prefix: "f:", title: "Files & Folders", desc: "current project and indexed roots" },
     ScopeDef { scope: Scope::Clipboard, prefix: "c:", title: "Clipboard History", desc: "recent copied text" },
     ScopeDef { scope: Scope::History, prefix: "h:", title: "Shell History", desc: "recent commands" },
     ScopeDef { scope: Scope::Applications, prefix: "app:", title: "Applications", desc: "installed macOS apps" },
     ScopeDef { scope: Scope::Commands, prefix: "cmd:", title: "Commands", desc: "$PATH and system commands" },
-    ScopeDef { scope: Scope::Directories, prefix: "dir:", title: "Folders", desc: "zoxide and recent cd targets" },
+    ScopeDef { scope: Scope::Directories, prefix: "dir:", title: "Folders", desc: "indexed, frequent and recent folders" },
     ScopeDef { scope: Scope::Project, prefix: "proj:", title: "Current Project", desc: "scripts, files and git" },
     ScopeDef { scope: Scope::Ssh, prefix: "ssh:", title: "SSH Hosts", desc: "~/.ssh/config" },
     ScopeDef { scope: Scope::Snippets, prefix: "snip:", title: "Snippets", desc: "saved command templates" },
@@ -1687,6 +1688,10 @@ pub fn history_toggle(q: &str) -> String {
 pub fn needs_static_items(q: &str) -> bool {
     let t = q.trim();
     scope_query(t).is_some()
+        // Ordinary name search also includes the current project's live file
+        // rows, so a file created a moment ago does not wait for the shared
+        // index. Parsing the cached snapshot costs no filesystem walk.
+        || (t.chars().count() >= 2 && !is_special(t))
         || t.starts_with('/')
         || (t.starts_with('@') && !t.chars().any(char::is_whitespace))
         // An exact alias needs the catalogue so the rows it leads can come
@@ -1782,8 +1787,9 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
 }
 
 /// What an ordinary root query may fuzzy-match. Large and private sources
-/// are commands here, not thousands of eager rows: `f` finds Search Files,
-/// and `f:` opens that scope. Fixed Quicklinks remain root commands even when
+/// are commands here, not thousands of eager rows: `f` finds Files & Folders,
+/// and `f:` opens that scope. A separate per-query helper mixes in only the
+/// best ten filesystem matches. Fixed Quicklinks remain root commands even when
 /// their target happens to be a file or application.
 ///
 /// Sessions are the one kind held back: there are hundreds of them and `s:`
@@ -2064,21 +2070,38 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         return crate::sources::sessions::search(term);
     }
     if scope == Scope::Files {
-        let mut rows: Vec<Item> = static_items.iter()
-            .filter(|it| it.kind == File && matches_terms(it, term))
-            .cloned().collect();
+        ensure_fileindex();
+        let mut rows: Vec<Item> = static_items
+            .iter()
+            .filter(|item| item.kind == File)
+            .filter_map(|item| scored_filesystem_item(item.clone(), term, 40))
+            .collect();
         match search_fileindex(term) {
             Some(hits) => rows.extend(hits),
             None if rows.is_empty() => rows.push(
                 Item::new("prelude index", Find)
                     .title("⚠ file index not built")
-                    .sub("no index yet — run:  prelude index"),
+                    .sub("file search is being prepared"),
             ),
             None => {}
         }
-        let mut rows = crate::cache::finish(rows);
-        rows.truncate(100);
-        return rows;
+        return finish_filesystem_rows(rows, SCOPED_FILE_RESULT_LIMIT);
+    }
+    if scope == Scope::Directories {
+        ensure_fileindex();
+        // zoxide and recent `cd` targets are a ranking signal, not a separate
+        // definition of what a folder search is. Indexed folders fill the
+        // catalogue; a folder the person actually uses wins otherwise equal
+        // name matches.
+        let mut rows: Vec<Item> = static_items
+            .iter()
+            .filter(|item| item.kind == Dir)
+            .filter_map(|item| scored_filesystem_item(item.clone(), term, 400))
+            .collect();
+        if let Some(hits) = search_fileindex_kind(term, Some(IndexedKind::Folder), SCOPED_FILE_RESULT_LIMIT) {
+            rows.extend(hits);
+        }
+        return finish_filesystem_rows(rows, SCOPED_FILE_RESULT_LIMIT);
     }
     if scope == Scope::Agent {
         // The control scope, and the only one with a filter vocabulary of its
@@ -2252,10 +2275,86 @@ pub(crate) fn web_search_row_from(text: &str, q: &str) -> Option<Item> {
     )
 }
 
-// ─── whole-disk file search ──────────────────────────────────────────────
+// ─── indexed file and folder search ─────────────────────────────────────
+
+/// Ordinary search gets enough local objects to answer a remembered name
+/// without turning the launcher into a file browser. `f:` and `dir:` remain
+/// available when the person explicitly asks for a longer list.
+pub const ROOT_FILE_RESULT_LIMIT: usize = 10;
+const SCOPED_FILE_RESULT_LIMIT: usize = 100;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexedKind {
+    File,
+    Folder,
+}
+
+impl IndexedKind {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::File => "F",
+            Self::Folder => "D",
+        }
+    }
+
+    fn data(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Folder => "folder",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexCounts {
+    pub files: usize,
+    pub folders: usize,
+}
+
+struct IndexRecord<'a> {
+    kind: IndexedKind,
+    path: &'a str,
+    tags: Vec<String>,
+}
+
+/// v2 records carry an explicit type. A line from the old, file-only index is
+/// still read as a file so an upgrade never turns a working search blank
+/// before the automatic rebuild has finished.
+fn parse_index_record(record: &str) -> IndexRecord<'_> {
+    let mut fields = record.split('\t');
+    let first = fields.next().unwrap_or_default();
+    let (kind, path, encoded) = match first {
+        "F" => (IndexedKind::File, fields.next().unwrap_or_default(), fields.next()),
+        "D" => (IndexedKind::Folder, fields.next().unwrap_or_default(), fields.next()),
+        _ => (IndexedKind::File, first, fields.next()),
+    };
+    IndexRecord {
+        kind,
+        path,
+        tags: encoded.and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default(),
+    }
+}
 
 pub fn fileindex_path() -> std::path::PathBuf {
     paths::cache().join("fileindex.txt")
+}
+
+fn index_lock_path() -> std::path::PathBuf {
+    paths::cache().join("fileindex.build")
+}
+
+pub fn index_building() -> bool {
+    crate::cache::lock_is_held(&index_lock_path())
+}
+
+/// Search can ask for an index without waiting for it. The old index remains
+/// available until the new one is atomically complete, and the held kernel
+/// lock collapses every simultaneous request to one builder.
+pub fn ensure_fileindex() {
+    if !crate::settings::index_needs_rebuild() || index_building() {
+        return;
+    }
+    crate::cache::spawn_self(&["_index"]);
 }
 
 pub fn index_roots() -> Vec<String> {
@@ -2353,90 +2452,339 @@ fn finder_tags(_: &std::path::Path, _: &[String]) -> std::collections::HashMap<S
     std::collections::HashMap::new()
 }
 
-pub fn build_fileindex() -> usize {
-    let finder = which("fd").or_else(|| which("fdfind"));
-    let mut lines = Vec::new();
+fn indexed_paths() -> Vec<(IndexedKind, String)> {
+    let mut paths = Vec::new();
     for root in index_roots() {
-        if !std::path::Path::new(&root).is_dir() {
+        let root = std::path::Path::new(&root);
+        if !root.is_dir() {
             continue;
         }
-        let out = match &finder {
-            Some(fd) => run(
-                &[&fd.to_string_lossy(), "--type", "f", "--max-depth", "7",
-                  "--color", "never", ".", &root],
-                Duration::from_secs(90),
-            ),
-            None => run(
-                &["find", &root, "-maxdepth", "7", "-type", "f"],
-                Duration::from_secs(90),
-            ),
-        };
-        lines.extend(out.lines().map(str::to_string));
+        // The same in-process walker used by the live project source, rather
+        // than collecting a subprocess's bounded stdout. A large selected
+        // root must not silently lose everything beyond the output cap.
+        let walker = ignore::WalkBuilder::new(root)
+            .max_depth(Some(7))
+            .follow_links(false)
+            .build();
+        paths.extend(walker.flatten().filter_map(|entry| {
+            if entry.depth() == 0 {
+                return None;
+            }
+            let kind = match entry.file_type() {
+                Some(file_type) if file_type.is_file() => IndexedKind::File,
+                Some(file_type) if file_type.is_dir() => IndexedKind::Folder,
+                _ => return None,
+            };
+            Some((kind, entry.path().to_string_lossy().into_owned()))
+        }));
     }
-    let index = fileindex_path();
-    // Write paths first so a tag-reader failure still leaves a complete usable
-    // index, and so JXA receives one short argv entry rather than thousands of
-    // paths (which can exceed ARG_MAX).
-    let _ = crate::cache::write_atomic(&index, lines.join("\n").as_bytes());
-    let tags = finder_tags(&index, &lines);
-    let records: Vec<String> = lines
-        .iter()
-        .map(|path| match tags.get(path) {
-            Some(tags) => format!("{path}\t{}", serde_json::to_string(tags).unwrap_or_default()),
-            None => path.clone(),
-        })
-        .collect();
-    let _ = crate::cache::write_atomic(&index, records.join("\n").as_bytes());
-    // Recorded so the settings row can state the size without reading a
-    // megabyte of paths on every gather.
-    crate::settings::record_index_count(lines.len());
-    lines.len()
+    paths.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.marker().cmp(right.0.marker())));
+    paths.dedup_by(|left, right| left.1 == right.1);
+    paths
 }
 
-pub(crate) fn search_fileindex_from(text: &str, term: &str) -> Vec<Item> {
-    let needles: Vec<String> = crate::sources::sessions::split_words(term)
+pub fn build_fileindex() -> IndexCounts {
+    let Some(_lock) = crate::cache::try_lock(&index_lock_path(), Duration::ZERO) else {
+        return crate::settings::index_counts().unwrap_or_default();
+    };
+    let paths = indexed_paths();
+    let tag_paths: Vec<String> = paths.iter().map(|(_, path)| path.clone()).collect();
+    let staging = paths::cache().join(format!("fileindex.tags.{}", std::process::id()));
+    // Finder's tag reader accepts one path-list file. This staging file is not
+    // the live index: search continues to use the old generation throughout
+    // the walk and metadata pass.
+    let _ = crate::cache::write_atomic(&staging, tag_paths.join("\n").as_bytes());
+    let tags = finder_tags(&staging, &tag_paths);
+    let _ = std::fs::remove_file(&staging);
+    let records: Vec<String> = paths
+        .iter()
+        .map(|(kind, path)| {
+            let prefix = format!("{}\t{path}", kind.marker());
+            match tags.get(path) {
+                Some(tags) => format!("{prefix}\t{}", serde_json::to_string(tags).unwrap_or_default()),
+                None => prefix,
+            }
+        })
+        .collect();
+    let _ = crate::cache::write_atomic(&fileindex_path(), records.join("\n").as_bytes());
+    let counts = IndexCounts {
+        files: paths.iter().filter(|(kind, _)| *kind == IndexedKind::File).count(),
+        folders: paths.iter().filter(|(kind, _)| *kind == IndexedKind::Folder).count(),
+    };
+    crate::settings::record_index_counts(counts);
+    counts
+}
+
+fn name_score(name: &str, needles: &[String]) -> Option<i64> {
+    if needles.is_empty() {
+        return Some(0);
+    }
+    let name = name.to_lowercase();
+    let joined = needles.join(" ");
+    if name == joined {
+        return Some(10_000);
+    }
+    if name.starts_with(&joined) {
+        return Some(8_000);
+    }
+    if name.contains(&joined) {
+        return Some(6_000);
+    }
+    if needles.iter().all(|needle| name.contains(needle)) {
+        return Some(5_000);
+    }
+    // A forgiving subsequence belongs below every real substring match. It
+    // tolerates remembered abbreviations without making parent paths search
+    // terms and without requiring fzf to rank fifty thousand records itself.
+    let compact: String = needles.concat();
+    let mut chars = name.chars();
+    compact
+        .chars()
+        .all(|wanted| chars.by_ref().any(|candidate| candidate == wanted))
+        .then_some(3_000)
+}
+
+fn filesystem_score(
+    name: &str,
+    path: &str,
+    tags: &[String],
+    term: &str,
+    kind: IndexedKind,
+) -> Option<i64> {
+    let words: Vec<String> = crate::sources::sessions::split_words(term)
         .into_iter()
         .map(|word| word.to_lowercase())
         .collect();
-    let mut out = Vec::new();
-    for record in text.lines() {
-        let (path, tags): (&str, Vec<String>) = match record.split_once('\t') {
-            Some((path, encoded)) => (path, serde_json::from_str(encoded).unwrap_or_default()),
-            None => (record, Vec::new()),
-        };
-        let path_low = path.to_lowercase();
-        let tags_low: Vec<String> = tags.iter().map(|tag| tag.to_lowercase()).collect();
-        let matches = needles.iter().all(|needle| {
-            if let Some(tag) = needle.strip_prefix("tag:") {
-                !tag.is_empty() && tags_low.iter().any(|candidate| candidate.contains(tag))
-            } else {
-                path_low.contains(needle)
-                    || tags_low.iter().any(|candidate| candidate.contains(needle))
+    let tags_low: Vec<String> = tags.iter().map(|tag| tag.to_lowercase()).collect();
+    let mut ordinary = Vec::new();
+    for word in words {
+        if let Some(tag) = word.strip_prefix("tag:") {
+            if tag.is_empty() || !tags_low.iter().any(|candidate| candidate.contains(tag)) {
+                return None;
             }
-        });
-        if matches {
-            let name = path.rsplit('/').next().unwrap_or(path).to_string();
-            let dir = path.rsplit_once('/').map(|(dir, _)| paths::tilde(dir)).unwrap_or_default();
-            out.push(
-                Item::new(path, Kind::Find)
-                    .title(name)
-                    .sub(dir)
-                    .put("path", path)
-                    .put("tags", tags.join("\u{1e}")),
-            );
-            if out.len() >= 60 {
-                break;
+        } else {
+            ordinary.push(word);
+        }
+    }
+    let path_query = ordinary.iter().any(|word| word.contains('/'));
+    let score = if ordinary.is_empty() {
+        4_000
+    } else if let Some(score) = name_score(name, &ordinary) {
+        score
+    } else if path_query && path_matches(path, &ordinary) {
+        4_500
+    } else if ordinary
+        .iter()
+        .all(|needle| tags_low.iter().any(|candidate| candidate.contains(needle)))
+    {
+        4_000
+    } else {
+        return None;
+    };
+    Some(score + if kind == IndexedKind::Folder && !term.trim().is_empty() { 250 } else { 0 })
+}
+
+fn path_matches(path: &str, words: &[String]) -> bool {
+    let query = words.join(" ");
+    let parts: Vec<&str> = query.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    let components: Vec<String> = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let mut at = 0;
+    for part in parts {
+        let Some(found) = components[at..].iter().position(|component| component.contains(part)) else {
+            return false;
+        };
+        at += found + 1;
+    }
+    true
+}
+
+fn indexed_item(kind: IndexedKind, path: &str, tags: &[String], score: i64) -> Item {
+    let name = path.rsplit('/').next().unwrap_or(path).to_string();
+    let parent = path.rsplit_once('/').map(|(dir, _)| paths::tilde(dir)).unwrap_or_default();
+    let cmd = match kind {
+        IndexedKind::File => path.to_string(),
+        IndexedKind::Folder => format!("cd {}", shq(path)),
+    };
+    Item::new(cmd, Kind::Find)
+        .title(name)
+        .sub(parent)
+        .put("path", path)
+        .put("tags", tags.join("\u{1e}"))
+        .put("index_kind", kind.data())
+        .rank(score as f64)
+}
+
+fn indexed_kind(item: &Item) -> IndexedKind {
+    if item.kind == Kind::Dir || item.get("index_kind") == "folder" {
+        IndexedKind::Folder
+    } else {
+        IndexedKind::File
+    }
+}
+
+fn scored_filesystem_item(mut item: Item, term: &str, bonus: i64) -> Option<Item> {
+    let path = item.get("path").to_string();
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&item.title);
+    let score = filesystem_score(name, &path, &[], term, indexed_kind(&item))? + bonus;
+    item.data.insert("rank".into(), format!("{score:.3}"));
+    item.score = item.band() as f64 + score as f64;
+    Some(item)
+}
+
+fn finish_filesystem_rows(rows: Vec<Item>, limit: usize) -> Vec<Item> {
+    let freq = crate::frecency::load();
+    let mut best: std::collections::HashMap<String, Item> = std::collections::HashMap::new();
+    for mut item in rows {
+        let path = item.get("path").to_string();
+        if path.is_empty() {
+            continue;
+        }
+        if let Some((uses, last)) = freq.get(&item.cmd) {
+            item.score += crate::frecency::bonus(*uses, *last);
+        }
+        match best.get(&path) {
+            Some(existing) if existing.score >= item.score => {}
+            _ => {
+                best.insert(path, item);
             }
         }
     }
-    out
+    let mut rows: Vec<Item> = best.into_values().collect();
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.get("path").cmp(right.get("path")))
+    });
+    rows.truncate(limit);
+    rows
 }
 
-/// `f:name` searches a prebuilt index. Finder tags are captured during the
-/// explicit rebuild, never by launching metadata tools on each keystroke.
-pub fn search_fileindex(term: &str) -> Option<Vec<Item>> {
+struct FileCandidate<'a> {
+    kind: IndexedKind,
+    path: &'a str,
+    tags: Vec<String>,
+    score: i64,
+    name_lower: String,
+}
+
+impl PartialEq for FileCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.name_lower == other.name_lower && self.path == other.path
+    }
+}
+
+impl Eq for FileCandidate<'_> {}
+
+impl PartialOrd for FileCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FileCandidate<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // BinaryHeap keeps its greatest member on top. Define "greatest" as
+        // the worst retained hit: lower score, then a later name/path. A new
+        // candidate can replace it in O(log N), so even a query matching every
+        // indexed object allocates only the N rows it can actually display.
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| self.name_lower.cmp(&other.name_lower))
+            .then_with(|| self.path.cmp(other.path))
+    }
+}
+
+fn search_fileindex_from_kind(
+    text: &str,
+    term: &str,
+    wanted: Option<IndexedKind>,
+    limit: usize,
+) -> Vec<Item> {
+    let mut best = std::collections::BinaryHeap::with_capacity(limit.saturating_add(1));
+    for line in text.lines() {
+        let record = parse_index_record(line);
+        if record.path.is_empty() || wanted.is_some_and(|kind| kind != record.kind) {
+            continue;
+        }
+        let name = record.path.rsplit('/').next().unwrap_or(record.path);
+        let Some(score) = filesystem_score(name, record.path, &record.tags, term, record.kind) else {
+            continue;
+        };
+        let candidate = FileCandidate {
+            kind: record.kind,
+            path: record.path,
+            tags: record.tags,
+            score,
+            name_lower: name.to_lowercase(),
+        };
+        if best.len() < limit {
+            best.push(candidate);
+        } else if best.peek().is_some_and(|worst| candidate < *worst) {
+            let _ = best.pop();
+            best.push(candidate);
+        }
+    }
+    let rows = best
+        .into_vec()
+        .into_iter()
+        .map(|candidate| {
+            indexed_item(candidate.kind, candidate.path, &candidate.tags, candidate.score)
+        })
+        .collect();
+    finish_filesystem_rows(rows, limit)
+}
+
+#[cfg(test)]
+pub(crate) fn search_fileindex_from(text: &str, term: &str) -> Vec<Item> {
+    search_fileindex_from_kind(text, term, None, SCOPED_FILE_RESULT_LIMIT)
+}
+
+fn search_fileindex_kind(
+    term: &str,
+    wanted: Option<IndexedKind>,
+    limit: usize,
+) -> Option<Vec<Item>> {
     let text = std::fs::read_to_string(fileindex_path()).ok()?;
-    Some(search_fileindex_from(&text, term))
+    Some(search_fileindex_from_kind(&text, term, wanted, limit))
+}
+
+/// Search a prebuilt local index. Finder tags are captured while rebuilding,
+/// never by launching metadata tools on each keystroke.
+pub fn search_fileindex(term: &str) -> Option<Vec<Item>> {
+    search_fileindex_kind(term, None, SCOPED_FILE_RESULT_LIMIT)
+}
+
+/// The small local answer mixed into ordinary launcher search. Parent paths
+/// are display context only: searching `OpenGhostty` can return the folder
+/// named `OpenGhosttyFromAnyFolder`, never every `main.swift` below it.
+pub fn root_filesystem_rows(term: &str, static_items: &[Item]) -> Vec<Item> {
+    let term = term.trim();
+    if term.is_empty() || term.chars().count() < 2 || term.starts_with("tag:") {
+        return Vec::new();
+    }
+    ensure_fileindex();
+    let mut rows = search_fileindex_kind(term, None, ROOT_FILE_RESULT_LIMIT).unwrap_or_default();
+    rows.extend(
+        static_items
+            .iter()
+            .filter(|item| item.kind == Kind::File)
+            .filter_map(|item| scored_filesystem_item(item.clone(), term, 100)),
+    );
+    finish_filesystem_rows(rows, ROOT_FILE_RESULT_LIMIT)
 }
 
 /// `@claude refactor this` — start an agent in the current directory with a
@@ -2599,6 +2947,16 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
     if q.trim() != "/" {
         if let Some(item) = local_path_item(q) {
             return vec![item];
+        }
+        // A slash can also be a deliberate indexed-path query rather than a
+        // literal existing path. It is the one opt-in to parent-path matching:
+        // `OpenGhostty/main` may find main.swift below that folder, while the
+        // ordinary `OpenGhostty` query returns only the folder itself.
+        if !q.trim().starts_with('/') && looks_like_local_path(q) {
+            ensure_fileindex();
+            if let Some(hits) = search_fileindex_kind(q.trim(), None, SCOPED_FILE_RESULT_LIMIT) {
+                return hits;
+            }
         }
     }
     if let Some(rows) = skill_prefix_rows(q, static_items) {

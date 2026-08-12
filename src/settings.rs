@@ -349,31 +349,60 @@ fn index_count_file() -> PathBuf {
     crate::paths::cache().join("fileindex.count")
 }
 
-/// Record how many files the last index run found.
-///
-/// Written beside the index so the settings row can state the number without
-/// reading a megabyte of paths on every gather.
-pub fn record_index_count(n: usize) {
-    let _ = crate::cache::write_atomic(&index_count_file(), n.to_string().as_bytes());
+/// Record how many files and folders the last index run found. Kept beside
+/// the index so drawing Settings never reads megabytes of paths.
+const INDEX_SCHEMA: &str = "2";
+
+pub fn record_index_counts(counts: crate::compute::IndexCounts) {
+    let text = format!("{INDEX_SCHEMA}\t{}\t{}", counts.files, counts.folders);
+    let _ = crate::cache::write_atomic(&index_count_file(), text.as_bytes());
 }
 
-/// How many files the index holds.
-///
-/// Recorded when the index is built. An index built by an older version has
-/// no record, so the first reader counts it and writes the number down —
-/// once, rather than reading a megabyte of paths on every gather forever, and
-/// rather than the row claiming "never indexed" over a working index.
-pub fn index_count() -> Option<usize> {
-    if let Some(n) = std::fs::read_to_string(index_count_file())
-        .ok()
-        .and_then(|t| t.trim().parse().ok())
-    {
-        return Some(n);
+fn saved_index_counts() -> Option<(bool, crate::compute::IndexCounts)> {
+    let text = std::fs::read_to_string(index_count_file()).ok()?;
+    let fields: Vec<&str> = text.trim().split('\t').collect();
+    match fields.as_slice() {
+        [schema, files, folders] if *schema == INDEX_SCHEMA => Some((
+            true,
+            crate::compute::IndexCounts {
+                files: files.parse().ok()?,
+                folders: folders.parse().ok()?,
+            },
+        )),
+        // A short-lived development build wrote two unversioned counts. Read
+        // it accurately but rebuild it just like the original one-count form.
+        [files, folders] => Some((
+            false,
+            crate::compute::IndexCounts {
+                files: files.parse().ok()?,
+                folders: folders.parse().ok()?,
+            },
+        )),
+        [files] => Some((
+            false,
+            crate::compute::IndexCounts { files: files.parse().ok()?, folders: 0 },
+        )),
+        _ => None,
+    }
+}
+
+pub fn index_counts() -> Option<crate::compute::IndexCounts> {
+    if let Some((_, counts)) = saved_index_counts() {
+        return Some(counts);
     }
     let text = std::fs::read_to_string(crate::compute::fileindex_path()).ok()?;
-    let n = text.lines().filter(|l| !l.trim().is_empty()).count();
-    record_index_count(n);
-    Some(n)
+    let mut counts = crate::compute::IndexCounts::default();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        if line.starts_with("D\t") {
+            counts.folders += 1;
+        } else {
+            counts.files += 1;
+        }
+    }
+    // Reading an older index must not bless it as schema 2: doing so would
+    // cancel the automatic rebuild that adds folders. The count is cheap once
+    // per upgrade and the builder writes the versioned sidecar when complete.
+    Some(counts)
 }
 
 fn mtime(p: &Path) -> Option<u64> {
@@ -386,18 +415,35 @@ fn mtime(p: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+fn mtime_nanos(p: &Path) -> Option<u128> {
+    std::fs::metadata(p)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
+
 /// Has the roots list been edited since the index was built?
 ///
 /// The failure this answers is silent and was the whole problem: you add a
 /// folder, `f:` keeps returning the old set, and nothing anywhere says the
 /// index is the reason.
 pub fn index_stale() -> bool {
-    let built = mtime(&crate::compute::fileindex_path());
-    match (built, mtime(&roots_file())) {
+    let built = mtime_nanos(&crate::compute::fileindex_path());
+    match (built, mtime_nanos(&roots_file())) {
         (None, _) => true,
         (Some(built), Some(edited)) => edited > built,
         (Some(_), None) => false,
     }
+}
+
+/// A current v1 index is still missing every folder. Treat that as an upgrade
+/// to prepare in the background without misreporting the person's roots as
+/// stale while the old file search remains usable.
+pub fn index_needs_rebuild() -> bool {
+    index_stale() || !saved_index_counts().is_some_and(|(current, _)| current)
 }
 
 /// Add a folder to the search roots.
@@ -543,8 +589,8 @@ fn resolved(entry: &str) -> Option<PathBuf> {
 
 fn write_roots(lines: &[String]) -> Result<(), String> {
     let mut out = String::from(
-        "# Folders `prelude index` walks, one per line; ~/ is expanded.\n\
-         # Written by the set: panel. Run `prelude index` after editing.\n\n",
+        "# Folders Prelude indexes, one per line; ~/ is expanded.\n\
+         # Written by the set: panel. Changes rebuild the index automatically.\n\n",
     );
     for l in lines {
         out.push_str(l);
@@ -646,7 +692,7 @@ pub fn items() -> Vec<Item> {
     // find at all, and the one nothing else in the launcher mentions.
     let roots = root_rows();
     let indexed = crate::compute::fileindex_path();
-    let count = index_count();
+    let counts = index_counts();
     let age = mtime(&indexed).map(|t| ago(crate::bus::now().saturating_sub(t)));
     let missing = roots.iter().filter(|(_, s)| s != "available").count();
     let value = if missing == 0 {
@@ -667,18 +713,23 @@ pub fn items() -> Vec<Item> {
         .put("path", roots_file().to_string_lossy().into_owned()),
     );
 
-    // Indexing can take a minute, so it is its own visible operation rather
-    // than a side effect hidden behind adding a root.
-    let stale = index_stale();
-    let index_value = match (count, &age) {
-        (Some(n), Some(a)) => format!("{n} files · built {a}"),
-        (None, Some(a)) => format!("built {a}"),
-        _ => "never built".into(),
+    // Rebuilding is automatic after root edits; this row remains an explicit
+    // repair door and an honest status surface.
+    let stale = index_needs_rebuild();
+    let index_value = match (counts, &age) {
+        (Some(counts), Some(a)) => {
+            format!("{} files · {} folders · updated {a}", counts.files, counts.folders)
+        }
+        (None, Some(a)) => format!("updated {a}"),
+        _ if crate::compute::index_building() => "building…".into(),
+        _ => "preparing…".into(),
     };
-    let index_detail = if stale {
-        "stale · rebuild before relying on f:"
+    let index_detail = if crate::compute::index_building() {
+        "updating in the background · the previous index stays available"
+    } else if stale {
+        "update scheduled · the previous index stays available"
     } else {
-        "current · paths and Finder tags for every f: search"
+        "current · names and Finder tags for direct, f: and dir: search"
     };
     v.push(
         row("index", "File index", index_value, index_detail, EDIT_REBUILD)
@@ -834,14 +885,17 @@ pub fn detail(it: &Item) -> Vec<String> {
             out.push("`f:` searches these roots plus the current project.".into());
         }
         "index" => {
-            match index_count() {
-                Some(n) => out.push(format!("{n} files in the shared index")),
-                None => out.push("the index has never been built".into()),
+            match index_counts() {
+                Some(counts) => out.push(format!(
+                    "{} files and {} folders in the shared index",
+                    counts.files, counts.folders
+                )),
+                None => out.push("the index is being prepared".into()),
             }
-            if index_stale() {
-                out.push("The roots have changed since it was built.".into());
+            if index_needs_rebuild() {
+                out.push("Prelude is updating it in the background.".into());
             }
-            out.push("Rebuilding walks every search root and records Finder tags; it may take a minute.".into());
+            out.push("Rebuilding walks every search root and records names and Finder tags.".into());
         }
         "key" => {
             out.push("Bound by `prelude init zsh`, which runs when a shell starts,".into());
@@ -940,7 +994,8 @@ pub fn add_root_interactively() -> i32 {
     };
     match add_root(&raw) {
         Ok(added) => {
-            crate::ui::note(&format!("{added} added — run Rebuild the index to include it"));
+            crate::compute::ensure_fileindex();
+            crate::ui::note(&format!("{added} added — file search is updating"));
             0
         }
         Err(e) => {
@@ -965,7 +1020,8 @@ pub fn remove_root_interactively() -> i32 {
     };
     match remove_root(&entry) {
         Ok(()) => {
-            crate::ui::note(&format!("{entry} removed — run Rebuild the index to forget it"));
+            crate::compute::ensure_fileindex();
+            crate::ui::note(&format!("{entry} removed — file search is updating"));
             0
         }
         Err(e) => {
@@ -1226,11 +1282,11 @@ fn checks() -> Vec<Check> {
             });
         }
     }
-    if index_stale() {
+    if index_needs_rebuild() {
         out.push(Check {
             severity: "warning",
             setting: "index".into(),
-            message: "the file index has not been built for the current roots".into(),
+            message: "the file and folder index is updating for the current roots".into(),
         });
     }
     out
@@ -1241,7 +1297,7 @@ fn check(json: bool) -> i32 {
     if json {
         println!("{}", serde_json::to_string_pretty(&checks).unwrap_or_else(|_| "[]".into()));
     } else if checks.is_empty() {
-        println!("Prelude settings are valid and the file index is current.");
+        println!("Prelude settings are valid and the file and folder index is current.");
     } else {
         for check in &checks {
             println!("{:<8} {:<16} {}", check.severity, check.setting, check.message);
@@ -1303,10 +1359,14 @@ pub fn dispatch(args: &[&str]) -> i32 {
             }
             return 0;
         }
-        ["add-root", path] => add_root(path)
-            .map(|added| format!("{added} added — run `prelude index` to include it")),
-        ["remove-root", path] => remove_root(path)
-            .map(|()| format!("{path} removed — run `prelude index` to forget it")),
+        ["add-root", path] => add_root(path).map(|added| {
+            crate::compute::ensure_fileindex();
+            format!("{added} added — file search is updating")
+        }),
+        ["remove-root", path] => remove_root(path).map(|()| {
+            crate::compute::ensure_fileindex();
+            format!("{path} removed — file search is updating")
+        }),
         ["set", key, value] => set_named(key, value),
         ["reset", key] => reset_named(key),
         _ => Err(
@@ -1404,8 +1464,8 @@ mod tests {
     #[test]
     fn editing_the_roots_marks_the_index_stale() {
         // Absent index, whatever the roots say.
-        let built = mtime(&crate::compute::fileindex_path());
-        let edited = mtime(&roots_file());
+        let built = mtime_nanos(&crate::compute::fileindex_path());
+        let edited = mtime_nanos(&roots_file());
         let stale = match (built, edited) {
             (None, _) => true,
             (Some(b), Some(e)) => e > b,

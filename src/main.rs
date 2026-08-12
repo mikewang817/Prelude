@@ -201,10 +201,19 @@ fn main() -> ExitCode {
             json_dump(sources::agents::skills(), rest.contains(&"--json"))
         }
         ["index"] => {
-            println!("building file index ...");
-            let n = compute::build_fileindex();
-            println!("  indexed {n} files from: {}", compute::index_roots().join(", "));
-            println!("  search names, paths and Finder tags with  f:name  or  f:tag:work");
+            println!("building file and folder index ...");
+            let counts = compute::build_fileindex();
+            println!(
+                "  indexed {} files and {} folders from: {}",
+                counts.files,
+                counts.folders,
+                compute::index_roots().join(", ")
+            );
+            println!("  type a name directly, or use f: and dir: to narrow the results");
+            0
+        }
+        ["_index"] => {
+            let _ = compute::build_fileindex();
             0
         }
         ["clipd"] => clipd::watch(),
@@ -226,7 +235,7 @@ fn main() -> ExitCode {
         }
         ["_dump-root"] => {
             let items = cache::gather();
-            println!("{}", render::render(&compute::root_items(&items), term_width()));
+            println!("{}", render::render_general(&compute::root_items(&items), term_width()));
             0
         }
         ["_dump-all"] => {
@@ -343,11 +352,14 @@ fn main() -> ExitCode {
         // one contextual preview: c: has unused horizontal space and an image
         // cannot be identified from its title, so it opens on the right and
         // stands down again when focus leaves it.
-        ["_focus", q, line] => focus(q, line),
+        ["_focus", q, line] => focus(q, line, term_width()),
         // Kept as a direct test/debug door, and for callers that need only the
         // footer rather than fzf actions.
         ["_footer", rest @ ..] => {
-            println!("{}", footer_for_line(rest.first().copied().unwrap_or("")));
+            println!(
+                "{}",
+                footer_for_line(rest.first().copied().unwrap_or(""), term_width()),
+            );
             0
         }
         ["_preview", line] => { if let Some(i) = render::parse_line(line) { preview::show(&i); } 0 }
@@ -444,7 +456,7 @@ AGENTS  (run these from inside a conversation; see `prelude init agent`)
 
 SETUP
   prelude init zsh|agent shell integration, and the block for CLAUDE.md
-  prelude index          build the file index for f:name
+  prelude index          rebuild the automatic file and folder index
   prelude doctor         diagnose the setup
   prelude bench          measure candidate-gathering
   prelude build-translate  compile the Apple translation helper
@@ -460,13 +472,13 @@ enum FocusPreview {
     HideClipboardPreview,
 }
 
-fn footer_for_line(line: &str) -> String {
+fn footer_for_line(line: &str, terminal_width: usize) -> String {
     let item = render::parse_line(line);
     let primary = item
         .as_ref()
         .map(|item| defaults::describe(item, defaults::surface()))
         .unwrap_or("Select");
-    ui::footer_for_item(primary, item.as_ref(), true)
+    ui::footer_for_item(primary, item.as_ref(), true, terminal_width)
 }
 
 /// Pure focus rule: every real clipboard row gets the same right-hand pane.
@@ -499,11 +511,14 @@ fn tab_completion(item: Option<&item::Item>) -> Option<&str> {
         .filter(|c| !c.is_empty())
 }
 
-fn focus(q: &str, line: &str) -> i32 {
+fn focus(q: &str, line: &str, terminal_width: usize) -> i32 {
     let item = render::parse_line(line);
     let automatic_is_open = std::env::var("FZF_PREVIEW_LABEL")
         .is_ok_and(|label| label.trim() == AUTO_PREVIEW_LABEL);
-    let mut action = format!("change-footer({})", fzf_action_arg(&footer_for_line(line)));
+    let mut action = format!(
+        "change-footer({})",
+        fzf_action_arg(&footer_for_line(line, terminal_width)),
+    );
     match focus_preview(q, item.as_ref(), automatic_is_open) {
         FocusPreview::Keep => {}
         FocusPreview::ShowClipboardPreview => action.push_str(&format!(
@@ -570,11 +585,19 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
         Vec::new()
     };
     let rows = compute::dynamic_rows_with(q, &static_items);
+    let special = compute::is_special(q);
+    let ordinary_files = if special {
+        Vec::new()
+    } else {
+        compute::root_filesystem_rows(q, &static_items)
+    };
     if !rows.is_empty() {
-        let rendered = if compute::scope_query(q)
-            .is_some_and(|(scope, _)| scope == compute::Scope::Files)
-        {
+        let rendered = if compute::scope_query(q).is_some_and(|(scope, _)| {
+            matches!(scope, compute::Scope::Files | compute::Scope::Directories)
+        }) {
             render::render_files(&rows, cols)
+        } else if !special {
+            render::render_general(&rows, cols)
         } else {
             render::render_with(&rows, cols, None, tw)
         };
@@ -583,8 +606,8 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
     // Once the query has clearly declared an intent — a sum, a translation,
     // a scope, an agent to start — the unrelated catalogue underneath is
     // noise. Show only what was asked for.
-    if compute::is_special(q) {
-        web_search(q, cols, tw);
+    if special {
+        web_search(q, cols, tw, false);
         return 0;
     }
     let list = if q.trim().is_empty() {
@@ -598,7 +621,13 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
             println!();
         }
     }
-    web_search(q, cols, tw);
+    // Files supplement the launcher rather than taking it over: the Agent and
+    // Quicklink catalogue keeps its established lead, then come the ten local
+    // objects whose own names matched, and finally the web fallback.
+    if !ordinary_files.is_empty() {
+        println!("{}", render::render_general(&ordinary_files, cols));
+    }
+    web_search(q, cols, tw, true);
     0
 }
 
@@ -608,13 +637,20 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
 /// whole of its job: it must be there when nothing else matched and out of the
 /// way when something did. Emitted after the catalogue, `--tiebreak=index`
 /// keeps it below every row that scored the same.
-fn web_search(q: &str, cols: usize, tw: Option<usize>) {
+fn web_search(q: &str, cols: usize, tw: Option<usize>, general: bool) {
     if let Some(row) = compute::web_search_row(q) {
-        println!("{}", render::render_with(&[row], cols, None, tw));
+        let rendered = if general {
+            render::render_general(&[row], cols)
+        } else {
+            render::render_with(&[row], cols, None, tw)
+        };
+        println!("{rendered}");
     }
 }
 
-/// `^Y`: copy without closing the launcher.
+/// Scriptable copy helper retained for tools and tests. The interactive
+/// Ctrl+Option+Enter chord exits through `ui::copy_path`, so the panel parent
+/// can copy, confirm, and close consistently with other handoffs.
 fn copy_line(line: &str) -> i32 {
     let Some(it) = render::parse_line(line) else { return 1 };
     use item::Kind::*;
@@ -623,7 +659,7 @@ fn copy_line(line: &str) -> i32 {
         Ssh => it.get("host"),
         Container | Mcp => it.get("name"),
         Link => it.get("url"),
-        File | Find => it.get("path"),
+        File | Find | Dir => it.get("path"),
         Clip => it.get("full"),
         _ => "",
     };
@@ -785,10 +821,15 @@ fn bench(json: bool) -> i32 {
 /// blank. Ask the other standard descriptors, then the controlling terminal
 /// itself, before giving up.
 pub fn term_width() -> usize {
-    if let Ok(c) = std::env::var("COLUMNS") {
-        if let Ok(n) = c.parse::<usize>() {
-            if n > 0 {
-                return n;
+    // Helpers launched by fzf have no terminal on stdout, but fzf exports its
+    // exact inner dimensions. Prefer that over the shell's possibly stale
+    // COLUMNS so a resized two-line footer can add or remove whole columns.
+    for variable in ["FZF_COLUMNS", "COLUMNS"] {
+        if let Ok(c) = std::env::var(variable) {
+            if let Ok(n) = c.parse::<usize>() {
+                if n > 0 {
+                    return n;
+                }
             }
         }
     }
@@ -940,7 +981,7 @@ mod tests {
             Kind::Agent | Kind::Skill | Kind::Mcp | Kind::Run | Kind::Session
         )));
         let root = root_items(&all);
-        assert!(root.iter().any(|i| i.title == "Search Files"));
+        assert!(root.iter().any(|i| i.title == "Files & Folders"));
         assert!(root.iter().all(|i| !matches!(i.kind, Kind::Session | Kind::Path | Kind::Clip | Kind::History)));
         let f = crate::compute::dynamic_rows_with("f", &all);
         assert_eq!(f.len(), 1, "an exact scope alias must not open global fuzzy search");
@@ -996,14 +1037,26 @@ mod tests {
     }
 
     #[test]
-    fn file_search_matches_finder_tags_without_confusing_them_with_paths() {
+    fn file_search_matches_names_and_tags_but_not_an_ordinary_parent_path() {
         let index = concat!(
-            "/tmp/client/report.md\t[\"Orange\",\"Project Alpha\"]\n",
-            "/tmp/orange-name.txt\t[\"Blue\"]\n",
-            "/tmp/plain.txt\n",
+            "D\t/tmp/OpenGhosttyFromAnyFolder\n",
+            "F\t/tmp/OpenGhosttyFromAnyFolder/Sources/main.swift\n",
+            "F\t/tmp/client/report.md\t[\"Orange\",\"Project Alpha\"]\n",
+            "F\t/tmp/orange-name.txt\t[\"Blue\"]\n",
+            "F\t/tmp/plain.txt\n",
         );
+        let ghostty = crate::compute::search_fileindex_from(index, "OpenGhostty");
+        assert_eq!(ghostty.len(), 1, "a matching folder must not expand into all its children");
+        assert_eq!(ghostty[0].title, "OpenGhosttyFromAnyFolder");
+        assert_eq!(ghostty[0].get("index_kind"), "folder");
+        assert!(!ghostty.iter().any(|item| item.title == "main.swift"));
+
+        // A slash explicitly opts into path-component matching.
+        let by_path = crate::compute::search_fileindex_from(index, "OpenGhostty/main");
+        assert_eq!(by_path.iter().map(|item| item.title.as_str()).collect::<Vec<_>>(), ["main.swift"]);
+
         let by_name = crate::compute::search_fileindex_from(index, "orange");
-        assert_eq!(by_name.len(), 2, "ordinary terms search both paths and tags");
+        assert_eq!(by_name.len(), 2, "ordinary terms search names and tags");
         let by_tag = crate::compute::search_fileindex_from(index, "tag:orange");
         assert_eq!(by_tag.len(), 1, "tag: searches metadata only");
         assert_eq!(by_tag[0].title, "report.md");
@@ -1034,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn the_directory_chords_are_advertised_only_where_they_exist() {
+    fn filesystem_chords_are_one_consistent_object_vocabulary() {
         use crate::item::{Item, Kind};
         let file = Item::new("/tmp/project/readme.md", Kind::Find)
             .put("path", "/tmp/project/readme.md");
@@ -1042,18 +1095,33 @@ mod tests {
             crate::ui::containing_directory(&file).as_deref(),
             Some(std::path::Path::new("/tmp/project")),
         );
-        assert!(crate::ui::footer_for_item("Open it", Some(&file), true).contains("Open folder"));
+        let file_footer = crate::ui::footer_for_item("Open it", Some(&file), true, 160);
+        assert!(file_footer.starts_with(crate::ansi::DIM));
+        assert!(file_footer.contains(&format!("\n{}Open it", crate::ansi::CYAN)));
+        assert_eq!(file_footer.lines().count(), 2, "keys and meanings get one row each");
+        assert!(file_footer.contains("Reveal"));
+        assert!(file_footer.contains("Terminal in folder"));
+        assert!(file_footer.contains("Copy path"));
+        assert!(file_footer.contains("Ctrl+Option+Enter"));
+        let narrow = crate::ui::footer_for_item("Open it", Some(&file), true, 88);
+        assert!(narrow.contains("Ctrl+Option+Enter"), "core object verbs survive first");
+        assert!(!narrow.contains("Ctrl+K"), "discovery aids yield as whole columns");
+        assert!(!narrow.contains("Ctrl+P"));
+        assert_eq!(crate::ui::path_to_copy(&file), Some("/tmp/project/readme.md"));
         // The helper still makes capability explicit, even though both
         // launcher entry points now pass true.
-        let inline = crate::ui::footer_for_item("Open it", Some(&file), false);
+        let inline = crate::ui::footer_for_item("Open it", Some(&file), false, 160);
         assert!(!inline.contains("Ctrl+Enter"));
 
-        // A folder has no *containing* folder worth opening — Enter already
-        // opens it — but it is exactly where a terminal should stand.
+        // A folder is revealed in its parent and is itself where the terminal
+        // should stand and the exact path that should be copied.
         let folder = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
-        let shown = crate::ui::footer_for_item("Open it", Some(&folder), true);
-        assert!(!shown.contains("Open folder"), "the folder chord is for files");
+        let shown = crate::ui::footer_for_item("Open folder", Some(&folder), true, 160);
+        assert!(shown.contains("Reveal in parent"));
+        assert!(shown.contains("Terminal here"));
+        assert!(shown.contains("Copy path"));
         assert!(shown.contains("Ctrl+Shift+Enter"), "a folder is a place to stand");
+        assert_eq!(crate::ui::path_to_copy(&folder), Some("/tmp/project"));
         assert_eq!(
             crate::ui::terminal_directory(&folder),
             Some(std::path::PathBuf::from("/tmp/project")),
@@ -1852,9 +1920,11 @@ mod tests {
         let acts = crate::actions::actions_for(&it, crate::defaults::Surface::Clipboard);
         assert!(!acts.iter().any(|(id, ..)| *id == "default"));
         assert!(!acts.iter().any(|(_, label, ..)| label == describe(&it, Surface::Clipboard)));
-        assert_eq!(acts[0].0, "secondary");
-        assert_eq!(acts[0].1, describe_secondary(&it, Surface::Clipboard).unwrap());
-        assert_eq!(acts[0].2, "");
+        assert_eq!(describe_secondary(&it, Surface::Clipboard), Some("Copy the full path"));
+        assert!(
+            acts.iter().any(|(id, label, ..)| *id == "copyabs" && label == "Copy path"),
+            "the useful opposite remains explicit without being listed twice",
+        );
     }
 
     /// Representative menus are product surfaces, not merely collections
@@ -1869,7 +1939,10 @@ mod tests {
         let file = Item::new("/tmp/readme.md", Kind::File).put("path", "/tmp/readme.md");
         assert_eq!(
             ids(&file),
-            ["secondary", "openwith", "open", "reveal-finder", "copy-file", "openalways", "quicklink-create", "trash"]
+            [
+                "openwith", "open", "reveal-finder", "terminal-folder", "copyabs",
+                "copy-file", "openalways", "quicklink-create", "trash",
+            ]
         );
 
         let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
@@ -1880,7 +1953,13 @@ mod tests {
         assert_eq!(ids(&link), ["secondary", "quicklink-create", "quicklink-template"]);
 
         let dir = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
-        assert_eq!(ids(&dir), ["secondary", "copy-file", "insert", "quicklink-create"]);
+        assert_eq!(
+            ids(&dir),
+            [
+                "reveal-finder", "terminal-here", "copy", "copy-file", "insert",
+                "quicklink-create",
+            ]
+        );
 
         let linked = Item::new("/tmp/readme.md", Kind::File)
             .put("path", "/tmp/readme.md")
@@ -2141,7 +2220,7 @@ mod tests {
     /// in an application or path therefore remain inside one argument.
     #[test]
     fn external_open_arguments_are_well_formed() {
-        use crate::openwith::{app_command, ext_of, launch_args, open_args};
+        use crate::openwith::{app_command, ext_of, finder_open_args, launch_args, open_args};
         assert_eq!(open_args("/tmp/x.json", None), ["/tmp/x.json"]);
         assert_eq!(open_args("/tmp/a b.json", None), ["/tmp/a b.json"]);
         assert_eq!(
@@ -2150,6 +2229,11 @@ mod tests {
         );
         // An empty remembered app must fall back, not produce `-a ''`.
         assert_eq!(open_args("/tmp/x.json", Some("  ")), ["/tmp/x.json"]);
+        assert_eq!(
+            finder_open_args("/tmp/a b"),
+            ["-b", "com.apple.finder", "/tmp/a b"],
+            "folder paths are one Finder argument, never shell syntax",
+        );
 
         // The hidden global panel has Ghostty's bundle identity. Launching the
         // ordinary app directly should therefore ask Launch Services for a new

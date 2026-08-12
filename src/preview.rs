@@ -515,13 +515,25 @@ pub fn text(it: &Item) -> String {
             let p = it.get("path");
             kv(&mut out, "path", &tilde(p));
             kv(&mut out, "tags", &it.get("tags").replace('\u{1e}', ", "));
-            if let Ok(m) = std::fs::metadata(p) {
-                kv(&mut out, "size", &format!("{} bytes", group(m.len())));
-            }
-            if let Ok(text) = std::fs::read_to_string(p) {
-                out.push(String::new());
-                out.push(format!("{DIM}head{RESET}"));
-                out.extend(text.lines().take(20).map(str::to_string));
+            if it.get("index_kind") == "folder" {
+                if let Ok(metadata) = std::fs::metadata(p) {
+                    if let Ok(modified) = metadata.modified() {
+                        let at = modified
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|duration| duration.as_secs_f64())
+                            .unwrap_or(0.0);
+                        kv(&mut out, "modified", &crate::sources::user::ago(at));
+                    }
+                }
+            } else {
+                if let Ok(m) = std::fs::metadata(p) {
+                    kv(&mut out, "size", &format!("{} bytes", group(m.len())));
+                }
+                if let Ok(text) = std::fs::read_to_string(p) {
+                    out.push(String::new());
+                    out.push(format!("{DIM}head{RESET}"));
+                    out.extend(text.lines().take(20).map(str::to_string));
+                }
             }
         }
         Kind::Clip => out.push(it.get("full").to_string()),

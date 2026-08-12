@@ -305,6 +305,9 @@ impl Item {
         if self.get("update") == "available" {
             return (crate::ansi::YELLOW, "update");
         }
+        if self.get("index_kind") == "folder" {
+            return (crate::ansi::BLUE, "folder");
+        }
         if self.is_quicklink() { Kind::QUICKLINK_STYLE } else { self.kind.style() }
     }
 

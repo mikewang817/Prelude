@@ -15,7 +15,7 @@ The panel is not a destination terminal, and the zsh entry point uses the same
 surface rather than a prompt-oriented variant:
 
 - both fill the terminal, gather from the configured launcher directory, and
-  expose the same labels, actions and directory chords
+  expose the same labels, actions and filesystem chords
 - files, folders, applications, and URLs act directly through macOS Launch
   Services
 - shell commands are copied to the system clipboard from either entry point
@@ -82,14 +82,15 @@ The generated dedicated Ghostty configuration sets:
 - a centered `62% × 58%` Quick Terminal
 - autohide and move-to-current-Space behavior
 - `global:<chord>=toggle_quick_terminal`, and deliberately no Escape binding
-- `ctrl+enter=text:\x07` for Prelude's private file-parent shortcut
+- `ctrl+enter=text:\x07` for Prelude's private Finder-reveal shortcut
 - `ctrl+shift+enter=text:\x1d` for Prelude's private terminal-directory shortcut
+- `ctrl+alt+enter=text:\x19` for Prelude's private copy-path shortcut
 - `command = <installed-prelude> _surface`
 - `abnormal-command-exit-runtime = 0`
 
 Prelude also maintains one marked block in Ghostty's ordinary configuration,
-containing the same two `Ctrl+Enter` translations. This is what lets the zsh
-entry point advertise and receive the same directory chords. Existing content
+containing the same three modified-Enter translations. This is what lets the
+zsh entry point advertise and receive the same filesystem chords. Existing content
 is preserved, writes are idempotent, Ghostty reloads the block with `SIGUSR2`,
 and `prelude global uninstall` removes it.
 
@@ -178,7 +179,7 @@ With default XDG paths:
 |---|---|
 | `~/.config/prelude/global.toml` | selected chord and optional panel directory |
 | `~/.config/prelude/quick-terminal.ghostty` | generated dedicated Ghostty configuration |
-| `~/.config/ghostty/config` | person's ordinary config; Prelude adds/removes only its marked two-key block |
+| `~/.config/ghostty/config` | person's ordinary config; Prelude adds/removes only its marked three-key block |
 | `~/Library/LaunchAgents/app.prelude.hotkey.plist` | launchd supervision |
 | `~/.cache/prelude/global-hotkey.log` | Ghostty stdout |
 | `~/.cache/prelude/global-hotkey-error.log` | Ghostty stderr |

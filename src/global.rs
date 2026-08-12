@@ -31,6 +31,7 @@ const TERMINAL_BINDINGS: &str = "# >>> Prelude launcher keys >>>\n\
 # Keep Prelude opened from a terminal identical to its Quick Terminal.\n\
 keybind = ctrl+enter=text:\\x07\n\
 keybind = ctrl+shift+enter=text:\\x1d\n\
+keybind = ctrl+alt+enter=text:\\x19\n\
 # <<< Prelude launcher keys <<<\n";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -736,13 +737,14 @@ fn quick_config(exe: &Path, hotkey: &Hotkey, directory: &Path) -> String {
          working-directory = {directory}\n\
          keybind = global:{chord}=toggle_quick_terminal\n\
          # Escape is deliberately *not* bound here. See `quick_config`.\n\
-         # fzf knows no `ctrl-enter`: the modifier never reaches it, whatever\n\
-         # the terminal sends. Translate both chords to private control codes\n\
-         # inside this dedicated panel; the person's normal Ghostty is untouched.\n\
+         # fzf knows no modified Enter: the modifier never reaches it, whatever\n\
+         # the terminal sends. Translate the object chords to private control codes.\n\
          keybind = ctrl+enter=text:\\x07\n\
          # …and Ctrl+Shift+Enter to private Ctrl+]. Not Ctrl+_ (0x1f), which is\n\
          # the field delimiter every rendered row carries.\n\
          keybind = ctrl+shift+enter=text:\\x1d\n\
+         # Ctrl+Option+Enter copies the selected filesystem path.\n\
+         keybind = ctrl+alt+enter=text:\\x19\n\
          command = {exe} _surface\n",
         chord = hotkey.canonical(),
         exe = exe.display(),
@@ -1623,7 +1625,7 @@ fn print_status(json: bool) -> i32 {
             "terminal keybindings",
             s.terminal_bindings_installed,
             if s.terminal_bindings_installed {
-                "Ctrl+Enter and Ctrl+Shift+Enter match the Quick Terminal"
+                "Ctrl+Enter, Ctrl+Shift+Enter and Ctrl+Option+Enter match the Quick Terminal"
             } else {
                 "run: prelude global start"
             },
@@ -1975,6 +1977,8 @@ mod tests {
         assert!(config.contains("keybind = global:cmd+shift+space=toggle_quick_terminal"));
         assert!(config.contains("quick-terminal-autohide = true"));
         assert!(config.contains(r"keybind = ctrl+enter=text:\x07"));
+        assert!(config.contains(r"keybind = ctrl+shift+enter=text:\x1d"));
+        assert!(config.contains(r"keybind = ctrl+alt+enter=text:\x19"));
         // Every surface enters through the marker gate. Quick terminals run
         // Prelude; ordinary windows are redirected to a normal Ghostty app.
         assert!(config.contains("command = /opt/homebrew/bin/prelude _surface"));
@@ -1992,6 +1996,7 @@ mod tests {
         assert!(installed.starts_with(original));
         assert!(installed.contains(r"keybind = ctrl+enter=text:\x07"));
         assert!(installed.contains(r"keybind = ctrl+shift+enter=text:\x1d"));
+        assert!(installed.contains(r"keybind = ctrl+alt+enter=text:\x19"));
         assert_eq!(
             replace_terminal_bindings(&installed, Some(TERMINAL_BINDINGS)).unwrap(),
             installed,

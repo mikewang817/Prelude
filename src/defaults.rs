@@ -134,6 +134,9 @@ pub fn on_enter(item: &Item) -> Default_ {
         // — you pick a file out of a launcher for every reason, and only
         // sometimes to edit it. ^K is where you say which application, once
         // or from now on.
+        // An indexed folder keeps Kind::Find for compatibility with the old
+        // file-only index, but acts exactly like every other Folder row.
+        Find if item.get("index_kind") == "folder" => Act(Verb::Open),
         File | Find => Act(Verb::Open),
 
         App => Act(Verb::Launch),
@@ -332,8 +335,10 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
     if d == Default_::InsertText(Text::Name) && item.kind == Kind::Link {
         return if surface == Surface::Clipboard { "Copy URL" } else { "Insert URL" };
     }
-    if d == Default_::Act(Verb::Open) && item.kind == Kind::Dir {
-        return "Open in Finder";
+    if d == Default_::Act(Verb::Open)
+        && (item.kind == Kind::Dir || item.get("index_kind") == "folder")
+    {
+        return "Open folder";
     }
     describe_action(d, surface)
 }

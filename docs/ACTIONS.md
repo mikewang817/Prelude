@@ -4,8 +4,12 @@ The behavior in this document comes from `src/defaults.rs`, `src/actions.rs`,
 `src/ui.rs`, and `src/panel.rs`.
 
 `Enter` performs the focused row's default. `Ctrl+K` opens a modal list of
-alternatives for that Item. The footer and the action-panel header both state
-the current default; it is not repeated as a selectable action.
+alternatives for that Item. The compact two-line footer puts dim shortcut keys
+immediately above cyan action names in left-aligned columns; narrow windows
+remove whole right-hand columns rather than clipping a key away from its
+meaning. The footer and the action-panel header both state the current default;
+it is not
+repeated as a selectable action.
 
 ## Two surfaces
 
@@ -45,7 +49,7 @@ With the default **per kind** setting:
 | Skill object | hand over an invocation through the first owning Agent |
 | MCP server | run the owner's `mcp get` inside Prelude and show its output |
 | File / indexed file / Config | open through Prelude's remembered app or the macOS default |
-| Folder | open in Finder |
+| Folder | open in Finder and bring Finder to the front |
 | Application | launch through Launch Services |
 | URL / Quicklink result | open in the default browser |
 | newer release available | download, verify, install, and close the panel |
@@ -56,9 +60,9 @@ With the default **per kind** setting:
 | incomplete search provider or scope command | keep Prelude open and complete the query prefix |
 
 The secondary action is generally the opposite: acting objects offer text, and
-handed-over commands may offer execution. It has no dedicated key because
-terminal applications do not portably deliver Command, Option, Shift+Enter, or
-Ctrl+Enter. It appears as the first relevant row in `Ctrl+K` instead.
+handed-over commands may offer execution. Ghostty translates three explicit
+filesystem Enter chords before the terminal protocol loses their modifiers;
+other secondary actions appear as the first relevant row in `Ctrl+K` instead.
 
 ## Panel behavior
 
@@ -78,9 +82,18 @@ Ctrl+Enter. It appears as the first relevant row in `Ctrl+K` instead.
 - Parameter choices—Agent, Skill, MCP server, or copy—use a submenu only when
   more than one choice exists.
 
-The dedicated global panel has one shortcut outside `Ctrl+K`: Ghostty translates
-`Cmd+Enter` to a private `Ctrl+G`, and Prelude opens the containing directory
-only for File and indexed-File rows. The inline zsh widget never advertises it.
+Both launcher entry points expose one filesystem vocabulary:
+
+| Key | File | Folder |
+|---|---|---|
+| `Enter` | open with the remembered/macOS application | open in Finder |
+| `Ctrl+Enter` | reveal, select, and foreground Finder | reveal, select, and foreground Finder |
+| `Ctrl+Shift+Enter` | open Ghostty in the containing folder | open Ghostty here |
+| `Ctrl+Option+Enter` | copy the absolute path | copy the absolute path |
+
+The copy chord hands plain, unescaped POSIX text to the clipboard and closes
+Prelude. Unsupported rows do not advertise or guess an action. `Ctrl+K` exposes
+the same named operations and remains the fallback outside Ghostty.
 
 ## Current contextual actions
 
@@ -261,12 +274,12 @@ value and is named on the row.
 
 File rows may offer:
 
-- hand over the full path
 - open once with another application
 - hand over an `$EDITOR` command
-- reveal in Finder
-- copy a real Finder file object
+- reveal and select in Finder
+- open Ghostty in the containing folder
 - copy the path as text
+- copy a real Finder file object
 - remember an application per extension
 - create or manage a Quicklink
 - move the file to the Trash
@@ -276,8 +289,9 @@ Launch Services; `$EDITOR` is an explicit command-producing alternative.
 
 ### Folder, application, and link
 
-- Folder: default opens Finder; alternatives copy a Finder object, hand over
-  `cd`, copy the path, and create or manage a Quicklink.
+- Folder: default opens Finder; alternatives reveal it in its parent, open
+  Ghostty there, copy its path or Finder object, hand over `cd`, and create or
+  manage a Quicklink.
 - Application: default launches it; alternatives reveal it, copy the app or its
   path, hand over an `open` command, create or manage a Quicklink, and move the
   app to the Trash.

@@ -1590,14 +1590,18 @@ pub fn run() -> i32 {
     // last changed answers from a set nothing on screen describes. Silence
     // there is the failure worth naming here.
     let roots = crate::settings::root_rows().len();
-    match crate::settings::index_count() {
-        Some(n) if crate::settings::index_stale() => println!(
-            "    {YELLOW}✗{RESET} f:name   {DIM}{n} files from {roots} roots · roots changed — run:  prelude index{RESET}"
+    match crate::settings::index_counts() {
+        Some(counts) if crate::settings::index_needs_rebuild() => println!(
+            "    {YELLOW}✗{RESET} files    {DIM}{} files · {} folders · {roots} roots · updating automatically{RESET}",
+            counts.files, counts.folders,
         ),
-        Some(n) => println!(
-            "    {GREEN}✓{RESET} f:name   {DIM}{n} files from {roots} roots · set: to change them{RESET}"
+        Some(counts) => println!(
+            "    {GREEN}✓{RESET} files    {DIM}{} files · {} folders · {roots} roots · type a name directly{RESET}",
+            counts.files, counts.folders,
         ),
-        None => println!("    {YELLOW}✗{RESET} f:name   {DIM}no index — run:  prelude index{RESET}"),
+        None => println!(
+            "    {YELLOW}✗{RESET} files    {DIM}index is prepared automatically on the first search{RESET}"
+        ),
     }
 
     println!("\n  {CYAN}translation{RESET} {DIM}(Apple, on-device){RESET}");
