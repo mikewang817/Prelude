@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 170 tests
+cargo test                 # 234 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # p95 gather must stay under 40ms; non-zero when it does not
 ./target/release/prelude bench --json   # the same distribution, for a gate to record
