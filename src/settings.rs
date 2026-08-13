@@ -118,6 +118,7 @@ fn canonical_key(key: &str) -> Option<&'static str> {
         "snippets" => Some("snippets"),
         "quicklinks" => Some("quicklinks"),
         "favorites" | "favourites" => Some("favorites"),
+        "aliases" | "alias" => Some("aliases"),
         "all" => Some("all"),
         _ => None,
     }
@@ -872,6 +873,22 @@ pub fn items() -> Vec<Item> {
         .put("path", favorites.to_string_lossy().into_owned()),
     );
 
+    let aliases = config.join("aliases.txt");
+    let n = std::fs::read_to_string(&aliases)
+        .map(|t| t.lines().filter(|l| l.contains('\t')).count())
+        .unwrap_or(0);
+    v.push(
+        row(
+            "aliases",
+            "Aliases",
+            if n == 0 { "none yet".into() } else { format!("{n} named") },
+            "type a name you chose to go straight to the object",
+            EDIT_COLLECTION,
+        )
+        .put("source", if aliases.is_file() { "saved" } else { "none" })
+        .put("path", aliases.to_string_lossy().into_owned()),
+    );
+
     // This is a settings form, not a learned catalogue: keep related controls
     // together. The 100-point gap is wider than the frecency cap, so opening
     // one row often cannot scatter the form on the next launch.
@@ -943,7 +960,7 @@ pub fn detail(it: &Item) -> Vec<String> {
             out.push("Left/right step without wrapping; Enter shows all four choices.".into());
             setting_origin(it, &mut out);
         }
-        "openwith" | "snippets" | "quicklinks" | "favorites" => {
+        "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             let rows = collection_rows(it.get("setting"));
             if rows.is_empty() {
                 out.push(format!("No {}s yet.", collection_singular(it.get("setting"))));
@@ -986,6 +1003,7 @@ fn ensure_setting_file(it: &Item) -> Result<PathBuf, String> {
         "snippets" => crate::sources::user::ensure_snippets_file()?,
         "quicklinks" => crate::compute::ensure_quicklinks_file()?,
         "favorites" => crate::favorites::ensure_file()?,
+        "aliases" => crate::aliases::ensure_file()?,
         "key" | "preview" | "enter" => {
             if !file().exists() {
                 crate::cache::write_atomic(
@@ -1142,7 +1160,7 @@ pub fn direction_label(it: &Item, direction: &str) -> &'static str {
         "preview" => if left { "Set off" } else { "Set on" },
         "enter" => if left { "Per kind" } else { "Copy everything" },
         "update" => if left { "Previous mode" } else { "Next mode" },
-        "openwith" | "snippets" | "quicklinks" | "favorites" => {
+        "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             if left { "Remove one…" } else { "Add one…" }
         }
         _ => if left { "Previous" } else { "Next" },
@@ -1184,7 +1202,7 @@ pub fn adjust(it: &Item, direction: &str) -> i32 {
         "preview" => set_boolean("preview", !left),
         "enter" => set_boolean("classic_enter", !left),
         "update" => step_update(if left { -1 } else { 1 }),
-        "openwith" | "snippets" | "quicklinks" | "favorites" => {
+        "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             if left { remove_collection_item(it) } else { add_collection_item(it) }
         }
         _ => 2,
@@ -1334,6 +1352,15 @@ fn collection_rows(id: &str) -> Vec<(String, String, String)> {
                 (key.clone(), name.to_string(), kind.to_string())
             })
             .collect(),
+        // The key is the alias, because that is what `aliases::remove` takes
+        // and what the person typed. The object it names is the detail.
+        "aliases" => crate::aliases::entries()
+            .into_iter()
+            .map(|(alias, target)| {
+                let (kind, name) = target.split_once('\t').unwrap_or(("object", &target));
+                (alias.clone(), alias, format!("{name} · {kind}"))
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1378,6 +1405,7 @@ fn collection_singular(id: &str) -> &'static str {
         "snippets" => "snippet",
         "quicklinks" => "Quicklink",
         "favorites" => "Favorite",
+        "aliases" => "alias",
         _ => "item",
     }
 }
@@ -1388,6 +1416,7 @@ fn add_collection_item(it: &Item) -> i32 {
         "snippets" => add_snippet_interactively(),
         "quicklinks" => add_quicklink_interactively(),
         "favorites" => add_favorite_interactively(),
+        "aliases" => add_alias_interactively(),
         _ => 2,
     }
 }
@@ -1427,6 +1456,7 @@ fn remove_collection_key(id: &str, key: &str, name: &str) -> i32 {
         "snippets" => crate::sources::user::remove_snippet(key),
         "quicklinks" => crate::compute::remove_quicklink(key),
         "favorites" => crate::favorites::remove_key(key),
+        "aliases" => crate::aliases::remove(key),
         _ => Err("that setting is not a collection".into()),
     };
     match result {
@@ -1528,6 +1558,46 @@ fn add_favorite_interactively() -> i32 {
     let Some(item) = items.get(index) else { return 2 };
     match crate::favorites::set(item, true) {
         Ok(()) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+/// Pick an object, then name it.
+///
+/// The object comes first because it is the part a person can recognise; the
+/// name is theirs to invent and is the only part that can be refused. The
+/// refusal comes from `aliases::vet`, the same door `prelude alias` uses, so
+/// the two surfaces cannot disagree about what a name may be.
+fn add_alias_interactively() -> i32 {
+    let mut items = crate::cache::gather();
+    items.retain(|item| crate::favorites::key(item).is_some() && item.get("alias").is_empty());
+    items.sort_by(crate::cache::by_rank);
+    if items.is_empty() {
+        crate::ui::note("everything that can be named already has a name");
+        return 0;
+    }
+    let choices: Vec<(String, String, String)> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (index.to_string(), item.title.clone(), item.style().1.to_string()))
+        .collect();
+    let Some(item) = crate::actions::pick_one(" name an object ", &choices)
+        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|index| items.get(index))
+    else {
+        return 130;
+    };
+    let Some(raw) = crate::ui::prompt_line(&format!(" what to call {} ", item.title)) else {
+        return 130;
+    };
+    match crate::aliases::add(&raw, item) {
+        Ok(key) => {
+            crate::ui::note(&format!("{key} now goes to {}", item.title));
+            0
+        }
         Err(error) => {
             crate::ui::note(&error);
             2
@@ -2094,6 +2164,7 @@ mod tests {
             ("snippets", "Remove one…", "Add one…", true, true),
             ("quicklinks", "Remove one…", "Add one…", true, true),
             ("favorites", "Remove one…", "Add one…", true, true),
+            ("aliases", "Remove one…", "Add one…", true, true),
         ];
         let rows = items();
         assert_eq!(rows.len(), expected.len());

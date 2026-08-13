@@ -90,6 +90,53 @@ pub fn entries() -> Vec<(String, String)> {
     all().into_iter().collect()
 }
 
+/// Create the empty preference through the module that owns its format. The
+/// settings row calls this only when somebody explicitly asks to open it.
+pub fn ensure_file() -> Result<PathBuf, String> {
+    let path = file();
+    if !path.exists() {
+        write_all(&BTreeMap::new())?;
+    }
+    Ok(path)
+}
+
+/// Put each alias on the row it names, so it is learned by being seen rather
+/// than by being remembered.
+///
+/// Beside `favorites::decorate` and deliberately not inside `cache::finish`,
+/// for the same reason: file scope calls that helper per keystroke and must
+/// not read a preference file on every letter.
+pub fn decorate(items: &mut [Item]) {
+    decorate_with(items, &all());
+}
+
+fn decorate_with(items: &mut [Item], entries: &BTreeMap<String, String>) {
+    // The common case is no aliases at all, and it costs nothing: without this
+    // every gather would ask `favorites::key` of two and a half thousand rows
+    // to answer a question with no entries behind it.
+    if entries.is_empty() {
+        return;
+    }
+    let by_target: BTreeMap<&str, &str> =
+        entries.iter().map(|(alias, target)| (target.as_str(), alias.as_str())).collect();
+    for item in items {
+        let Some(alias) = crate::favorites::key(item)
+            .and_then(|key| by_target.get(key.as_str()).copied())
+        else {
+            continue;
+        };
+        item.data.insert("alias".into(), alias.to_string());
+        // `render_general` shows `fields` *or* the subtitle, never both, so a
+        // row whose detail lives in its subtitle would lose it the moment an
+        // alias arrived. The alias goes first, where a Quicklink already puts
+        // the keyword the person chose.
+        if item.fields.is_empty() && !item.subtitle.is_empty() {
+            item.fields.push(item.subtitle.clone());
+        }
+        item.fields.insert(0, alias.to_string());
+    }
+}
+
 fn write_all(entries: &BTreeMap<String, String>) -> Result<(), String> {
     let mut text = entries
         .iter()
@@ -273,6 +320,31 @@ mod tests {
         let parsed = parse("Browser\tapp\tGoogle Chrome\nbroken\nempty\t\n\tno-alias\tx\n");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed.get("browser").map(String::as_str), Some("app\tGoogle Chrome"));
+    }
+
+    // `render_general` shows `fields` *or* the subtitle, never both. Inserting
+    // the alias into an empty `fields` therefore silently deleted the only
+    // detail an application row has.
+    #[test]
+    fn a_name_goes_on_the_row_without_evicting_what_it_already_said() {
+        let mut items =
+            vec![app("Google Chrome").sub("/Applications"), app("Safari").sub("/Applications")];
+        let entries = BTreeMap::from([("browser".to_string(), "app\tGoogle Chrome".to_string())]);
+        decorate_with(&mut items, &entries);
+        assert_eq!(items[0].get("alias"), "browser");
+        assert_eq!(items[0].fields, ["browser", "/Applications"]);
+        assert_eq!(items[1].get("alias"), "", "a row nobody named is untouched");
+        assert!(items[1].fields.is_empty());
+    }
+
+    // The common case, and it must cost nothing: no entries means the two and
+    // a half thousand calls to `favorites::key` are never made.
+    #[test]
+    fn no_names_means_no_rows_are_touched() {
+        let mut items = vec![app("Google Chrome").sub("/Applications")];
+        decorate_with(&mut items, &BTreeMap::new());
+        assert!(items[0].fields.is_empty());
+        assert_eq!(items[0].subtitle, "/Applications");
     }
 
     #[test]

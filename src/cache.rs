@@ -839,6 +839,7 @@ pub fn gather() -> Vec<Item> {
     }
     timed("archive", || crate::archive::decorate(&mut items));
     timed("favorites", || crate::favorites::decorate(&mut items));
+    timed("aliases", || crate::aliases::decorate(&mut items));
     timed("finish", || finish(items))
 }
 
@@ -861,6 +862,7 @@ pub fn gather_agents() -> Vec<Item> {
     items.extend(crate::sources::agents::configs());
     crate::archive::decorate(&mut items);
     crate::favorites::decorate(&mut items);
+    crate::aliases::decorate(&mut items);
     finish(items)
 }
 

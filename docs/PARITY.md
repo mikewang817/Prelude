@@ -44,8 +44,8 @@ rediscover them every pass:
 | P1a | Fallback row: is the query, survives, absent in a scope | **done** |
 | P10 | Object chords appear on object rows and nowhere else | **done** |
 | P2 | Alias a stable object, refused at the moment of naming | **done** |
+| P3 | The alias shows on the row, and has a manager | **done** |
 | P1b | Fallbacks are an ordered, configurable list | todo |
-| P3 | The alias shows on the row, and has a manager | todo |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
 | P8 | A trashed object says where it went, and offers the way back | todo |
 | P4a | Launch with a query already typed | spike |
@@ -160,28 +160,50 @@ and about the wrong half. Right answer, wrong question, and a check reading
 exit status alone could not tell. It now requires the refusal to name the key,
 which is the behaviour the item is actually about.
 
-## P3 — the alias shows on the row, and has a manager · todo
+## P3 — the alias shows on the row, and has a manager · done
 
 **Raycast**: the alias renders on its row, so you learn it by seeing it.
 
-**Prelude now**: nothing renders. You would have to remember what you named.
+**What was built**: `aliases::decorate`, beside `favorites::decorate` in
+`gather` and deliberately not in `cache::finish` — file scope calls that helper
+per keystroke and must not read a preference file on every letter. It returns
+immediately when there are no aliases, which is the common case, so the two and
+a half thousand calls to `favorites::key` are never made; the phase does not
+reach `bench --sources`' cutoff.
 
-**The shape of the answer**: into `fields`, which the flexible column already
-carries — not a sixth column. Column widths are shared across all kinds and
-taken at a percentile; a new column for a field almost no row has would move
-the dots for two thousand rows. `alias_rows` should then dedupe on the alias
-as well as on `(kind, cmd)`, the way `quicklink_with_neighbours` dedupes on
-its key, once there is a marker to dedupe on.
+The name goes **first** in `fields`, where a Quicklink already puts the keyword
+the person chose. No new column: `render_general` derives its widths from the
+terminal, and `fields` are joined into the free-text detail it already draws.
 
-**P2 left a second half here deliberately.** `aliases.txt` is the only file
-`settings.rs` lists as owned that has no settings row, so a person can build a
-set of aliases from the CLI and have no way to see them in the launcher. That
-is exactly the state `ql:` was built to end — "the only way to answer *what
-quicklinks do I have* was to open the TOML" — and it should not outlive this
-item. What is needed is the Favorites row's shape: a count, `←` remove, `→`
-add, and Enter opening a real manager.
+**The trap this item nearly shipped**: `render_general` shows `fields` *or* the
+subtitle, never both. Inserting a name into an empty `fields` therefore deletes
+the only detail an application row has — `/Applications` vanished the first
+time. The subtitle is carried into `fields` ahead of the insert, and both a
+Rust test and the check assert it.
 
-**Check**: at least one root row's payload carries `alias`.
+Resolution is live and the label is not. `is_special` reads `aliases.txt` each
+keystroke, but the per-keystroke helper reads the cached catalogue snapshot, so
+a new name works at once and appears on its row at the next gather — the cadence
+a new Favorite already follows. `alias_rows` dedupes on the name as well as on
+`(kind, cmd)`, guarded by the name being present at all, because a snapshot
+written by an older build carries no marker to dedupe on.
+
+**The second half P2 left here** is the Aliases settings row: the Favorites
+shape, `←` remove, `→` add, Enter opening the generic collection manager, and
+`prelude settings path aliases`. Adding an alias picks the object first and
+asks for the name second — the object is the part a person can recognise, the
+name is the only part that can be refused, and the refusal comes from
+`aliases::vet`, the same door `prelude alias` uses, so the two surfaces cannot
+disagree about what a name may be.
+
+**Check**: the check was rewritten and now brings its own fixture in a
+throwaway `XDG_CONFIG_HOME` — it names a real application, asserts the row
+carries the name first in `fields` and did not lose its subtitle, removes it,
+and then asserts the settings collection row exists. It previously grepped
+`_dump-root` for any row carrying an alias, which asked whether the person
+happened to have named something that happens to be a root command: a question
+about their config rather than about the code, and one that failed on this
+machine for exactly that reason while the behaviour was correct.
 
 ## P4a — launch with a query already typed · spike
 

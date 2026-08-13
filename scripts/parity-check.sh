@@ -144,8 +144,40 @@ check_P2() {
 }
 
 # The alias belongs on the row that has it, in `fields` — not in a sixth column.
+#
+# This brings its own fixture, in a throwaway XDG_CONFIG_HOME. It first read
+# `_dump-root` for any row carrying an alias, which asked whether the person
+# happened to have named something that happens to be a root command — a
+# question about their config rather than about the code.
 check_P3() {
-    grep -q '"alias"' "$TMP/root" || { echo "no row carries an alias"; return 1; }
+    home="$TMP/xdg/config"
+    mkdir -p "$home" || return 1
+    run() { XDG_CONFIG_HOME="$home" "$PRELUDE" "$@"; }
+
+    target=$(grep -F '"kind":"app"' "$TMP/all" | head -1 | payload | jq -r .title)
+    [ -n "$target" ] || { echo "no application in the catalogue to name"; return 1; }
+
+    run alias add zzparitycheck "$target" >/dev/null 2>&1 ||
+        { echo "could not name “$target”"; return 1; }
+    row=$(run _dump-all 2>/dev/null | payload |
+        jq -c 'select(.data.alias == "zzparitycheck")' | head -1)
+    run alias remove zzparitycheck >/dev/null 2>&1
+
+    [ -n "$row" ] || { echo "no row carries the alias"; return 1; }
+    printf '%s' "$row" | jq -e '.fields[0] == "zzparitycheck"' >/dev/null ||
+        { echo "the alias is not first in fields: $row"; return 1; }
+    # `render_general` shows fields *or* the subtitle. A row whose detail lives
+    # in its subtitle must not lose it the moment it acquires a name.
+    printf '%s' "$row" |
+        jq -e '(.subtitle // "") as $s | $s == "" or ((.fields // []) | index($s)) != null' >/dev/null ||
+        { echo "the alias evicted the subtitle: $row"; return 1; }
+
+    # The other half. A collection that can be built from the CLI and never
+    # seen in the launcher is the state `ql:` was built to end.
+    run settings path aliases >/dev/null 2>&1 || { echo "no 'aliases' setting"; return 1; }
+    run _dump-all 2>/dev/null | payload |
+        jq -e 'select(.kind == "setting" and .data.setting == "aliases" and .data.edit == "collection")' \
+        >/dev/null || { echo "no Aliases collection row in the settings form"; return 1; }
 }
 
 # --------------------------------------------------- P4/P5  launch with a query
@@ -220,7 +252,7 @@ printf '\033[1mRaycast parity — interaction polish\033[0m\n\n'
 item P1a done  "Fallback row: is the query, survives, absent in a scope"
 item P1b todo  "Fallbacks are an ordered, configurable list"
 item P2  done  "Alias a stable object, refused at the moment of naming"
-item P3  todo  "The alias shows on the row, and has a manager"
+item P3  done  "The alias shows on the row, and has a manager"
 item P4a spike "Launch with a query already typed — nothing can reveal the panel"
 item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
 item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"

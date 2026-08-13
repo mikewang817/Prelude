@@ -187,6 +187,16 @@ code consumes it; do not add another supported-Agent list or advertise an
 action by spelling an Agent name in a second module. CLI-specific parsers still
 belong beside the output they parse.
 
+`aliases.rs` names those same object keys and puts each name on the row it
+belongs to, through a `decorate` that sits beside `favorites::decorate` in
+`gather` and returns immediately when there are no aliases. Resolution is live
+because `is_special` reads the file each keystroke; the *label* comes from the
+cached snapshot the per-keystroke helper reads, so a new name works at once and
+shows on its row at the next gather — the same cadence a new Favorite follows.
+`render_general` shows `fields` **or** the subtitle and never both, so a name
+arriving on a row whose detail lives in its subtitle must carry that subtitle
+into `fields` with it or silently delete it.
+
 Favorites are Prelude preferences for stable object keys — an Agent, Skill or
 MCP server, an application by its name, a saved Quicklink by the keyword the
 person gave it. They never carry paths, commands or definitions, never write
@@ -229,11 +239,9 @@ runtime comes through it, so a row and the behaviour cannot disagree.
 
 Six settings own a file each and are written by the code that owns that file —
 `roots.txt`, `global.toml`, `open.toml`, `snippets.toml`, `quicklinks.toml`,
-`favorites.txt`. `aliases.txt` is owned the same way, by `aliases.rs`, and is
-the one owned file with no settings row yet: it can be built from
-`prelude alias` and not seen in the launcher, which is the gap `ql:` was made
-to close for quicklinks and is recorded against P3 in `docs/PARITY.md`. Do not
-write any of them from here; a chord goes through
+`favorites.txt`. `aliases.txt` is the seventh, owned by `aliases.rs`, with an
+Aliases row of the same collection shape. Do not write any of them from here;
+a chord goes through
 `global::set_hotkey` so it gets the same validation, conflict check and panel
 restart the CLI performs. The four that had only an environment variable get
 `settings.toml`, and **the variable still wins** — a variable is a

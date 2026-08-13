@@ -1581,12 +1581,17 @@ fn alias_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
         .iter()
         .find(|it| crate::favorites::key(it).as_deref() == Some(target.as_str()))?
         .clone();
+    // Identity both ways `finish` checks it, as `quicklink_with_neighbours`
+    // does: by the name and by `(kind, cmd)`. The named row belongs on screen
+    // once, at the top, as the row the name resolved to.
+    let alias = exact.get("alias").to_string();
     let same = (exact.kind, exact.cmd.clone());
     let mut rows = vec![exact];
     rows.extend(
         root_items(static_items)
             .into_iter()
             .filter(|it| (it.kind, it.cmd.clone()) != same)
+            .filter(|it| alias.is_empty() || it.get("alias") != alias)
             .filter(|it| matches_terms(it, q))
             .take(50),
     );
