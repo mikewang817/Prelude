@@ -142,7 +142,9 @@ check_P3() {
 
 # --------------------------------------------------- P4/P5  launch with a query
 
-# Half of "a hotkey per command", and all of the half this repository owns.
+# Still the right check, and not run while P4a is a spike: nothing outside
+# Ghostty can reveal the quick terminal, so there is no moment at which a
+# seeded query would be seen. See "Spikes" in docs/PARITY.md.
 check_P4a() {
     out=$("$PRELUDE" open --dry-run 'c:' 2>/dev/null) ||
         { echo "no 'open' verb"; return 1; }
@@ -211,7 +213,7 @@ item P1a done  "Fallback row: is the query, survives, absent in a scope"
 item P1b todo  "Fallbacks are an ordered, configurable list"
 item P2  todo  "Alias any row, refused at the moment of naming"
 item P3  todo  "The alias shows on the row it belongs to"
-item P4a todo  "Launch with a query already typed"
+item P4a spike "Launch with a query already typed — nothing can reveal the panel"
 item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
 item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"
 item P7  done  "Pin an app or a quicklink, inside its band"

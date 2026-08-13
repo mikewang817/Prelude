@@ -47,13 +47,14 @@ rediscover them every pass:
 | P2 | Alias any row, refused at the moment of naming | todo |
 | P3 | The alias shows on the row it belongs to | todo |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
-| P4a | Launch with a query already typed | todo |
 | P8 | A trashed object says where it went, and offers the way back | todo |
+| P4a | Launch with a query already typed | spike |
 | P4b | A chord per command | spike |
 | P5 | `prelude://` deeplinks | spike |
 
-Suggested order is the table's: P7 is small and self-contained, P2/P3 are one
-feature in two halves, P1b and P4a each open a door the spikes need later.
+Suggested order is the table's. P2/P3 are one feature in two halves. The three
+spikes are one question wearing three hats and are answered together or not at
+all; see below.
 
 ### Struck
 
@@ -153,21 +154,21 @@ the dots for two thousand rows.
 
 **Check**: at least one root row's payload carries `alias`.
 
-## P4a — launch with a query already typed · todo
+## P4a — launch with a query already typed · spike
 
-**Raycast**: a command can be opened directly, from a hotkey or a deeplink.
+Written as the half of P4b this repository owns, on the assumption that
+seeding a query was Prelude's side of the problem and only the chord belonged
+to Ghostty. That was wrong, and the measurement is in the spikes section
+below: **nothing outside Ghostty can reveal the quick terminal**, so there is
+no moment at which a seeded query would be seen.
 
-**Prelude now**: both entry points open on the home. Getting to `c:` is
-always: press the chord, type `c:`.
+The item is reclassified rather than struck. Its check is still the right
+check and stays in the script, unrun, for whenever the answer to P5 arrives.
+Nothing was implemented — see the spike note for what remains possible and
+what it costs.
 
-**The shape of the answer**: `prelude open [--dry-run] QUERY` seeds the panel
-or a new surface with a query. It is the half of P4b that this repository
-owns, and P5's payload once something can deliver a URL.
-
-Both entry points must keep standing in `global::launch_directory`. A query
-seeded from outside is not a reason for the answer to depend on who seeded it.
-
-**Check**: `prelude open --dry-run 'c:'` reports the query it would seed.
+**Check** (not run while this is a spike): `prelude open --dry-run 'c:'`
+reports the query it would seed.
 
 ## P7 — pin an app or a quicklink · done
 
@@ -234,18 +235,63 @@ from the footer advertising a chord that does nothing.
 
 ## Spikes
 
+All three are the same question: **the panel can only be revealed by a key
+Ghostty itself handles.** Measured, on Ghostty 1.2 (`+list-actions`,
+`+help`, `+show-config --default`, and the binary's own strings):
+
+* `toggle_quick_terminal` exists only as a **keybind** action. Keybind actions
+  cannot be invoked from outside a running instance.
+* The `+action` CLI surface is a closed list of fifteen — version, help, the
+  five `list-*`, ssh-cache, edit-config, show-config, validate-config,
+  show-face, crash-report, boo, new-window — and none of them reaches a
+  running instance. `+new-window` answers *"not supported on this platform"*
+  on macOS.
+* There is no IPC, socket or listen configuration key.
+* There is no `Quick Terminal` menu item, so there is no System Events route
+  either — which follows from `macos-hidden = always`, the setting that keeps
+  the panel out of the Dock and the switcher in the first place.
+
+Until that changes, everything below is blocked on one product decision, and
+it is P5's.
+
+### P4a — launch with a query already typed
+
+Two shapes were available and both are refused for reasons already settled
+elsewhere:
+
+**Seed the running panel.** The machinery exists — `refresh.rs` already holds
+fzf's `--listen` socket and could POST a `change-query`. But Prelude cannot
+then reveal it, so the query would sit in a hidden panel until the person
+happened to press the chord, and they would arrive at a launcher already
+filtered by something they typed in another context minutes earlier. That is
+the exact failure `refresh.rs` refuses to cause on its own account: a
+background change moving somebody's state is worse than the staleness it
+fixes.
+
+**Open a new surface with the query.** This works, and it is the design that
+was removed. *A press reveals; it never creates* — the old launcher built an
+application instance, a window and a login shell per invocation, 373 ms of
+construction and teardown, and CLAUDE.md records that every launch-and-teardown
+bug came from it. Reintroducing it for a seeded query buys a feature with the
+defect the current architecture exists to have eliminated.
+
+What remains possible and is **not** blocked: `prelude open QUERY` running the
+launcher *inline, in the terminal that typed it*, with the query already in
+the box. It contradicts nothing and it is what a `prelude://` handler would
+call. But on its own it is a scripting door nobody asked for, and whether it
+should exist before P5 is answered is the decision — not an implementation
+detail, and not one to make while the loop is holding the pen.
+
 ### P4b — a chord per command
 
-Ghostty's `global:` keybinds run **Ghostty actions** — `toggle_quick_terminal`
-and the rest — not arbitrary commands, and they take no argument. There is no
-second action to bind a second chord to, and no way to say "reveal, with `c:`
-typed".
+Ghostty's `global:` keybinds run Ghostty actions and take no argument, so
+there is no second action to bind a second chord to and no way to say "reveal,
+with `c:` typed".
 
-So this cannot be built the way P4a can. The routes are: a second hotkey
-daemon as a dependency, which is a large answer to a small question and one
-CLAUDE.md's stance on dependencies argues against; or P5's URL scheme plus
-whatever the person already uses to bind keys, which costs Prelude nothing and
-is probably the right shape. Resolve P5 first.
+The routes are a second hotkey daemon as a dependency — a large answer to a
+small question, and one CLAUDE.md's stance on dependencies argues against — or
+P5's URL scheme plus whatever the person already uses to bind keys, which
+costs Prelude nothing and is probably the right shape.
 
 ### P5 — `prelude://` deeplinks
 
@@ -257,4 +303,7 @@ written outside Prelude's own config and caches, and CLAUDE.md keeps an
 explicit list of those. Adding to that list is a decision, not an
 implementation detail.
 
-Answer that first, then P4a is already the payload and P4b follows for free.
+Answer that first. P4a becomes the payload and P4b follows for free — but the
+order is fixed, because both of them are shapes of *how the answer is
+delivered* and P5 is the question of whether Prelude gets to be a thing macOS
+can deliver to at all.
