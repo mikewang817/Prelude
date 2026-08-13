@@ -47,20 +47,16 @@ rediscover them every pass:
 | P1b | Fallbacks are an ordered, configurable list | **done** |
 | P3 | The alias shows on the row, and has a manager | **done** |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
-| P4a | Launch with a query already typed | spike |
-| P4b | A chord per command | spike |
-| P5 | `prelude://` deeplinks | spike |
+| P5 | `prelude://` deeplinks, which act rather than show | todo |
 
-**This track has no `todo` left.** Six items were built or already held, two
-were struck, and the three that remain are one question wearing three hats:
-whether Prelude gets to be something macOS can deliver a URL to. That answer
-is not the loop's to invent, so `parity-loop` has nothing to pick here until
-somebody decides it. A next track — the extension model, or something else
-off the out-of-scope list — needs its own scorecard written the way this one
-should have been: from observed behaviour, never from an absence.
+**The decision the three spikes were waiting on has been made**: `prelude://`
+exists, it acts rather than opening a launcher, and `global install` puts it
+there. P4b folds into P5 — a chord bound to `prelude://run?alias=…` in whatever
+hotkey tool the person already has costs this repository nothing — and P4a is
+struck, because the only shape of it that survives that decision is not worth
+building. Three items became one.
 
-P2/P3 were one feature in two halves. The three spikes are answered together
-or not at all; see below.
+P2/P3 were one feature in two halves.
 
 ### Struck
 
@@ -119,6 +115,25 @@ this is one original error found twice rather than a lesson ignored. Of the
 ten items on this scorecard, the two that were wrong were the two phrased as
 absences; the six that survived were phrased as observed behaviour. That is
 the rule to carry into any future scorecard.
+
+**P4a — "launch with a query already typed".** Struck by the P5 decision
+rather than by evidence, which makes it a different kind of removal from the
+two above: the gap was real and stays real. The launcher has no way to start
+with a query in the box.
+
+Of its two shapes, one is impossible and one is refused. Seeding the running
+panel cannot work because nothing outside Ghostty can reveal it, so the query
+would wait in a hidden panel and ambush whoever pressed the chord next —
+exactly the failure `refresh.rs` declines to cause on its own account. Opening
+a new surface works and is the design `A press reveals; it never creates` was
+written to have removed.
+
+What survived was `prelude open QUERY` running the launcher inline in the
+terminal that typed it. With `prelude://` deciding to act rather than to show,
+nothing needs that as a payload any more, and on its own it saves a person at
+a shell two keystrokes over `Ctrl+R` — which is not a CLI verb's worth of
+surface. If a reason for it appears later, the mechanism is a `--query` on the
+main list's fzf arguments and nothing else.
 
 ---
 
@@ -276,22 +291,6 @@ happened to have named something that happens to be a root command: a question
 about their config rather than about the code, and one that failed on this
 machine for exactly that reason while the behaviour was correct.
 
-## P4a — launch with a query already typed · spike
-
-Written as the half of P4b this repository owns, on the assumption that
-seeding a query was Prelude's side of the problem and only the chord belonged
-to Ghostty. That was wrong, and the measurement is in the spikes section
-below: **nothing outside Ghostty can reveal the quick terminal**, so there is
-no moment at which a seeded query would be seen.
-
-The item is reclassified rather than struck. Its check is still the right
-check and stays in the script, unrun, for whenever the answer to P5 arrives.
-Nothing was implemented — see the spike note for what remains possible and
-what it costs.
-
-**Check** (not run while this is a spike): `prelude open --dry-run 'c:'`
-reports the query it would seed.
-
 ## P7 — pin an app or a quicklink · done
 
 **Raycast**: pin any result to the top.
@@ -341,77 +340,76 @@ work, not the item numbers, if it needs rewriting again.
 
 ---
 
-## Spikes
+## P5 — `prelude://` deeplinks · todo
 
-All three are the same question: **the panel can only be revealed by a key
-Ghostty itself handles.** Measured, on Ghostty 1.2 (`+list-actions`,
-`+help`, `+show-config --default`, and the binary's own strings):
+**Decided.** The scheme exists, it **acts rather than showing a launcher**, and
+`global install` puts it there. What follows is the record of that decision and
+of the mechanism, which was proven end to end before being written down.
 
-* `toggle_quick_terminal` exists only as a **keybind** action. Keybind actions
-  cannot be invoked from outside a running instance.
-* The `+action` CLI surface is a closed list of fifteen — version, help, the
-  five `list-*`, ssh-cache, edit-config, show-config, validate-config,
-  show-face, crash-report, boo, new-window — and none of them reaches a
-  running instance. `+new-window` answers *"not supported on this platform"*
-  on macOS.
-* There is no IPC, socket or listen configuration key.
-* There is no `Quick Terminal` menu item, so there is no System Events route
-  either — which follows from `macos-hidden = always`, the setting that keeps
-  the panel out of the Dock and the switcher in the first place.
+### It acts; it does not open a launcher
 
-Until that changes, everything below is blocked on one product decision, and
-it is P5's.
+The panel cannot be revealed from outside — measured, and kept below — so a
+URL that wanted to show a filtered launcher would have to *build* one, which is
+the design `A press reveals; it never creates` exists to have removed. So a
+deeplink does the thing instead: `prelude://run?alias=browser` opens Chrome,
+with no interface in between.
 
-### P4a — launch with a query already typed
+That is also what a per-command hotkey actually wants, and it composes with the
+names that already exist. An alias is a stable name for an object; binding a
+chord to `prelude://run?alias=…` in whatever hotkey tool the person already has
+*is* P4b, at no cost to this repository, which is why P4b is folded in here
+rather than kept as its own item.
 
-Two shapes were available and both are refused for reasons already settled
-elsewhere:
+The price, accepted: a **scope** is not an object, so `prelude://` cannot open
+the clipboard history the way Raycast's hotkey does. Nothing that has no stable
+name is reachable this way.
 
-**Seed the running panel.** The machinery exists — `refresh.rs` already holds
-fzf's `--listen` socket and could POST a `change-query`. But Prelude cannot
-then reveal it, so the query would sit in a hidden panel until the person
-happened to press the chord, and they would arrive at a launcher already
-filtered by something they typed in another context minutes earlier. That is
-the exact failure `refresh.rs` refuses to cause on its own account: a
-background change moving somebody's state is worse than the staleness it
-fixes.
+### A URL is untrusted input, and this is the part to get right
 
-**Open a new surface with the query.** This works, and it is the design that
-was removed. *A press reveals; it never creates* — the old launcher built an
-application instance, a window and a login shell per invocation, 373 ms of
-construction and teardown, and CLAUDE.md records that every launch-and-teardown
-bug came from it. Reintroducing it for a seeded query buys a feature with the
-defect the current architecture exists to have eliminated.
+**Any web page can navigate to `prelude://…`.** That makes the verb table a
+security boundary, not a convenience:
 
-What remains possible and is **not** blocked: `prelude open QUERY` running the
-launcher *inline, in the terminal that typed it*, with the query already in
-the box. It contradicts nothing and it is what a `prelude://` handler would
-call. But on its own it is a scripting door nobody asked for, and whether it
-should exist before P5 is answered is the decision — not an implementation
-detail, and not one to make while the loop is holding the pen.
+* Never accept a path, a command, a template or a target from the URL. The only
+  thing a URL may name is something the person themselves created — an alias,
+  which resolves through `aliases::target_of` to an object key and nothing
+  else.
+* An unknown verb, an unknown alias, or a malformed URL does nothing and says
+  so where the person can see it. It must not fall through to a search.
+* Decide explicitly whether a resolved object *acts* or is *handed over*. The
+  launcher's own rule is that objects act and commands are copied; a Skill's
+  Enter copies text, and a URL arriving from a web page should not be able to
+  put text on the clipboard silently. Prefer the narrower answer.
 
-### P4b — a chord per command
+### Mechanism, proven on this machine
 
-Ghostty's `global:` keybinds run Ghostty actions and take no argument, so
-there is no second action to bind a second chord to and no way to say "reveal,
-with `c:` typed".
+`osacompile` an applet whose script is `on open location this_URL`, add
+`CFBundleURLTypes` and `LSUIElement` to its `Info.plist` with `PlistBuddy`,
+then `lsregister -f` it. `open "prelude://run?alias=browser"` reaches the
+handler with the **whole URL, query string included**. All three tools ship
+with macOS: no compiler, no Xcode, no new dependency.
 
-The routes are a second hotkey daemon as a dependency — a large answer to a
-small question, and one CLAUDE.md's stance on dependencies argues against — or
-P5's URL scheme plus whatever the person already uses to bind keys, which
-costs Prelude nothing and is probably the right shape.
+**The trap, and it is a quiet one.** `CFBundleURLTypes` delivers the URL as an
+Apple Event (`kAEGetURL`) to a running application — *not* as `argv`. A stub
+`.app` whose `CFBundleExecutable` is a shell script therefore registers
+correctly, claims the scheme in `lsregister -dump`, and then silently never
+runs. That was this item's previous plan, written from documentation, and it
+does not work.
 
-### P5 — `prelude://` deeplinks
+**Location is load-bearing too.** The identical bundle under `/private/tmp`
+registers its claim and still answers `kLSApplicationNotFoundErr`; from
+`~/Applications` it works. Both failures look the same from `open`, so test the
+real location.
 
-A URL scheme is registered by `CFBundleURLTypes` in an application bundle.
-Prelude is a bare binary and has no bundle. The installer already places
-Ghostty in `~/Applications`, so a minimal stub `.app` that forwards to
-`prelude open` is not without precedent — but it is a new category of file
-written outside Prelude's own config and caches, and CLAUDE.md keeps an
-explicit list of those. Adding to that list is a decision, not an
-implementation detail.
+### Installation
 
-Answer that first. P4a becomes the payload and P4b follows for free — but the
-order is fixed, because both of them are shapes of *how the answer is
-delivered* and P5 is the question of whether Prelude gets to be a thing macOS
-can deliver to at all.
+`global install` generates `~/Applications/Prelude Link.app` and registers it;
+`global uninstall` removes it **and** `lsregister -u`s it, or the scheme stays
+claimed by a bundle that is gone. Same lifecycle as the managed Ghostty block
+and the LaunchAgent, so there is no second thing to remember.
+
+This adds an entry to the closed list in `CLAUDE.md` of what Prelude writes
+outside its own config and caches. That list exists to be short and explicit;
+update it in the same commit.
+
+**Check**: to be written with the item, and it must cover the trap — that the
+handler actually *receives* a URL, not merely that the scheme is claimed.

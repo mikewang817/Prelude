@@ -212,17 +212,17 @@ check_P3() {
 
 # --------------------------------------------------- P4/P5  launch with a query
 
-# Still the right check, and not run while P4a is a spike: nothing outside
-# Ghostty can reveal the quick terminal, so there is no moment at which a
-# seeded query would be seen. See "Spikes" in docs/PARITY.md.
-check_P4a() {
-    out=$("$PRELUDE" open --dry-run 'c:' 2>/dev/null) ||
-        { echo "no 'open' verb"; return 1; }
-    case "$out" in *"c:"*) ;; *) echo "did not carry the query: $out"; return 1 ;; esac
-}
+# P4a was struck by the P5 decision: `prelude://` acts rather than showing a
+# launcher, so nothing needs a seeded query as a payload. P4b folded into P5.
+# See "Struck" in docs/PARITY.md.
 
-check_P4b() { echo "spike"; return 1; }
-check_P5()  { echo "spike"; return 1; }
+# --------------------------------------------------------------- P5  deeplinks
+
+# Written with the item. It must prove the handler *receives* a URL and not
+# merely that the scheme is claimed: a bundle whose executable is a shell
+# script claims it correctly and then silently never runs, because the URL
+# arrives as an Apple Event rather than as argv.
+check_P5() { echo "not written yet"; return 1; }
 
 # P6 was struck. It claimed the action panel names the verb and not the noun,
 # which was a misreading: `panel()` states the verb in the header and the row
@@ -278,9 +278,7 @@ item P1a done  "Fallback row: is the query, survives, absent in a scope"
 item P1b done  "Fallbacks are an ordered, configurable list"
 item P2  done  "Alias a stable object, refused at the moment of naming"
 item P3  done  "The alias shows on the row, and has a manager"
-item P4a spike "Launch with a query already typed — nothing can reveal the panel"
-item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
-item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"
+item P5  todo  "prelude:// deeplinks, which act rather than show"
 item P7  done  "Pin an app or a quicklink, inside its band"
 item P10 done  "Object chords appear on object rows and nowhere else"
 
