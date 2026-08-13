@@ -135,6 +135,29 @@ key against. The Ghostty
 process remains visible to launchd; `initial-window = false` means it owns no
 surface and starts no `prelude _panel` child until the first press.
 
+**`prelude://` acts; it never shows a launcher, and it never trusts what it
+was given.** `link.rs` generates `~/Applications/Prelude Link.app` during
+`global install` and `global uninstall` both deletes it *and* `lsregister -u`s
+it, or the scheme stays claimed by a bundle that is gone. A chord bound to
+`prelude://run?alias=NAME` in any hotkey tool is therefore a hotkey per
+command, at no cost here — and a *scope* is not an object, so nothing without
+a stable name is reachable this way.
+
+Three things about it were each found the hard way. `CFBundleURLTypes`
+delivers a URL as an **Apple Event**, never as `argv`, so a bundle whose
+executable is a shell script registers, claims the scheme in `lsregister
+-dump`, and silently never runs; the handler must be an `osacompile` applet
+with `on open location`. The bundle must live in `~/Applications` — the same
+one under `/private/tmp` registers its claim and still answers
+`kLSApplicationNotFoundErr`, and both failures look identical from `open`. And
+because any web page can navigate to `prelude://`, the verb table is a
+security boundary: the only thing a URL may name is an alias the person
+created, it must survive `normalize_quicklink_key`, and the resolved row must
+be one the launcher would *act* on — `Open`, `Launch`, `OpenUrl` and nothing
+else, because a link must not be able to write the clipboard or start an
+agent. No URL text is ever repeated into `bus::post`, whose AppleScript
+literal escapes quotes but not newlines.
+
 **The launcher is not the destination, and it never builds one.** A command
 picked from the panel goes on the **clipboard**, and the panel stands down.
 Objects — files, folders, URLs, applications — still go straight to Launch
@@ -1336,10 +1359,10 @@ rather than the markers; refusing them was the older behaviour and it said so
 with "that quicklink is managed in the config file", a sentence whose plain
 reading is the opposite of what it meant. Outside Prelude's config and caches,
 only explicit setup or actions write user files: `global install/start/update`
-own the marked three-key block in ordinary Ghostty config; capability install,
-raw Session export, and moving a selected file, application, skill copy or
-inactive native Session to the Trash are the other cases. None is a default
-launcher action.
+own the marked three-key block in ordinary Ghostty config and generate
+`~/Applications/Prelude Link.app`; capability install, raw Session export, and
+moving a selected file, application, skill copy or inactive native Session to
+the Trash are the other cases. None is a default launcher action.
 
 Deleting a skill copy is built so that being wrong is survivable rather than
 so that it cannot happen. It moves the directory to

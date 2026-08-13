@@ -218,11 +218,49 @@ check_P3() {
 
 # --------------------------------------------------------------- P5  deeplinks
 
-# Written with the item. It must prove the handler *receives* a URL and not
-# merely that the scheme is claimed: a bundle whose executable is a shell
-# script claims it correctly and then silently never runs, because the URL
-# arrives as an Apple Event rather than as argv.
-check_P5() { echo "not written yet"; return 1; }
+# Two halves: that macOS delivers, and that the verb table refuses.
+#
+# The first is the slow one — it builds, registers and fires at a throwaway
+# bundle in ~/Applications and removes it again, which takes seconds. It is not
+# optional. A bundle can be generated correctly, register correctly and claim
+# the scheme in `lsregister -dump` while receiving nothing, because the URL
+# arrives as an Apple Event and not as argv; asserting the claim would pass in
+# exactly that case.
+check_P5() {
+    "$PRELUDE" _link-selftest >"$TMP/selftest" 2>&1 ||
+        { echo "delivery: $(cat "$TMP/selftest")"; return 1; }
+
+    # The table, in a throwaway config so the person's aliases are untouched.
+    home="$TMP/xdg-link/config"
+    mkdir -p "$home" || return 1
+    ln() { XDG_CONFIG_HOME="$home" "$PRELUDE" "$@"; }
+
+    target=$(grep -F '"kind":"app"' "$TMP/all" | head -1 | payload | jq -r .title)
+    [ -n "$target" ] || { echo "no application in the catalogue to name"; return 1; }
+    ln alias add zzlinkapp "$target" >/dev/null 2>&1 ||
+        { echo "could not name “$target”"; return 1; }
+    ln _open-url --dry-run 'prelude://run?alias=zzlinkapp' >/dev/null 2>&1 ||
+        { echo "a named application is not reachable by link"; return 1; }
+
+    # A URL is untrusted input. Each of these must refuse, and the first one is
+    # the security boundary rather than a typo guard: a Skill's Enter hands
+    # text over, and a web page must not be able to cause that.
+    skill=$(grep -F '"kind":"skill"' "$TMP/all" | head -1 | payload | jq -r .title)
+    if [ -n "$skill" ] && ln alias add zzlinkskill "$skill" >/dev/null 2>&1; then
+        ! ln _open-url --dry-run 'prelude://run?alias=zzlinkskill' >/dev/null 2>&1 ||
+            { echo "a link may act on a row whose Enter hands text over"; return 1; }
+    fi
+    for url in \
+        'prelude://run?alias=zznosuchalias' \
+        'prelude://exec?cmd=rm%20-rf%20/' \
+        'prelude://run?alias=..%2F..%2Fetc%2Fpasswd' \
+        'prelude://run' \
+        'prelude://'
+    do
+        ! ln _open-url --dry-run "$url" >/dev/null 2>&1 ||
+            { echo "accepted $url"; return 1; }
+    done
+}
 
 # P6 was struck. It claimed the action panel names the verb and not the noun,
 # which was a misreading: `panel()` states the verb in the header and the row
@@ -278,7 +316,7 @@ item P1a done  "Fallback row: is the query, survives, absent in a scope"
 item P1b done  "Fallbacks are an ordered, configurable list"
 item P2  done  "Alias a stable object, refused at the moment of naming"
 item P3  done  "The alias shows on the row, and has a manager"
-item P5  todo  "prelude:// deeplinks, which act rather than show"
+item P5  done  "prelude:// deeplinks, which act rather than show"
 item P7  done  "Pin an app or a quicklink, inside its band"
 item P10 done  "Object chords appear on object rows and nowhere else"
 

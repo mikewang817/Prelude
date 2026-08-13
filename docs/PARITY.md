@@ -47,7 +47,7 @@ rediscover them every pass:
 | P1b | Fallbacks are an ordered, configurable list | **done** |
 | P3 | The alias shows on the row, and has a manager | **done** |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
-| P5 | `prelude://` deeplinks, which act rather than show | todo |
+| P5 | `prelude://` deeplinks, which act rather than show | **done** |
 
 **The decision the three spikes were waiting on has been made**: `prelude://`
 exists, it acts rather than opening a launcher, and `global install` puts it
@@ -340,9 +340,9 @@ work, not the item numbers, if it needs rewriting again.
 
 ---
 
-## P5 — `prelude://` deeplinks · todo
+## P5 — `prelude://` deeplinks · done
 
-**Decided.** The scheme exists, it **acts rather than showing a launcher**, and
+**Decided, then built.** The scheme exists, it **acts rather than showing a launcher**, and
 `global install` puts it there. What follows is the record of that decision and
 of the mechanism, which was proven end to end before being written down.
 
@@ -411,5 +411,36 @@ This adds an entry to the closed list in `CLAUDE.md` of what Prelude writes
 outside its own config and caches. That list exists to be short and explicit;
 update it in the same commit.
 
-**Check**: to be written with the item, and it must cover the trap — that the
-handler actually *receives* a URL, not merely that the scheme is claimed.
+### What the building turned up
+
+**An AppleScript injection, introduced and then caught by the review.** The
+first refusal path repeated the URL's verb back into the notification, and
+`bus::post` builds an AppleScript literal whose `escape` covers quotes and
+backslashes but **not newlines**. `prelude://x%0Adisplay%20dialog%20"…"` ended
+the `display notification` statement and started another one — arbitrary
+AppleScript, from a link any web page can navigate to. The verb is no longer
+echoed at all, `width::flatten` guards every other sentence, and a test pins
+both halves. The alias route was already safe by construction rather than by
+filtering, because whatever arrives has to survive
+`normalize_quicklink_key`.
+
+`_open-url --dry-run` exists because a security boundary that can only be
+tested by triggering it is one nobody tests. It walks every refusal and stops
+one step short of Launch Services.
+
+`link::install` failing does not fail `global install`. A panel that works
+without a URL scheme is better than an install that refuses over one, so the
+error becomes a line in the output.
+
+**A known limit, not fixed**: a hostile page firing many `prelude://` URLs
+raises one notification each. That is a nuisance rather than a hole — nothing
+happens, and the notifications name Prelude, so the abuse announces itself —
+but rate-limiting refusals is the obvious next thing if it ever matters.
+
+**Check**: `_link-selftest` builds, registers and fires at a throwaway bundle
+in `~/Applications` and removes it again — seconds, and not optional, because
+asserting that the scheme is *claimed* passes in exactly the case the trap
+describes. Then the verb table, in a throwaway `XDG_CONFIG_HOME`: a named
+application is reachable, and a named Skill, an unknown alias, an unknown
+verb, a path smuggled as an alias, a missing parameter and a bare
+`prelude://` are each refused.

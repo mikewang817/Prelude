@@ -1329,8 +1329,16 @@ fn install() -> Result<String, String> {
     ensure_global_key_ready()?;
     ensure_terminal_bindings()?;
 
+    // `prelude://` is generated here so there is no second thing to remember.
+    // It degrades to a line of explanation: a panel that works without a URL
+    // scheme is better than an install that refuses over one.
+    let link = match crate::link::install() {
+        Ok(message) => message,
+        Err(error) => format!("prelude:// links unavailable: {error}"),
+    };
+
     let mut result = format!(
-        "installed {}\nhotkey: {}\nlauncher stands in: {}\nterminal directory keys: installed\n",
+        "installed {}\nhotkey: {}\nlauncher stands in: {}\nterminal directory keys: installed\n{link}\n",
         destination.display(),
         config.hotkey.canonical(),
         effective_directory(&config).display(),
@@ -1360,6 +1368,9 @@ fn uninstall(reset: bool) -> Result<String, String> {
         std::fs::remove_file(&quick)
             .map_err(|e| format!("could not remove {}: {e}", quick.display()))?;
     }
+    // Unregister as well as delete: a scheme left claimed by a bundle that is
+    // gone answers `open` with nothing and explains nothing.
+    crate::link::uninstall()?;
     if reset {
         for path in [config_path(), stdout_path(), stderr_path(), event_tap_path()] {
             if path.exists() {
@@ -1369,9 +1380,11 @@ fn uninstall(reset: bool) -> Result<String, String> {
         }
     }
     Ok(if reset {
-        "removed the launcher panel, terminal keybindings and Prelude-owned preferences".into()
+        "removed the launcher panel, terminal keybindings, prelude:// links and Prelude-owned preferences"
+            .into()
     } else {
-        "removed the launcher panel and terminal keybindings; preferences retained".into()
+        "removed the launcher panel, terminal keybindings and prelude:// links; preferences retained"
+            .into()
     })
 }
 
@@ -1598,6 +1611,15 @@ fn print_status(json: bool) -> i32 {
                 "hidden Ghostty instance up; press the chord to reveal it"
             } else {
                 "run: prelude global open"
+            },
+        );
+        line(
+            "prelude:// links",
+            crate::link::installed(),
+            if crate::link::installed() {
+                "bind a chord to prelude://run?alias=NAME in any hotkey tool"
+            } else {
+                "not installed; run: prelude global install"
             },
         );
         line(

@@ -25,6 +25,7 @@ mod frecency;
 mod global;
 mod init;
 mod item;
+mod link;
 mod lend;
 mod minitoml;
 mod mcp_tools;
@@ -199,6 +200,11 @@ fn main() -> ExitCode {
             compute::quicklink_cli(rest)
         }
         ["alias", rest @ ..] | ["aliases", rest @ ..] => aliases::cli(rest),
+        // The door the generated handler calls. Everything past the scheme is
+        // untrusted; `link::handle` is the whole of the verb table.
+        ["_open-url", url] => link::handle(url),
+        ["_open-url", "--dry-run", url] | ["_open-url", url, "--dry-run"] => link::describe(url),
+        ["_link-selftest"] => link::selftest(),
         ["skills", rest @ ..] => {
             json_dump(sources::agents::skills(), rest.contains(&"--json"))
         }
