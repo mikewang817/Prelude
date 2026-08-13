@@ -46,8 +46,8 @@ rediscover them every pass:
 | P1b | Fallbacks are an ordered, configurable list | todo |
 | P2 | Alias any row, refused at the moment of naming | todo |
 | P3 | The alias shows on the row it belongs to | todo |
+| P7 | Pin an app or a quicklink, inside its band | **done** |
 | P4a | Launch with a query already typed | todo |
-| P7 | Pin an app or a quicklink, inside its band | todo |
 | P8 | A trashed object says where it went, and offers the way back | todo |
 | P4b | A chord per command | spike |
 | P5 | `prelude://` deeplinks | spike |
@@ -169,24 +169,37 @@ seeded from outside is not a reason for the answer to depend on who seeded it.
 
 **Check**: `prelude open --dry-run 'c:'` reports the query it would seed.
 
-## P7 — pin an app or a quicklink · todo
+## P7 — pin an app or a quicklink · done
 
 **Raycast**: pin any result to the top.
 
-**Prelude now**: `favorite` appears on skill, mcp and agent rows and nowhere
-else. An app and a saved quicklink both have stable identities and neither can
-be promoted.
+**What was built**: `favorites::key` widened from Agent/Skill/MCP to include
+an application, keyed by its name, and a saved Quicklink, keyed by the keyword
+the person gave it. `parse` accepts the two new prefixes. Nothing about the
+mechanism changed — favorites stay preferences over object keys and still
+carry no path, command or definition.
 
-**The shape of the answer**: widen the object keys Favorites accepts. Nothing
-about the mechanism changes — favorites stay Prelude preferences over object
-keys, never carrying paths, commands or definitions.
+`by_rank` was not touched, which was the whole risk. It compares `band()` and
+then `score`, so the +1000 bonus can only move a row among its own kind; a
+test now walks a favourited application and quicklink against an unfavourited
+agent and asserts the agent still leads.
 
-**Promotion stays inside the Kind band.** Do not reach for `by_rank`. Kind
-decides the band and frecency only orders inside it; the two were once added
-into one number and the arithmetic could not hold, and a test now walks every
-pair of kinds with the lower band given an absurd score. A cross-band pin
-reopens exactly that hole, and it will look like it works right up until a
-pinned config file sits above `claude`.
+Three decisions worth keeping, each of which could have gone the quiet way:
+
+* **What named it wins over what it points at.** A Quicklink aimed at an
+  application is keyed as that quicklink, the same order `Item::band` uses.
+  Keyed the other way it would stop being the thing that was named and would
+  collide with pinning the application directly.
+* **A template result has no key.** It carries its provider's keyword so the
+  provider can be edited, but pinning one search would silently pin `g`.
+  `Item::is_quicklink` already drew that line.
+* **An application is keyed by name.** The bundle path is the only other thing
+  on the row and is the one thing that may not be stored; a bundle identifier
+  would mean an `Info.plist` read per application per gather.
+
+The Settings collection manager moved from `gather_agents` to the full
+catalogue in the same change. Without it the manager could remove an
+application favourite it had no way to add, which is half a collection.
 
 **Check**: app and link rows offer `favorite`.
 

@@ -113,8 +113,10 @@ MCP definitions, env/header values, and credential-bearing arguments.
 6. the 15 newest visible Sessions
 
 `a:` contains questions, Agents, Runs, visible Skills, visible MCP servers, and
-Config rows. Sessions have their own `s:` scope. Favorites can promote Agent,
-Skill, and MCP rows only within their Kind band.
+Config rows. Sessions have their own `s:` scope. Of the rows in this scope,
+Favorites can promote Agent, Skill, and MCP ones, and only within their band.
+Favorites are not an Agent feature and cover stable objects outside this
+document too; `favorites.rs` is the whole list.
 
 The named root commands—Agent Control Center, Running Agents, Past
 Conversations, Skills, MCP Servers, and Agent Config—make these views

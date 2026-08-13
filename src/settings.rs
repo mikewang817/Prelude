@@ -865,7 +865,7 @@ pub fn items() -> Vec<Item> {
             "favorites",
             "Favorites",
             if n == 0 { "none yet".into() } else { format!("{n} promoted") },
-            "promote frequently used agents, skills and MCP servers",
+            "promote agents, skills, servers, apps and quicklinks",
             EDIT_COLLECTION,
         )
         .put("source", if favorites.is_file() { "saved" } else { "none" })
@@ -1504,8 +1504,11 @@ fn add_quicklink_interactively() -> i32 {
 }
 
 fn add_favorite_interactively() -> i32 {
-    let mut items = crate::cache::gather_agents();
-    crate::favorites::decorate(&mut items);
+    // The whole catalogue, not `gather_agents`: applications and saved
+    // Quicklinks can be favourited from their own action panels, and a manager
+    // that can remove a kind it cannot add is half a collection. `gather`
+    // already decorates, so the retain below reads a marked list.
+    let mut items = crate::cache::gather();
     items.retain(|item| crate::favorites::key(item).is_some() && item.get("favorite") != "true");
     items.sort_by(crate::cache::by_rank);
     let choices: Vec<(String, String, String)> = items
@@ -1514,7 +1517,7 @@ fn add_favorite_interactively() -> i32 {
         .map(|(index, item)| (index.to_string(), item.title.clone(), item.style().1.to_string()))
         .collect();
     if choices.is_empty() {
-        crate::ui::note("every available Agent, Skill and MCP server is already a Favorite");
+        crate::ui::note("everything that can be a Favorite already is");
         return 0;
     }
     let Some(index) = crate::actions::pick_one(" add Favorite ", &choices)

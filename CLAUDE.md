@@ -187,10 +187,24 @@ code consumes it; do not add another supported-Agent list or advertise an
 action by spelling an Agent name in a second module. CLI-specific parsers still
 belong beside the output they parse.
 
-Favorites are Prelude preferences for Agent, Skill and MCP object keys. They
-never carry paths, commands or definitions, never write native Agent data, and
-only promote inside the existing Kind band. Tests address a temporary
-preference path and must not read the person's real `favorites.txt`.
+Favorites are Prelude preferences for stable object keys — an Agent, Skill or
+MCP server, an application by its name, a saved Quicklink by the keyword the
+person gave it. They never carry paths, commands or definitions, never write
+native Agent data, and only promote inside the existing band. Tests address a
+temporary preference path and must not read the person's real
+`favorites.txt`.
+
+A key is settled by *what named it* before what it points at, which is the
+order `Item::band` already uses: a Quicklink aimed at an application is keyed
+as that quicklink, not as the application, or it would stop being the thing
+that was named and would collide with pinning the application itself. The
+result of a template is not a saved Quicklink and has no key — pinning one
+search would silently pin the provider it came out of. An application is keyed
+by its name because the bundle path is the one thing on that row that may not
+be stored, and a bundle identifier would mean reading an `Info.plist` per
+application per gather. Every prefix `key` can produce must be accepted by
+`parse`, or a favourite is written, dropped on the way back in, and reported
+as saved.
 
 Skill/MCP archive state reuses those stable object identities but lives as
 atomic 0600 metadata at `$XDG_DATA_HOME/prelude/capabilities.json`. It is a

@@ -1,9 +1,10 @@
-//! Launcher favourites for stable Agent objects.
+//! Launcher favourites for stable objects.
 //!
 //! This is a Prelude preference, never metadata written into an Agent's own
-//! files. The stored key names only an Agent, Skill or MCP server; paths,
-//! commands and definitions do not belong here. Favourites change ordering
-//! inside an object's existing kind band and nothing else.
+//! files. The stored key names an Agent, Skill, MCP server, application or
+//! saved Quicklink; paths, commands and definitions do not belong here.
+//! Favourites change ordering inside an object's existing band and nothing
+//! else.
 
 use crate::item::{Item, Kind};
 use std::collections::BTreeSet;
@@ -21,16 +22,9 @@ fn file() -> PathBuf {
     std::env::temp_dir().join(format!("prelude-test-favorites-{}.txt", std::process::id()))
 }
 
-pub fn key(item: &Item) -> Option<String> {
-    let (kind, value) = match item.kind {
-        Kind::Agent => ("agent", item.get("agent")),
-        Kind::Skill => ("skill", item.get("name")),
-        Kind::Mcp => {
-            let id = item.get("capability_id");
-            ("mcp", if id.is_empty() { item.get("name") } else { id })
-        }
-        _ => return None,
-    };
+/// A key is one tab-separated line, so a value carrying a tab or a newline
+/// would read back as a different key — or as none at all.
+fn stable(kind: &str, value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().any(|c| matches!(c, '\n' | '\r' | '\t')) {
         return None;
@@ -38,12 +32,41 @@ pub fn key(item: &Item) -> Option<String> {
     Some(format!("{kind}\t{value}"))
 }
 
+pub fn key(item: &Item) -> Option<String> {
+    // A Quicklink is keyed by the name the person gave it, and that is settled
+    // before the target's kind is consulted — the same order `Item::band` uses
+    // and for the same reason. A quicklink pointing at an application would
+    // otherwise be stored under the application's name and stop being the
+    // thing that was named. The *result* of a template carries its provider's
+    // key but is not a saved Quicklink, and `is_quicklink` is the line.
+    if item.is_quicklink() {
+        return stable("quicklink", item.get("quicklink"));
+    }
+    let (kind, value) = match item.kind {
+        Kind::Agent => ("agent", item.get("agent")),
+        Kind::Skill => ("skill", item.get("name")),
+        Kind::Mcp => {
+            let id = item.get("capability_id");
+            ("mcp", if id.is_empty() { item.get("name") } else { id })
+        }
+        // An application is named by its name. The bundle path is the only
+        // other thing on the row and is the one thing that may not be stored,
+        // and a bundle identifier would mean reading an `Info.plist` for every
+        // application on the machine on every gather.
+        Kind::App => ("app", item.title.as_str()),
+        _ => return None,
+    };
+    stable(kind, value)
+}
+
 fn parse(text: &str) -> BTreeSet<String> {
     text.lines()
         .map(str::trim_end)
         .filter(|line| {
-            matches!(line.split_once('\t').map(|(kind, _)| kind), Some("agent" | "skill" | "mcp"))
-                && !line.ends_with('\t')
+            matches!(
+                line.split_once('\t').map(|(kind, _)| kind),
+                Some("agent" | "skill" | "mcp" | "app" | "quicklink")
+            ) && !line.ends_with('\t')
         })
         .map(str::to_string)
         .collect()
@@ -138,11 +161,46 @@ mod tests {
             .put("name", "node repl")
             .put("capability_id", "mcp:node-repl")
             .put("def", "API_KEY=must-not-appear");
+        let app = Item::new("open -a 'Google Chrome'", Kind::App)
+            .title("Google Chrome")
+            .put("path", "/Applications/Google Chrome.app");
         assert_eq!(key(&agent).as_deref(), Some("agent\tclaude"));
         assert_eq!(key(&skill).as_deref(), Some("skill\treview"));
         assert_eq!(key(&mcp).as_deref(), Some("mcp\tmcp:node-repl"));
-        let all = [key(&agent), key(&skill), key(&mcp)].into_iter().flatten().collect::<String>();
-        assert!(!all.contains("/private") && !all.contains("API_KEY"));
+        assert_eq!(key(&app).as_deref(), Some("app\tGoogle Chrome"));
+        let all = [key(&agent), key(&skill), key(&mcp), key(&app)]
+            .into_iter()
+            .flatten()
+            .collect::<String>();
+        assert!(!all.contains("/private") && !all.contains("/Applications"));
+        assert!(!all.contains("API_KEY"));
+    }
+
+    // A Quicklink is keyed by the name the person gave it, before its target's
+    // kind is consulted. Keyed the other way round, a quicklink pointing at an
+    // application would be stored under the application and stop being the
+    // thing that was named — and it would collide with favouriting that
+    // application directly.
+    #[test]
+    fn a_quicklink_is_keyed_by_its_own_name_whatever_it_points_at() {
+        let to_app = Item::new("open -a 'Google Chrome'", Kind::App)
+            .title("Google Chrome")
+            .quicklink("browser", "fixed");
+        let plain_app = Item::new("open -a 'Google Chrome'", Kind::App).title("Google Chrome");
+        assert_eq!(key(&to_app).as_deref(), Some("quicklink\tbrowser"));
+        assert_eq!(key(&plain_app).as_deref(), Some("app\tGoogle Chrome"));
+        assert_ne!(key(&to_app), key(&plain_app));
+    }
+
+    // The row `g rust async` produces carries its provider's key so the
+    // provider can be edited, but it is a search result rather than a thing
+    // anybody saved. Keying it would let one search pin the whole provider.
+    #[test]
+    fn a_template_result_is_not_a_favouritable_object() {
+        let result = Item::new("https://www.google.com/search?q=rust", Kind::Link)
+            .put("ql", "result")
+            .put("quicklink", "g");
+        assert_eq!(key(&result), None);
     }
 
     #[test]
@@ -157,7 +215,17 @@ mod tests {
         values.insert("agent\tclaude".into());
         values.insert("skill\treview".into());
         write_at(&path, &values).unwrap();
-        std::fs::write(&path, "agent\tclaude\nunknown\tthing\nskill\treview\n").unwrap();
+        // Every prefix `key` can produce must survive `parse`. A key written
+        // and then dropped on the way back in is the quiet half of this bug:
+        // the toggle reports success and the row is never promoted.
+        values.insert("app\tGoogle Chrome".into());
+        values.insert("quicklink\tbrowser".into());
+        std::fs::write(
+            &path,
+            "agent\tclaude\nunknown\tthing\nskill\treview\napp\tGoogle Chrome\n\
+             quicklink\tbrowser\nmcp\t\n",
+        )
+        .unwrap();
         assert_eq!(read_at(&path), values);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -173,5 +241,25 @@ mod tests {
         items.sort_by(crate::cache::by_rank);
         assert_eq!(items[0].kind, Kind::Agent);
         assert_eq!(items[1].get("favorite"), "true");
+    }
+
+    // The same rule for the kinds that just gained a key. An application is a
+    // low band and its bonus is larger than the whole frecency range, which is
+    // exactly the arithmetic that must not be allowed to reach across bands.
+    #[test]
+    fn a_favourite_application_never_outranks_an_agent() {
+        let mut items = vec![
+            Item::new("claude", Kind::Agent).put("agent", "claude"),
+            Item::new("open -a 'Google Chrome'", Kind::App).title("Google Chrome"),
+            Item::new("https://example.test", Kind::Link).quicklink("browser", "fixed"),
+        ];
+        let values =
+            BTreeSet::from(["app\tGoogle Chrome".to_string(), "quicklink\tbrowser".to_string()]);
+        decorate_with(&mut items, &values);
+        items.sort_by(crate::cache::by_rank);
+        assert_eq!(items[0].kind, Kind::Agent);
+        assert_eq!(items[0].get("favorite"), "");
+        assert!(items[1].is_quicklink(), "the Quicklink band sits above App");
+        assert_eq!(items[2].kind, Kind::App);
     }
 }

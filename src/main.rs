@@ -2156,8 +2156,16 @@ mod tests {
             ]
         );
 
+        // An application is a stable object, so it carries Favorites — before
+        // the destructive row, like every other kind that has them.
         let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
-        assert_eq!(ids(&app), ["reveal-finder", "copy-file", "copy", "insert", "quicklink-create", "trash"]);
+        assert_eq!(
+            ids(&app),
+            [
+                "reveal-finder", "copy-file", "copy", "insert", "quicklink-create", "favorite",
+                "trash",
+            ]
+        );
 
         // A URL is where a `{q}` template comes from, so it carries both.
         let link = Item::new("https://example.com", Kind::Link).put("url", "https://example.com");
@@ -2184,6 +2192,8 @@ mod tests {
         }
         assert!(linked_ids.iter().position(|id| id == "quicklink-remove").unwrap()
             < linked_ids.iter().position(|id| id == "trash").unwrap());
+        // Somebody named it, so it is a thing that can be pinned.
+        assert!(linked_ids.contains(&"favorite".to_string()));
 
         // A hand-written entry is removable too. It used to be refused with
         // "that quicklink is managed in the config file", which reads as the
@@ -2202,6 +2212,9 @@ mod tests {
             .put("quicklink", "g");
         assert!(ids(&result).contains(&"quicklink-create".to_string()));
         assert!(ids(&result).contains(&"quicklink-template".to_string()));
+        // But it is a search result rather than a saved thing, so it cannot be
+        // pinned — pinning it would silently pin the provider it came out of.
+        assert!(!ids(&result).contains(&"favorite".to_string()));
 
         let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
         let clip_ids = ids(&clip);

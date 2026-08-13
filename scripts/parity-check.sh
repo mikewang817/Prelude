@@ -214,7 +214,7 @@ item P3  todo  "The alias shows on the row it belongs to"
 item P4a todo  "Launch with a query already typed"
 item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
 item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"
-item P7  todo  "Pin an app or a quicklink, inside its band"
+item P7  done  "Pin an app or a quicklink, inside its band"
 item P8  todo  "A trashed object says where it went, and offers the way back"
 item P10 done  "Object chords appear on object rows and nowhere else"
 

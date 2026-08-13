@@ -568,10 +568,12 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
 
     // Favourites are Prelude's launcher preference, not native Agent
     // metadata. They are available on stable inventory objects only and sit
-    // before destructive management actions.
+    // before destructive management actions. The wording stays kind-neutral:
+    // an application and a saved Quicklink carry these rows too, and neither
+    // has an Agent object to leave unchanged.
     if crate::favorites::key(it).is_some() {
         let action = if it.get("favorite") == "true" {
-            a("unfavorite", "Remove from Favorites", "keeps the Agent object unchanged")
+            a("unfavorite", "Remove from Favorites", "keeps the object itself unchanged")
         } else {
             a("favorite", "Add to Favorites", "promotes it inside this category")
         };
