@@ -29,8 +29,9 @@ The installer supports Apple Silicon and Intel Macs. It downloads the latest
 checksum-verified Prelude release, reuses a compatible `fzf` or installs a
 private copy, installs the official Ghostty app in `~/Applications` when
 needed, adds managed blocks to `~/.zshrc` and Ghostty's ordinary configuration,
-and installs the global panel as a LaunchAgent. The Ghostty block translates
-`Ctrl+Enter`, `Ctrl+Shift+Enter`, and `Ctrl+Option+Enter`; uninstall removes it.
+installs the global panel as a LaunchAgent, and generates the `prelude://`
+handler in `~/Applications`. The Ghostty block translates `Ctrl+Enter`,
+`Ctrl+Shift+Enter`, and `Ctrl+Option+Enter`; uninstall removes all of it.
 
 On first install, enable Ghostty in **System Settings → Privacy & Security →
 Accessibility** when prompted. Prelude checks Ghostty's actual global event-tap
@@ -145,8 +146,21 @@ git commit                the query itself · Search Google · Enter opens it
 ```
 
 It sits under everything the machine could answer with, so it leads only when
-nothing else matched, and it stays out of scopes. Re-point the `g` Quicklink
-and this row follows it.
+nothing else matched, and it stays out of scopes — a scope is you saying where
+to look, and "or the web" is not an answer to that.
+
+Which providers appear, and in what order, is the **When nothing matches** row
+in `set:`. It is a list of Quicklink keywords, so re-pointing `g` moves your
+web searches and adding a second keyword adds a second row:
+
+```sh
+prelude settings set fallbacks "g, ddg"    # Google first, then DuckDuckGo
+```
+
+A keyword has to be a `{q}` template, because a fixed target has nowhere to put
+the query; one that is not is skipped and reported by `prelude settings check`.
+If nothing in your list resolves, the built-in search is offered anyway — a
+query must never dead-end, which is the whole reason this row exists.
 
 Choose where this search looks from `set:` → **Search folders**. Enter opens a
 folder manager: add with the native macOS chooser, show an existing root in
@@ -195,6 +209,8 @@ prelude quicklink rename notes n
 prelude quicklink check
 ```
 
+## Keys
+
 | Key | Action |
 |---|---|
 | `Enter` | Perform the focused row's stated default |
@@ -213,12 +229,68 @@ prelude quicklink check
 search: the first press opens Prelude, the second moves what you type into the
 `h:` scope.
 
+## Names and Favorites
+
+A Quicklink names a target you type in. An **alias** names something Prelude
+already has — an Agent, a Skill, an MCP server, an application, or a saved
+Quicklink — so you reach it by a word of your own instead of by whatever it is
+called:
+
+```sh
+prelude alias add browser "Google Chrome"
+prelude alias list
+prelude alias remove browser
+```
+
+The name then leads the list the moment you finish typing it, and appears on
+the row it belongs to so you learn it by seeing it. `set:` → **Aliases** is the
+same thing with a manager instead of a shell.
+
+Only things with an identity that outlives a search can be named. A session, a
+file and a history entry have none, and naming one would mean storing a path.
+A name is refused the moment you type it — never later — if a scope command,
+an Agent's own name or an existing keyword has already spent it, because a name
+that is accepted and then silently unreachable is the worst of the three
+outcomes.
+
+**Favorites** are the lighter version: no name, just promotion. `Ctrl+K` →
+*Add to Favorites* on an Agent, Skill, MCP server, application or saved
+Quicklink lifts it above its neighbours, and `set:` → **Favorites** manages the
+set. Promotion stays inside a row's own kind, so a pinned application never
+outranks an Agent.
+
+## A hotkey per command
+
+`prelude://` links act. There is no launcher in between:
+
+```sh
+open 'prelude://run?alias=browser'        # opens Google Chrome
+```
+
+Bind that to a chord in whatever hotkey tool you already use and you have a
+hotkey per command. `prelude global install` generates the handler at
+`~/Applications/Prelude Link.app` and claims the scheme; `prelude global
+uninstall` removes and unregisters it. `prelude global status` says whether it
+is there.
+
+A link may only name an alias you created yourself, and may only act on rows
+the launcher would act on — files, folders, applications and URLs, which go to
+macOS. It will not copy text, start an agent or run a server, because any web
+page can navigate to a `prelude://` URL and none of those is something a link
+gets to cause. Anything it does not recognise does nothing and says so.
+
+A scope is not an object, so this cannot open the clipboard history: only
+things with a stable name are reachable this way.
+
 ## Boundaries
 
 - Prelude is macOS-only and uses Ghostty for both entry points; the shell
   shortcut additionally requires zsh.
 - Prelude's own indexes, preferences, clipboard records, capability metadata,
-  and message bus stay in its XDG directories. Agent CLIs, MCP checks, web
+  and message bus stay in its XDG directories. Outside them it writes three
+  things, all during explicit setup: managed blocks in `~/.zshrc` and Ghostty's
+  configuration, the LaunchAgent, and the `prelude://` handler in
+  `~/Applications`. `prelude global uninstall` removes all of them. Agent CLIs, MCP checks, web
   searches, and currency conversion use the network only when explicitly asked.
 - The update check is the one exception, and it is stated rather than buried:
   at most four times a day, Prelude follows GitHub's `releases/latest`
@@ -232,7 +304,10 @@ search: the first press opens Prelude, the second moves what you type into the
   exported transcripts are filtered or redacted. Complete MCP definitions are
   not retained in ordinary Items or caches.
 - File, application, Skill-copy, and inactive-Session removal goes through the
-  Trash. Irreversible process termination confirms first.
+  Trash, and Prelude says where it put it. Irreversible process termination
+  confirms first.
+- A `prelude://` link may only name an alias you created and may only act on
+  objects macOS opens. It cannot reach the clipboard, an agent or a shell.
 - A failed source degrades to an empty or cached result instead of blocking the
   launcher indefinitely.
 

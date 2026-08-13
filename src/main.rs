@@ -447,6 +447,9 @@ HUMANS
   prelude settings get KEY | set KEY VALUE | reset KEY|all
   prelude settings check [--json] | path [KEY]
   prelude settings add-root PATH | remove-root PATH | roots
+  prelude quicklink list | add KEY TARGET [NAME] | rename OLD NEW
+                         | set-name | set-target | rm KEY | check
+                         keywords you type to reach one thing
   prelude alias [list] | add KEY NAME | remove KEY
                          name an Agent, Skill, MCP server, app or quicklink;
                          typing the name goes straight to it
@@ -480,6 +483,9 @@ SETUP
   prelude init zsh|agent shell integration, and the block for CLAUDE.md
   prelude index          rebuild the automatic file and folder index
   prelude doctor         diagnose the setup
+  prelude --version      what is running, and whether the panel agrees
+  prelude update         check, verify and swap the binary
+                         --check asks now · --rollback puts the previous back
   prelude bench          measure candidate-gathering
   prelude build-translate  compile the Apple translation helper
 ";
