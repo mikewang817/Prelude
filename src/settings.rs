@@ -147,7 +147,20 @@ fn validate_pref(key: &str, value: &str) -> Result<String, String> {
             v @ ("off" | "notify" | "download" | "apply") => Ok(v.to_string()),
             _ => Err("update is off, notify, download or apply".into()),
         },
-        "preview" | "classic_enter" => parse_bool(value)
+        // `set` has to accept what `get` printed, and `get` prints the row's
+        // value column. This one row says "per kind" and "copy everything"
+        // rather than off and on, because on/off says nothing about what the
+        // preference does — so those two words are values too. Every other
+        // scalar already round-trips; this was the one that did not.
+        "classic_enter" => match value.trim().to_ascii_lowercase().as_str() {
+            "per kind" | "per-kind" => Ok("false".into()),
+            "copy everything" | "copy-everything" => Ok("true".into()),
+            _ => parse_bool(value).map(|v| v.to_string()).ok_or_else(|| {
+                "enter is per kind or copy everything (also on/off, true/false, yes/no or 1/0)"
+                    .to_string()
+            }),
+        },
+        "preview" => parse_bool(value)
             .map(|v| v.to_string())
             .ok_or_else(|| format!("{key} is on or off (also true/false, yes/no or 1/0)")),
         // Syntax only. Whether a keyword names something that can take a query
@@ -2109,6 +2122,28 @@ pub fn list(json: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    /// `settings get` prints a row's value column and `settings set` has to
+    /// accept it back. Every scalar round-tripped except this one, whose row
+    /// deliberately says what the preference *does* rather than on and off.
+    #[test]
+    fn every_scalar_setting_accepts_back_what_get_printed() {
+        for item in items() {
+            let key = item.get("setting");
+            let Some(pref) = (match key {
+                "enter" => Some("classic_enter"),
+                "preview" | "update" | "key" | "fallbacks" => Some(key),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let shown = item.fields.first().cloned().unwrap_or_default();
+            assert!(
+                validate_pref(pref, &shown).is_ok(),
+                "{key} shows {shown:?}, which `settings set` refuses",
+            );
+        }
+    }
+
     use super::*;
 
     /// The guard that stops the settings panel recreating the bug it was
