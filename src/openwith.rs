@@ -45,6 +45,15 @@ fn table() -> crate::minitoml::Table {
         .unwrap_or_default()
 }
 
+/// Saved extension/application pairs, for the Settings collection manager.
+pub fn rules() -> Vec<(String, String)> {
+    table()
+        .remove(SECTION)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
 /// Lowercased extension, without the dot. Empty for extensionless files.
 pub fn ext_of(path: &str) -> String {
     Path::new(path)
@@ -78,16 +87,35 @@ pub fn remember(ext: &str, app: &str) -> Result<(), String> {
     let mut t = table();
     let key = if ext.is_empty() { ANY.to_string() } else { ext.to_ascii_lowercase() };
     t.entry(SECTION.to_string()).or_default().insert(key, app.to_string());
+    write_rules(&t)
+}
+
+/// Return one extension to the macOS default without touching other rules.
+pub fn forget(ext: &str) -> Result<(), String> {
+    let _lock = crate::cache::lock_for_write(&file());
+    let mut table = table();
+    let key = if ext.trim().is_empty() { ANY } else { ext.trim() };
+    let removed = table
+        .entry(SECTION.to_string())
+        .or_default()
+        .remove(key)
+        .is_some();
+    if !removed {
+        return Err(format!("no open-with rule exists for {key}"));
+    }
+    write_rules(&table)
+}
+
+fn write_rules(table: &crate::minitoml::Table) -> Result<(), String> {
     let mut out = String::from(
-        "# Which application opens what, written by Prelude's ^K panel.\n\
+        "# Which application opens what, written by Prelude's Settings and file Actions.\n\
          # Keys are extensions without the dot; \"*\" is everything else.\n\
          # Delete a line to go back to the system default.\n\n[apps]\n",
     );
-    for (k, v) in t.get(SECTION).into_iter().flatten() {
-        out.push_str(&format!("{} = {:?}\n", quoted_key(k), v));
+    for (key, app) in table.get(SECTION).into_iter().flatten() {
+        out.push_str(&format!("{} = {:?}\n", quoted_key(key), app));
     }
-    let p = file();
-    crate::cache::write_state(&p, out.as_bytes()).map_err(|e| e.to_string())
+    crate::cache::write_state(&file(), out.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn quoted_key(k: &str) -> String {

@@ -42,13 +42,34 @@ pub fn footer_for_item(
         action: primary,
         width: PRIMARY_FOOTER_WIDTH,
     }];
+    if let Some(setting) = item.filter(|item| item.kind == Kind::Setting) {
+        columns.push(FooterColumn {
+            key: "←",
+            action: crate::settings::direction_label(setting, "left"),
+            width: 16,
+        });
+        columns.push(FooterColumn {
+            key: "→",
+            action: crate::settings::direction_label(setting, "right"),
+            width: 16,
+        });
+    }
     if command_enter && item.is_some_and(revealable_path) {
-        let label = if item.is_some_and(is_folder) { "Reveal in parent" } else { "Reveal" };
+        // Revealing selects the object *inside* its parent, so a folder row is
+        // shown one level up while a file is shown where it lives.
+        let label = if item.is_some_and(|item| object_of(item).is_some_and(|(_, dir)| dir)) {
+            "Reveal in parent"
+        } else {
+            "Reveal"
+        };
         columns.push(FooterColumn { key: "Ctrl+Enter", action: label, width: 16 });
     }
     if command_enter && item.is_some_and(|item| terminal_directory(item).is_some()) {
-        let label = if item.is_some_and(is_folder) { "Terminal here" } else { "Terminal in folder" };
-        columns.push(FooterColumn { key: "Ctrl+Shift+Enter", action: label, width: 18 });
+        let label = item.map(terminal_label).unwrap_or("Terminal in folder");
+        // Wide enough for the longest of the three destinations it names. A
+        // column narrower than its own label truncates silently, which reads
+        // as a typo rather than as a layout running out of room.
+        columns.push(FooterColumn { key: "Ctrl+Shift+Enter", action: label, width: 19 });
     }
     if command_enter && item.is_some_and(|item| path_to_copy(item).is_some()) {
         columns.push(FooterColumn { key: "Ctrl+Option+Enter", action: "Copy path", width: 17 });
@@ -59,9 +80,9 @@ pub fn footer_for_item(
     }
 
     // Borders, pointer and scrollbar consume a handful of the terminal's
-    // columns. When the remainder is narrow, remove discovery aids first and
-    // filesystem verbs only as a last resort, always from whole paired
-    // columns rather than clipping one row independently of the other.
+    // columns. Settings arrows are the form's primary controls, so discovery
+    // aids disappear before them. If an extremely narrow window cannot hold
+    // the pair, hide both together rather than showing only Add or only Remove.
     let available = terminal_width.saturating_sub(8);
     for key in [
         "Ctrl+P",
@@ -78,6 +99,11 @@ pub fn footer_for_item(
         if let Some(at) = columns.iter().position(|column| column.key == key) {
             columns.remove(at);
         }
+    }
+    let used = columns.iter().map(|column| column.width).sum::<usize>()
+        + FOOTER_GAP * columns.len().saturating_sub(1);
+    if used > available {
+        columns.retain(|column| !matches!(column.key, "←" | "→"));
     }
 
     let gap = " ".repeat(FOOTER_GAP);
@@ -143,18 +169,9 @@ const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g,ctrl-],ctrl-y";
 /// read as an item.
 pub const OPEN_ACTIONS: &str = "prelude:open-actions";
 
-/// Level navigation on the arrow keys, for a list with nothing typed into it.
-///
-/// The rule is *arrows move between levels while there is no text to move
-/// through*. Left and right are the query line's cursor first — taking them
-/// away from a half-typed scope would be a launcher deciding it knows better
-/// than the person editing — so `_bind` unbinds them the moment a query
-/// exists, and `^K` remains the unconditional way in. Escape is the key that
-/// means "back" at every level, typed query or not.
-///
-/// The main list binds only `→`: there is no level below the list to go back
-/// to, and `←` there would be a key that does nothing. The pickers bind both.
-pub const ARROW_INTO: &str = "right";
+/// Modal pickers use arrows as level navigation. The main list routes arrows
+/// contextually through `_setting-key`: ordinary queries keep cursor movement,
+/// the empty home keeps `→` as Actions, and Settings uses both as controls.
 pub const ARROW_BOTH: &str = "left,right";
 
 /// Whether a key name is one the launcher asks fzf to report.
@@ -354,10 +371,17 @@ pub fn search() -> i32 {
     // footer row be clipped independently.
     args.push("--bind".into());
     args.push(format!("resize:{on_focus}"));
-    // `→` enters the action panel, the same door `^K` opens. `_bind` unbinds
-    // it whenever a query exists; see ARROW_KEYS.
-    args.push("--bind".into());
-    args.push(format!("right:print({OPEN_ACTIONS})+accept"));
+    // Arrow keys are contextual: normal cursor movement outside Settings,
+    // row-specific adjustment inside it, and `→` still opens Actions on the
+    // empty home. The helper emits one fzf action for the current query/row.
+    for direction in ["left", "right"] {
+        args.push("--bind".into());
+        args.push(format!(
+            "{direction}:transform:{} _setting-key {direction} {{q}} {{2}} {} {cols} {tw}",
+            shq(&me),
+            shq(&static_path.to_string_lossy()),
+        ));
+    }
     // Escape is "back", one level at a time, and only closes at the outermost
     // one. A typed query is a level: it is backed out of before the launcher
     // is. Ghostty no longer binds Escape, so this is the whole of what it
@@ -426,7 +450,8 @@ pub fn search() -> i32 {
             }
             "ctrl-g" if revealable_path(&item) => {
                 crate::frecency::bump(&item.cmd);
-                return match crate::openwith::reveal_now(item.get("path")) {
+                let Some((path, _)) = object_of(&item) else { continue };
+                return match crate::openwith::reveal_now(path) {
                     Ok(()) => 0,
                     Err(error) => {
                         note(&error);
@@ -462,41 +487,126 @@ pub fn search() -> i32 {
     }
 }
 
+/// Whether Enter should hand this row to Finder rather than to the
+/// application that owns it. Deliberately narrower than `object_of` below:
+/// this decides what Enter *does*, and widening it would change defaults.
 fn is_folder(item: &Item) -> bool {
     item.kind == Kind::Dir || item.get("index_kind") == "folder"
 }
 
+/// The filesystem object a row **is**, and whether that object is a directory.
+///
+/// All three Enter chords ask this one question, so they cannot disagree about
+/// which rows they apply to. They used to ask it separately and each answered
+/// `File | Find | Dir` — which was narrower than the data by eight kinds. An
+/// application, a config, a conversation, a live run, a skill, an MCP server,
+/// a settings file and a clipped image all carry a real path, and every one of
+/// them already offered *the same verbs by name* in `^K`: `Reveal in Finder`,
+/// `Copy path`, `Open terminal in containing folder`. So the keys were dead on
+/// exactly the rows whose action panel proved the key had something to do.
+///
+/// A row is included only where the object is unambiguous. Nothing here
+/// guesses: a history entry, an agent CLI and a `$PATH` binary have no
+/// filesystem object that is *theirs*, and inventing one would make the chords
+/// mean something different from row to row.
+///
+/// A Setting is the deliberate exclusion, and it does carry a path. Two
+/// reasons, both already written down. Its backing file is storage rather than
+/// intent, and belongs in Details and `^K` where the rest of the storage
+/// vocabulary lives. And `set:` is a form, not a list of objects: its two
+/// controls are `←` and `→`, and three more footer columns push the key that
+/// says so off the end of a narrow window.
+pub fn object_of(item: &Item) -> Option<(&str, bool)> {
+    let field = |key: &'static str| {
+        let value = item.get(key);
+        (!value.is_empty()).then_some(value)
+    };
+    Some(match item.kind {
+        Kind::Dir => (field("path")?, true),
+        Kind::Find => (field("path")?, item.get("index_kind") == "folder"),
+        // An `.app` is a bundle, so the kernel calls it a directory and every
+        // person calls it the application. Finder agrees with the person:
+        // revealing it selects the bundle, and a terminal belongs beside it in
+        // `/Applications` rather than inside its `Contents`.
+        Kind::File | Kind::Config | Kind::App => (field("path")?, false),
+        // A conversation's object is the native file the agent wrote, which is
+        // what `^K`'s `Reveal native session file` already points at.
+        Kind::Session => (field("file")?, false),
+        // A skill is a directory with an entry point. Prefer the entry point:
+        // `SKILL.md` is the thing you open, and its folder is one Ctrl+Enter
+        // away from it.
+        Kind::Skill => match field("file") {
+            Some(file) => (file, false),
+            None => (field("dir")?, true),
+        },
+        Kind::Mcp => (field("file").or_else(|| field("config"))?, false),
+        // A live agent's object is the project it is working in.
+        Kind::Run => (field("cwd").or_else(|| field("path"))?, true),
+        // Only the clips that put a payload on disk. A text clip has none.
+        Kind::Clip => (field("path")?, false),
+        _ => return None,
+    })
+}
+
 fn revealable_path(item: &Item) -> bool {
-    matches!(item.kind, Kind::File | Kind::Find | Kind::Dir) && !item.get("path").is_empty()
+    object_of(item).is_some()
 }
 
 pub fn path_to_copy(item: &Item) -> Option<&str> {
-    revealable_path(item).then(|| item.get("path"))
+    object_of(item).map(|(path, _)| path)
 }
 
 pub(crate) fn containing_directory(item: &Item) -> Option<std::path::PathBuf> {
-    if !matches!(item.kind, Kind::File | Kind::Find) || is_folder(item) {
+    let (path, directory) = object_of(item)?;
+    if directory {
         return None;
     }
-    std::path::Path::new(item.get("path")).parent().map(std::path::Path::to_path_buf)
+    std::path::Path::new(path).parent().map(std::path::Path::to_path_buf)
 }
 
 /// The folder Ctrl+Shift+Enter should stand a terminal in.
 ///
-/// One meaning, applied consistently: *the directory this row is in*. For a
-/// file that is its parent, which is the same place Ctrl+Enter opens in
-/// Finder; for a folder it is the folder itself, because a folder row is
+/// One meaning, applied consistently: *the directory this row's work happens
+/// in*. For a folder that is the folder itself, because a folder row is
 /// already at the place you would want the prompt to be, and sending a
-/// terminal to its parent instead would be the launcher being clever.
+/// terminal to its parent instead would be the launcher being clever. For a
+/// file it is the file's parent, the same place Ctrl+Enter reveals.
 ///
-/// Nothing else answers. A history entry or an agent has no directory that is
-/// *its*, and a key that guesses one for them would stop meaning one thing.
+/// And for a row that records its own working directory, it is that: a run and
+/// a conversation have both *said* where their work happens, which beats
+/// deriving a directory from where a file is stored. A conversation's `.jsonl`
+/// lives in the agent's private storage, so the parent rule would stand a
+/// terminal in `~/.claude/projects/…` — an answer to a question nobody asked,
+/// about the one row where the right answer is written down.
+///
+/// This is the chord's whole reason for existing, and the live-run row is the
+/// case the argument was written for: a `cd` is only useful in a shell you
+/// already have, and the point of the panel is not having one.
+///
+/// Nothing else answers. A history entry or an agent CLI has no directory that
+/// is *its*, and a key that guesses one for them would stop meaning one thing.
 pub fn terminal_directory(item: &Item) -> Option<std::path::PathBuf> {
-    if is_folder(item) {
-        let path = item.get("path");
-        return (!path.is_empty()).then(|| std::path::PathBuf::from(path));
+    let recorded = item.get("cwd");
+    if !recorded.is_empty() {
+        return Some(std::path::PathBuf::from(recorded));
+    }
+    let (path, directory) = object_of(item)?;
+    if directory {
+        return Some(std::path::PathBuf::from(path));
     }
     containing_directory(item)
+}
+
+/// What the Ctrl+Shift+Enter footer column should say, which is wherever
+/// `terminal_directory` is actually about to send the terminal.
+fn terminal_label(item: &Item) -> &'static str {
+    if !item.get("cwd").is_empty() {
+        "Terminal in project"
+    } else if object_of(item).is_some_and(|(_, directory)| directory) {
+        "Terminal here"
+    } else {
+        "Terminal in folder"
+    }
 }
 
 /// Carry out whatever Enter means for this item.

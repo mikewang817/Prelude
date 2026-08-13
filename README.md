@@ -130,10 +130,13 @@ app:zed                   installed applications
 :                         every available scope
 ```
 
-Ordinary queries also add at most ten matching local files or folders. Their
-own names and Finder tags match; parent paths are display context, so searching
+Ordinary queries also add the local objects whose own names match: up to five
+applications, then up to ten files or folders. So `Chrome` offers Google Chrome
+before it offers anything named after it. Names and Finder tags match; parent
+paths are display context, so searching
 `OpenGhostty` returns the folder named `OpenGhosttyFromAnyFolder`, not every
-`main.swift` below it. Large non-file collections stay behind their scopes.
+`main.swift` below it. Large collections such as history, clipboard rows and
+`$PATH` commands stay behind their scopes.
 Whatever you type also carries a web search on the last row, which stops an
 unmatched query from being an empty box:
 
@@ -144,6 +147,12 @@ git commit                the query itself · Search Google · Enter opens it
 It sits under everything the machine could answer with, so it leads only when
 nothing else matched, and it stays out of scopes. Re-point the `g` Quicklink
 and this row follows it.
+
+Choose where this search looks from `set:` → **Search folders**. Enter opens a
+folder manager: add with the native macOS chooser, show an existing root in
+Finder, or remove it from search without deleting anything. Prelude starts with
+`~/App`, `~/Documents`, and `~/Desktop`; after the first edit, your list is
+fully authoritative and rebuilds automatically.
 
 See [the search guide](docs/SEARCH.md) for the complete query grammar.
 
@@ -196,8 +205,8 @@ prelude quicklink check
 | `Ctrl+Enter` | Reveal a file or folder in Finder |
 | `Ctrl+Shift+Enter` | Open Ghostty in the file's parent or the selected folder |
 | `Ctrl+Option+Enter` | Copy the absolute path and close Prelude |
-| `→` | Open the focused row's actions, when nothing is typed |
-| `←` | Go back one level, when nothing is typed |
+| `→` | In `set:`, increase/enable/add/change the focused setting; otherwise open Actions when nothing is typed |
+| `←` | In `set:`, decrease/disable/remove/reset the focused setting; otherwise go back one level |
 | `Escape` | Go back one level; close Prelude at the outermost one |
 
 `Ctrl+R` pressed twice at a shell is therefore still incremental history

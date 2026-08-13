@@ -96,6 +96,12 @@ pub enum Verb {
 pub fn on_enter(item: &Item) -> Default_ {
     use Default_::*;
     use Kind::*;
+    // Settings are controls, not payload. Making `copy everything` copy
+    // `set:roots` instead of opening its manager made the very screen that can
+    // turn the preference off unusable. Control-plane rows always act.
+    if item.kind == Setting {
+        return Act(Verb::EditSetting);
+    }
     if crate::settings::classic_enter() {
         return Insert;
     }
@@ -170,7 +176,7 @@ pub fn on_enter(item: &Item) -> Default_ {
 
         // A setting's row already states its value, so Enter is the change
         // rather than another look at it.
-        Setting => Act(Verb::EditSetting),
+        Setting => unreachable!("settings return before the payload policy"),
 
         // A folder is an object like a file: Finder is the harmless default.
         // `cd` remains the first explicit alternative in ^K.
@@ -273,7 +279,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
     // whether you are about to be asked for a chord or shown a file.
     if d == Default_::Act(Verb::EditSetting) {
         return match item.get("setting") {
-            "roots" => "Add a folder…",
+            "roots" => "Manage folders",
             "index" => "Rebuild the index",
             "hotkey" => "Change the chord…",
             "paneldir" => "Change the directory…",
@@ -285,12 +291,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
                     "Turn Quick Look on"
                 }
             }
-            "update" => match item.fields.first().map(String::as_str) {
-                Some("off") => "Start checking for updates",
-                Some("notify") => "Also stage them, verified",
-                Some("download") => "Also install them at panel start",
-                _ => "Stop checking for updates",
-            },
+            "update" => "Choose update mode…",
             "enter" => {
                 if item.fields.first().map(String::as_str) == Some("per kind") {
                     "Switch to copy-everything"
@@ -298,6 +299,10 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
                     "Switch to per-kind"
                 }
             }
+            "openwith" => "Manage open-with rules",
+            "snippets" => "Manage snippets",
+            "quicklinks" => "Manage Quicklinks",
+            "favorites" => "Manage Favorites",
             _ => "Open the file",
         };
     }

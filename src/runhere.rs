@@ -9,7 +9,37 @@
 use crate::ansi::*;
 use crate::item::{Item, Kind};
 
+/// The rows Ctrl+O is allowed to run, and the same rule `actions_for` uses to
+/// decide whether to offer `Run and show output`.
+///
+/// It has to be shared, because for a long time it was not. The key was bound
+/// unconditionally and `run_item` ran whatever text the row carried straight
+/// through `sh -c`, while the action panel two keystrokes away went to real
+/// trouble over the same question: `useful_in_preview` names the six kinds
+/// whose command is small and non-interactive, `generic_run_would_kill`
+/// withholds the row from ports and processes, `is_destructive` reddens them
+/// and `needs_confirming` puts Cancel first. Ctrl+O bypassed all four.
+///
+/// What that meant in practice: a Port row's command *is* `kill $(lsof -ti
+/// tcp:3000)` and a Proc row's is `kill <pid>`, so one unadvertised keystroke
+/// killed a process the panel would have asked about twice. On an `f:` row the
+/// command is the path, so it tried to execute the file.
+///
+/// Everything else is inert, on Tab's precedent: a key that invents a
+/// behaviour for rows that have none stops meaning one thing. The rows that
+/// genuinely want output in the panel — an MCP server, a one-off agent
+/// question, the update row — already run it on Enter.
+pub fn can_run_here(it: &Item) -> bool {
+    matches!(
+        it.kind,
+        Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Sys | Kind::Git
+    )
+}
+
 pub fn run_item(it: &Item) -> i32 {
+    if !can_run_here(it) {
+        return 0;
+    }
     let cmd = if it.kind == Kind::Snippet {
         crate::ui::fill_placeholders(&it.cmd)
     } else {

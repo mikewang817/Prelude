@@ -72,6 +72,22 @@ pub fn ensure_file() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Stored stable keys, for the Settings collection manager.
+pub fn entries() -> Vec<String> {
+    read_at(&file()).into_iter().collect()
+}
+
+/// Remove a key selected in Settings without manufacturing an Agent item.
+pub fn remove_key(key: &str) -> Result<(), String> {
+    let path = file();
+    let _lock = crate::cache::lock_for_write(&path);
+    let mut values = read_at(&path);
+    if !values.remove(key) {
+        return Err("that Favorite is no longer present".into());
+    }
+    write_at(&path, &values)
+}
+
 pub fn set(item: &Item, wanted: bool) -> Result<(), String> {
     let key = key(item).ok_or_else(|| "that object cannot be favourited".to_string())?;
     let path = file();

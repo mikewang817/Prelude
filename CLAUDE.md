@@ -224,15 +224,26 @@ be able to override the broader. `toggle` says so when it is writing a file the
 environment is already overriding, because a setting that visibly does nothing
 is worse than one that refuses.
 
-The effective value goes **on the row**, together with whether it is a default,
-a saved value, or an environment override. A setting you cannot see the value
-or source of is one you change by trial. Invalid file or environment values are
-ignored at runtime, called out on the row and by `prelude settings check`, and
-`set` validates before writing; resetting removes only the scalar override and
-never a list file. `^K` holds the mutations and never repeats Enter — a test
-walks every setting and asserts it, because each of these rows has an obvious
-primary and listing it twice is the natural mistake. Keep the settings form in
-its explicit rank order rather than letting frecency scatter related controls.
+The effective value goes **on the row**; storage source, defaults, environment
+overrides and backing paths belong in Details and the JSON/CLI surface unless
+an override is actively preventing a change from taking effect. The panel is a
+four-column form—Category, Setting, Current, Effect—grouped as Search, Launcher,
+Behavior and Library. A setting you cannot see the value of is one you change
+by trial, while a row led by `saved` or `default` exposes implementation instead
+of intent. Invalid file or environment values are ignored at runtime, called
+out visibly and by `prelude settings check`, and `set` validates before writing;
+resetting removes only the scalar override and never a list file. `^K` holds the
+advanced alternatives and never repeats Enter or either arrow — tests walk
+every setting and assert its two specific direction labels, because each row
+has an obvious primary and listing it twice is the natural mistake. Direction
+semantics are consistent by shape: boolean left/right is off/on, ordered enum
+is previous/next without wrapping, scalar is reset/change, collection is
+remove/add, and status is inspect/repair. Collection Enter opens a real manager;
+opening its backing file is an advanced escape hatch, not management. Keep the
+settings form in its explicit rank order rather than letting frecency scatter
+related controls. Settings rows are controls and always act on Enter;
+`classic_enter` applies to payloads, not the screen needed to turn that
+preference back off.
 
 A pasted path is tried literally first and then unescaped, because a path with
 a space in it reaches the clipboard already escaped — shell completion and
@@ -255,11 +266,16 @@ is not tidiness: indexing `~` is seven levels of `fd` through `~/Library`,
 which macOS protects as other applications' data, and the dialog that results
 names the terminal rather than Prelude.
 
-Search roots and the file/folder index are separate rows: root edits are
-immediate and schedule a detached rebuild. The previous generation remains
-searchable until the new one is complete and atomically replaces it; a held
-kernel lock collapses simultaneous first-search/root-edit requests into one
-builder. `prelude index` is the explicit repair door, not a normal setup step.
+Search folders and the file/folder index are separate rows. On Search folders,
+`→` uses the native macOS chooser, `←` selects one to remove, and Enter opens
+one manager with the same add/remove paths plus per-folder Show in Finder. Root
+edits are immediate and
+schedule a detached rebuild. A missing roots file receives onboarding defaults;
+an existing empty file is authoritative and must not silently restore them.
+The previous generation remains searchable until the new one is complete and
+atomically replaces it; a held kernel lock collapses simultaneous first-search/
+root-edit requests into one builder. `prelude index` is the explicit repair
+door, not a normal setup step.
 Nothing in Settings may read the full index to draw a row. Versioned file and
 folder counts are recorded beside it; an old file-only generation is readable
 but never blessed as current, so the first search upgrades it in the
@@ -326,14 +342,18 @@ because the panel was already gone. That binding is now absent (see
 `global::quick_config`) and Escape belongs to Prelude, which is the only party
 that knows which level you are on.
 
-`←`/`→` do the same walk, with one restriction: they are the query line's
-cursor keys first. `_bind` unbinds `→` the moment a query exists and rebinds it
-when the query empties, because taking the arrows away from a half-typed scope
-would be the launcher deciding it knows better than the person editing. `^K` is
-the unconditional door, so nothing is lost while they are away. `→` cannot be
-an `--expect` key for exactly this reason — those are not bindings and cannot
-be unbound — so it is a binding that `print`s `ui::OPEN_ACTIONS` onto fzf's
-output queue, and `run_fzf` scans for it rather than reading a fixed line.
+`←`/`→` normally do the same walk, with one restriction: they are the query
+line's cursor keys first. Settings are the deliberate exception because they
+are a form rather than search results. Both arrows route through
+`_setting-key`: outside `set:` it emits `backward-char`/`forward-char` (or opens
+Actions from an empty home); inside `set:` the focused row emits its labelled
+less/remove/reset or more/add/change operation and reloads the live rows in
+place. Interactive chooser/prompt adjustments use visible `execute`; immediate
+booleans/enums use `execute-silent`. Do not move these rules back into `_bind`
+or scatter mutations through fzf strings—`settings::adjust` is the one semantic
+dispatch. `^K` remains the unconditional low-frequency door. `→` cannot be an
+`--expect` key because its meaning is contextual, so the empty-home Actions
+case still `print`s `ui::OPEN_ACTIONS` and `run_fzf` scans for it.
 
 **A key the launcher took over keeps meaning what the fingers think it means.**
 Ctrl+R spent decades as incremental history search, and the widget sits on it;
@@ -348,20 +368,60 @@ Enter is already a completion — scope commands and providers, `tab_completion`
 varies by row. Both are bindings, not `--expect` keys, for the reason `→` is
 not; both go through `fzf_action_arg` because a query can contain `)`.
 
-**Two general action keys: Enter is primary, Ctrl+K is the panel. Filesystem
-rows add three explicit Enter chords. Ctrl+P is a mode.** Graphical launchers
+**Two general action keys: Enter is primary, Ctrl+K is the panel. A row that
+*is* a filesystem object adds three explicit Enter chords. Ctrl+P is a mode.**
+Graphical launchers
 often put a secondary action on its own key; Prelude keeps that action but not
 the key: where useful, it is the first selectable row below Enter's
 non-selectable header. Neither action is a fixed verb; both are per-item, and
 they are opposites — where one acts, the other hands you text. A test asserts
-they never coincide. Filesystem rows add three narrower object shortcuts, not
-a generic secondary: Ctrl+Enter reveals the selected file or folder in Finder,
-Ctrl+Shift+Enter opens a Ghostty in a file's parent or the folder itself, and
+they never coincide. Object rows add three narrower shortcuts, not
+a generic secondary: Ctrl+Enter reveals the object in Finder,
+Ctrl+Shift+Enter opens a Ghostty in its directory, and
 Ctrl+Option+Enter copies the exact absolute path and closes the launcher. The
 second is the one thing this launcher cannot hand over as text — a
 `cd` is only useful in a shell you already have, and the point of the panel is
-not having one. `ui::terminal_directory` gives it a single meaning, *the
-directory this row is in*: a file's parent, and a folder itself. Ctrl+P is
+not having one.
+
+**Which rows those are is one question, asked once, in `ui::object_of`.** The
+three chords used to ask it separately and each answered `File | Find | Dir`,
+which was narrower than the data by eight kinds. An application, a config, a
+conversation, a live Run, a Skill, an MCP server and a clipped image all carry
+a real path — and every one of them already offered *the same verbs by name* in
+`^K`: `Reveal in Finder`, `Copy path`, `Open terminal in containing folder`. So
+the keys were dead on exactly the rows whose own action panel proved the key
+had something to do. `object_of` returns the path and whether it is a
+directory, and all three chords plus their footer labels read that one answer.
+Nothing in it guesses: a history entry, an agent CLI and a `$PATH` binary have
+no object that is *theirs*, and a text clip has no payload on disk. A Setting
+is the deliberate exclusion though it carries a path — its backing file is
+storage rather than intent and belongs in Details, and `set:` is a form whose
+two controls are `←` and `→`, which three more footer columns push off a narrow
+window.
+
+`terminal_directory` keeps a single meaning, now stated as *the directory this
+row's work happens in*: a folder itself, a file's parent — and, for a row that
+records its own `cwd`, that. A Run and a Session have both **said** where their
+work is, which beats deriving a directory from where a file is stored: a
+conversation's `.jsonl` lives in the agent's private storage, so the parent
+rule would stand a terminal in `~/.claude/projects/…`, an answer to a question
+nobody asked, about the one row where the right answer is written down. The
+live Run is the case the chord's whole argument was written for and was the one
+row it did not answer.
+
+**A key that acts on every row needs the same per-kind rule the panel has.**
+`ctrl-o` was bound unconditionally and ran the row's text straight through
+`sh -c` — no kind check, no confirmation — while `actions_for` two keystrokes
+away went to real trouble over the identical question: `useful_in_preview`
+names the six kinds whose command is small and non-interactive,
+`generic_run_would_kill` withholds the row from ports and processes,
+`is_destructive` reddens them and `needs_confirming` puts Cancel first. Ctrl+O
+bypassed all four, and a Port row's command *is* `kill $(lsof -ti tcp:3000)`.
+On an `f:` row it tried to execute the file. `runhere::can_run_here` is now the
+one predicate and both the key and the panel row read it; everything else is
+inert, on Tab's precedent. The rows that genuinely want output in the panel —
+an MCP server, a one-off agent question, the update row — already run it on
+Enter. Ctrl+P is
 different: Quick Look replaces
 the result area until Ctrl+P is pressed again, without selecting or acting on
 anything. The preview is hidden by default and never owns a permanent column.
@@ -427,9 +487,10 @@ handed over for review. An object just happens, because nobody proofreads
 rather than to `$EDITOR`, folders go to Finder, and URLs go to the default
 browser. These external objects are passed directly to macOS Launch Services —
 never emitted as `open ...` shell commands, never written to a prompt or
-history. `openwith.rs` remembers file overrides per extension and `^K` is where
-they are made — that panel is the settings surface, not a second list of
-shortcuts.
+history. `openwith.rs` remembers file overrides per extension. A file's `^K` can make
+one in context; `set:` is the complete collection manager, with `←` remove,
+`→` add, and Enter browse/manage. Neither surface edits a parsed rule by
+inventing its own storage format.
 
 **Commands are handed over, objects act.** Copying a file path when you wanted
 to read the file is a step backwards; opening a file is harmless in a way that
@@ -709,10 +770,36 @@ was broken, which is most of the time. It came from an acceptance criterion in
 `docs/AGENT-CONTROL-PLANE.md`, implemented faithfully and only then looked at.
 Sessions are on the home now, which they never were before. An ordinary query
 searches all of that plus Search commands and fixed Quicklinks —
-never the thousands of files, history entries, apps, clipboard rows and
+never the thousands of history entries, clipboard rows and
 `$PATH` commands underneath. Ordinary queries now mix in at most ten local
 file/folder name matches; exact `f` shows one Files & Folders command and `f:`
-opens the longer result set. `:` lists every scope, and clearing restores the home. Keep
+opens the longer result set. `:` lists every scope, and clearing restores the home.
+
+**Applications are the exception that had to be made, and the shape of the
+error is worth keeping.** Apps were in that excluded list beside history and
+`$PATH`, and the exclusion was consistent: the catalogue is what this launcher
+*manages*, and the machine's contents are behind scopes. But typing an
+application's name is the commonest question anybody asks a launcher, and
+`Chrome` answered it with eight `node_modules` icon files, a folder, and a
+Google search — while `Google Chrome.app` sat unread in the very snapshot that
+query had already parsed for its file rows. It was reachable only by first
+knowing to type `app:`. That is not a discoverability gap; the person did not
+fail to find a feature, they asked the launcher its most ordinary question and
+were told about something else. Files had already been promoted into root
+search and applications had not, which is backwards.
+
+`root_application_rows` costs nothing — a filter over a `Vec` that ordinary
+queries load anyway, measured at no change against an 18ms keystroke. Three
+rules keep it honest, and each is the part to preserve. It is emitted **below
+the catalogue**, so an installed Agent still leads its own name and a quicklink
+keyword still resolves ahead of an application containing it. It is emitted
+**above the files**, because between two objects of one name the application is
+what a launcher is usually being asked for. And it takes **substring or
+better** — `name_score`'s forgiving subsequence tier is refused here, because
+`--tiebreak=index` puts this block above the file rows and a stretched app
+match would outrank a file whose name the query actually spells. Keep
+
+
 `home.txt`, the root-command `list.txt` and the complete scoped item cache on
 one gathered snapshot and one layout — a scope must never gather a source on
 each keystroke, and `a:waiting`, `a:failed`, `a:claude Prelude`, `a:using X`

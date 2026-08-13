@@ -24,6 +24,7 @@
 use crate::item::{Item, Kind};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 const DEFAULT_KEY: &str = "^R";
 const DEFAULT_PREVIEW: bool = true;
@@ -50,6 +51,7 @@ struct Prefs {
 
 /// Read once. `on_enter` runs in the per-keystroke footer helper, so a file
 /// read per call would be a file read per keystroke.
+#[cfg(not(test))]
 fn prefs() -> &'static Prefs {
     static PREFS: std::sync::OnceLock<Prefs> = std::sync::OnceLock::new();
     PREFS.get_or_init(|| {
@@ -75,6 +77,16 @@ fn prefs() -> &'static Prefs {
                 .collect(),
         }
     })
+}
+
+/// Unit tests exercise preference rules, not the developer's live machine.
+/// Reading ~/.config here made an unrelated personal `classic_enter = true`
+/// flip the expected behavior of every File, Run and Question test depending
+/// on which parallel test initialized the cache first.
+#[cfg(test)]
+fn prefs() -> &'static Prefs {
+    static PREFS: std::sync::OnceLock<Prefs> = std::sync::OnceLock::new();
+    PREFS.get_or_init(Prefs::default)
 }
 
 fn env(name: &str) -> Option<String> {
@@ -321,19 +333,6 @@ fn pref_source(key: &str, environment: &str) -> &'static str {
         } else {
             "default"
         }
-    }
-}
-
-fn source_detail(base: &str, source: &str, environment: &str) -> String {
-    match source {
-        "environment" => format!("${environment} override · {base}"),
-        "invalid environment" => {
-            format!("invalid ${environment} ignored · using saved/default · {base}")
-        }
-        "saved" => format!("saved · {base}"),
-        "invalid saved value" => format!("invalid saved value ignored · default · {base}"),
-        "default" => format!("default · {base}"),
-        _ => base.to_string(),
     }
 }
 
@@ -624,8 +623,8 @@ pub fn root_rows() -> Vec<(String, String)> {
 /// the editor, and Prelude offers only the mutations it can make safely.
 pub const EDIT_PROMPT: &str = "prompt";
 pub const EDIT_TOGGLE: &str = "toggle";
-pub const EDIT_OPEN: &str = "open";
-pub const EDIT_ADD_ROOT: &str = "add-root";
+pub const EDIT_COLLECTION: &str = "collection";
+pub const EDIT_MANAGE_ROOTS: &str = "manage-roots";
 pub const EDIT_REBUILD: &str = "rebuild";
 
 fn ago(secs: u64) -> String {
@@ -648,11 +647,22 @@ fn count_of(path: &Path, section: Option<&str>) -> usize {
     }
 }
 
+fn setting_group(id: &str) -> &'static str {
+    match id {
+        "roots" | "index" => "Search",
+        "hotkey" | "paneldir" | "key" => "Launcher",
+        "preview" | "enter" | "update" => "Behavior",
+        _ => "Library",
+    }
+}
+
 fn row(id: &str, title: &str, value: String, detail: &str, edit: &str) -> Item {
     Item::new(format!("set:{id}"), Kind::Setting)
         .title(title)
+        .sub(setting_group(id))
         .fields([value, detail.to_string()])
         .put("setting", id)
+        .put("group", setting_group(id))
         .put("edit", edit)
 }
 
@@ -666,13 +676,12 @@ fn preference_row(
 ) -> Item {
     let (pref_key, default, environment) = meta;
     let source = pref_source(pref_key, environment);
-    row(
-        id,
-        title,
-        value,
-        &source_detail(base_detail, source, environment),
-        edit,
-    )
+    let visible_detail = if source == "environment" {
+        format!("{base_detail} · overridden by ${environment}")
+    } else {
+        base_detail.to_string()
+    };
+    row(id, title, value, &visible_detail, edit)
     .put("source", source)
     .put("default", default)
     .put("environment", environment)
@@ -704,10 +713,10 @@ pub fn items() -> Vec<Item> {
     v.push(
         row(
             "roots",
-            "Search roots",
+            "Search folders",
             value,
-            &format!("{roots_source} · what f: can find"),
-            EDIT_ADD_ROOT,
+            "choose where file and folder search looks",
+            EDIT_MANAGE_ROOTS,
         )
         .put("source", roots_source)
         .put("path", roots_file().to_string_lossy().into_owned()),
@@ -732,7 +741,7 @@ pub fn items() -> Vec<Item> {
         "current · names and Finder tags for direct, f: and dir: search"
     };
     v.push(
-        row("index", "File index", index_value, index_detail, EDIT_REBUILD)
+        row("index", "Search index", index_value, index_detail, EDIT_REBUILD)
             .put("path", indexed.to_string_lossy().into_owned())
             .put("source", if stale { "stale" } else { "current" }),
     );
@@ -746,7 +755,7 @@ pub fn items() -> Vec<Item> {
             "hotkey",
             "Global hotkey",
             global.hotkey,
-            &format!("{} · {panel_state}", global.hotkey_source),
+            &format!("opens Prelude anywhere · {panel_state}"),
             EDIT_PROMPT,
         )
         .put("source", global.hotkey_source)
@@ -758,7 +767,7 @@ pub fn items() -> Vec<Item> {
             "paneldir",
             "Panel directory",
             crate::paths::tilde(&global.directory),
-            &format!("{} · where both launchers stand", global.directory_source),
+            "working folder used by both launcher entry points",
             EDIT_PROMPT,
         )
         .put("source", global.directory_source)
@@ -770,7 +779,7 @@ pub fn items() -> Vec<Item> {
         "key",
         "Launcher key at a shell",
         launcher_key(),
-        "the zsh widget · needs a new shell",
+        "opens Prelude from a shell · applies to new shells",
         EDIT_PROMPT,
         ("key", DEFAULT_KEY, "PRELUDE_KEY"),
     ));
@@ -778,7 +787,7 @@ pub fn items() -> Vec<Item> {
         "preview",
         "Quick Look",
         if preview_enabled() { "on".into() } else { "off".into() },
-        "Ctrl+P, hidden until asked for",
+        "show selected files and clipboard content with Ctrl+P",
         EDIT_TOGGLE,
         ("preview", "on", "PRELUDE_NO_PREVIEW"),
     ));
@@ -786,7 +795,7 @@ pub fn items() -> Vec<Item> {
         "enter",
         "What Enter does",
         if classic_enter() { "copy everything".into() } else { "per kind".into() },
-        "commands are handed over, objects act",
+        "open objects directly; keep commands reviewable",
         EDIT_TOGGLE,
         ("classic_enter", "per kind", "PRELUDE_CLASSIC_ENTER"),
     ));
@@ -800,7 +809,7 @@ pub fn items() -> Vec<Item> {
         "update",
         "Updates",
         update_mode(),
-        &version_note,
+        &format!("update policy · {version_note}"),
         EDIT_TOGGLE,
         ("update", DEFAULT_UPDATE, "PRELUDE_UPDATE"),
     ));
@@ -812,8 +821,8 @@ pub fn items() -> Vec<Item> {
             "openwith",
             "Open-with rules",
             if n == 0 { "none yet".into() } else { format!("{n} extensions") },
-            "which application opens what",
-            EDIT_OPEN,
+            "remember which apps open each file type",
+            EDIT_COLLECTION,
         )
         .put("source", if openwith.is_file() { "saved" } else { "none" })
         .put("path", openwith.to_string_lossy().into_owned()),
@@ -826,8 +835,8 @@ pub fn items() -> Vec<Item> {
             "snippets",
             "Snippets",
             if n == 0 { "none yet".into() } else { format!("{n} saved") },
-            "snip: · {{placeholder}} blanks",
-            EDIT_OPEN,
+            "reusable commands with fill-in blanks",
+            EDIT_COLLECTION,
         )
         .put("source", if snippets.is_file() { "saved" } else { "built-in" })
         .put("path", snippets.to_string_lossy().into_owned()),
@@ -840,8 +849,8 @@ pub fn items() -> Vec<Item> {
             "quicklinks",
             "Quicklinks",
             if n == 0 { "none yet".into() } else { format!("{n} keywords") },
-            "ql: to browse · ^K on any row to add",
-            EDIT_OPEN,
+            "named shortcuts to files, folders and web searches",
+            EDIT_COLLECTION,
         )
         .put("source", if quicklinks.is_file() { "saved" } else { "built-in" })
         .put("path", quicklinks.to_string_lossy().into_owned()),
@@ -856,8 +865,8 @@ pub fn items() -> Vec<Item> {
             "favorites",
             "Favorites",
             if n == 0 { "none yet".into() } else { format!("{n} promoted") },
-            "agents, skills and MCP servers",
-            EDIT_OPEN,
+            "promote frequently used agents, skills and MCP servers",
+            EDIT_COLLECTION,
         )
         .put("source", if favorites.is_file() { "saved" } else { "none" })
         .put("path", favorites.to_string_lossy().into_owned()),
@@ -897,22 +906,56 @@ pub fn detail(it: &Item) -> Vec<String> {
             }
             out.push("Rebuilding walks every search root and records names and Finder tags.".into());
         }
+        "hotkey" => {
+            out.push(format!("Current global chord: {}", it.fields[0]));
+            out.push("Changing it checks known macOS conflicts and re-registers the panel.".into());
+            out.push("Left restores Cmd+Shift+Space; right or Enter asks for a new chord.".into());
+            setting_origin(it, &mut out);
+        }
+        "paneldir" => {
+            out.push(format!("Current launcher directory: {}", it.fields[0]));
+            out.push("Both the global panel and shell launcher gather project rows from here.".into());
+            out.push("Left restores $HOME; right or Enter chooses another existing directory.".into());
+            setting_origin(it, &mut out);
+        }
         "key" => {
+            out.push(format!("Current shell key: {}", it.fields[0]));
             out.push("Bound by `prelude init zsh`, which runs when a shell starts,".into());
             out.push("so a change reaches the next shell rather than this one.".into());
             setting_origin(it, &mut out);
         }
-        "preview" | "enter" => {
+        "preview" => {
+            out.push("Quick Look controls Ctrl+P and contextual clipboard previews.".into());
+            out.push("Left sets it off; right sets it on; Enter toggles it.".into());
             setting_origin(it, &mut out);
         }
-        _ => {
-            let path = it.get("path");
-            if !path.is_empty() {
-                if let Ok(text) = std::fs::read_to_string(path) {
-                    out.extend(text.lines().take(40).map(str::to_string));
-                }
-            }
+        "enter" => {
+            out.push("Per kind opens objects and keeps commands reviewable.".into());
+            out.push("Copy everything applies only to payload rows; Settings remains operable.".into());
+            out.push("Left chooses per kind; right chooses copy everything; Enter toggles.".into());
+            setting_origin(it, &mut out);
         }
+        "update" => {
+            out.push("off: make no automatic request".into());
+            out.push("notify: check and tell you (default)".into());
+            out.push("download: verify and stage a release".into());
+            out.push("apply: install it when the panel next starts".into());
+            out.push("Left/right step without wrapping; Enter shows all four choices.".into());
+            setting_origin(it, &mut out);
+        }
+        "openwith" | "snippets" | "quicklinks" | "favorites" => {
+            let rows = collection_rows(it.get("setting"));
+            if rows.is_empty() {
+                out.push(format!("No {}s yet.", collection_singular(it.get("setting"))));
+            } else {
+                out.extend(rows.into_iter().take(40).map(|(_, name, detail)| {
+                    if detail.is_empty() { format!("  {name}") } else { format!("  {name}  ({detail})") }
+                }));
+            }
+            out.push(String::new());
+            out.push("Left removes one; right adds one; Enter opens the collection manager.".into());
+        }
+        _ => {}
     }
     out
 }
@@ -980,17 +1023,46 @@ pub fn open_file(it: &Item) -> i32 {
 /// Carry out Enter for a setting.
 pub fn edit(it: &Item) -> i32 {
     match it.get("edit") {
-        EDIT_ADD_ROOT => add_root_interactively(),
+        EDIT_MANAGE_ROOTS => manage_roots_interactively(),
         EDIT_REBUILD => crate::runhere::run_cmd("prelude index"),
+        EDIT_TOGGLE if it.get("setting") == "update" => choose_update_mode(),
         EDIT_TOGGLE => toggle(it),
         EDIT_PROMPT => prompt_for(it),
-        _ => open_file(it)
+        EDIT_COLLECTION => manage_collection(it),
+        _ => open_file(it),
     }
 }
 
+fn choose_folder() -> Result<Option<String>, String> {
+    let output = Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "activate",
+            "-e",
+            "POSIX path of (choose folder with prompt \"Choose a folder Prelude should search\")",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not open the folder chooser: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        if error.to_ascii_lowercase().contains("user canceled") {
+            return Ok(None);
+        }
+        return Err(format!("the folder chooser failed: {}", error.trim()));
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().trim_end_matches('/').to_string();
+    Ok((!path.is_empty()).then_some(path))
+}
+
 pub fn add_root_interactively() -> i32 {
-    let Some(raw) = crate::ui::prompt_line_initial(" add a search root ", "~/") else {
-        return 130;
+    let raw = match choose_folder() {
+        Ok(Some(path)) => path,
+        Ok(None) => return 130,
+        Err(error) => {
+            crate::ui::note(&error);
+            return 2;
+        }
     };
     match add_root(&raw) {
         Ok(added) => {
@@ -1005,27 +1077,456 @@ pub fn add_root_interactively() -> i32 {
     }
 }
 
-pub fn remove_root_interactively() -> i32 {
+pub fn manage_roots_interactively() -> i32 {
+    let rows = root_rows();
+    let mut choices = vec![(
+        "add".to_string(),
+        "Add a folder…".to_string(),
+        "opens the macOS folder chooser".to_string(),
+    )];
+    choices.extend(rows.iter().enumerate().map(|(index, (entry, state))| {
+        let detail = if state == "available" {
+            entry.clone()
+        } else {
+            format!("{entry} · {state}")
+        };
+        (format!("root:{index}"), root_name(entry), detail)
+    }));
+    let Some(choice) = crate::actions::pick_one(" search folders ", &choices) else {
+        return 130;
+    };
+    if choice == "add" {
+        return add_root_interactively();
+    }
+    let Some(index) = choice.strip_prefix("root:").and_then(|index| index.parse::<usize>().ok()) else {
+        return 2;
+    };
+    let Some((entry, state)) = rows.get(index) else { return 2 };
+    let mut actions = Vec::new();
+    if state == "available" {
+        actions.push(("show".to_string(), "Show in Finder".to_string(), entry.clone()));
+    }
+    actions.push((
+        "remove".to_string(),
+        "Remove from search…".to_string(),
+        "the folder and its contents stay untouched".to_string(),
+    ));
+    let Some(action) = crate::actions::pick_one(" search folder ", &actions) else {
+        return 130;
+    };
+    if action == "show" {
+        let Some(path) = resolved(entry) else {
+            crate::ui::note("that folder is no longer available");
+            return 2;
+        };
+        return match crate::openwith::open_finder_now(&path.to_string_lossy()) {
+            Ok(()) => 0,
+            Err(error) => {
+                crate::ui::note(&error);
+                2
+            }
+        };
+    }
+    remove_root_confirmed(entry)
+}
+
+/// Short, item-specific arrow labels shown directly under the settings table.
+/// These are deliberately verbs, not generic "Previous"/"Next" everywhere:
+/// a collection is added to or removed from, while a boolean is set on/off.
+pub fn direction_label(it: &Item, direction: &str) -> &'static str {
+    let left = direction == "left";
+    match it.get("setting") {
+        "roots" => if left { "Remove folder" } else { "Add folder" },
+        "index" => if left { "Show status" } else { "Rebuild now" },
+        "hotkey" | "paneldir" | "key" => if left { "Reset default" } else { "Change…" },
+        "preview" => if left { "Set off" } else { "Set on" },
+        "enter" => if left { "Per kind" } else { "Copy everything" },
+        "update" => if left { "Previous mode" } else { "Next mode" },
+        "openwith" | "snippets" | "quicklinks" | "favorites" => {
+            if left { "Remove one…" } else { "Add one…" }
+        }
+        _ => if left { "Previous" } else { "Next" },
+    }
+}
+
+/// Whether an arrow opens a chooser/prompt or performs an immediate mutation.
+/// fzf uses this to choose visible `execute` for interactive flows and quiet
+/// `execute-silent` for one-step enum changes.
+pub fn direction_is_interactive(it: &Item, direction: &str) -> bool {
+    if it.get("source") == "environment" {
+        return true;
+    }
+    !matches!(
+        (it.get("setting"), direction),
+        ("preview" | "enter" | "update", _)
+            | ("hotkey" | "paneldir" | "key", "left")
+    )
+}
+
+/// Apply the semantic left/right action for one settings row.
+pub fn adjust(it: &Item, direction: &str) -> i32 {
+    if it.get("source") == "environment" {
+        let variable = it.get("environment");
+        let lines = vec![
+            format!("${variable} currently supplies this value."),
+            "Prelude did not save a competing value that would appear later.".into(),
+            "Unset the variable in that launch environment before changing this setting.".into(),
+        ];
+        return crate::runhere::show_text("Setting overridden by the environment", &lines);
+    }
+    let left = direction == "left";
+    match it.get("setting") {
+        "roots" => if left { remove_root_interactively() } else { add_root_interactively() },
+        "index" => if left { show_index_status() } else { crate::runhere::run_cmd("prelude index") },
+        "hotkey" | "paneldir" | "key" => {
+            if left { reset_item(it) } else { prompt_for(it) }
+        }
+        "preview" => set_boolean("preview", !left),
+        "enter" => set_boolean("classic_enter", !left),
+        "update" => step_update(if left { -1 } else { 1 }),
+        "openwith" | "snippets" | "quicklinks" | "favorites" => {
+            if left { remove_collection_item(it) } else { add_collection_item(it) }
+        }
+        _ => 2,
+    }
+}
+
+fn show_index_status() -> i32 {
+    let item = items().into_iter().find(|item| item.get("setting") == "index");
+    let lines = item.as_ref().map(detail).unwrap_or_else(|| vec!["index status unavailable".into()]);
+    crate::runhere::show_text("Prelude file and folder index", &lines)
+}
+
+fn choose_update_mode() -> i32 {
+    let current = update_mode();
+    let choices = [
+        ("off".to_string(), "Off".to_string(), "never contact the update service".to_string()),
+        ("notify".to_string(), "Notify".to_string(), "check and tell you".to_string()),
+        ("download".to_string(), "Download".to_string(), "verify and stage the release".to_string()),
+        ("apply".to_string(), "Apply".to_string(), "install it when the panel next starts".to_string()),
+    ];
+    let Some(mode) = crate::actions::pick_one(
+        &format!(" update mode · current {current} "),
+        &choices,
+    ) else {
+        return 130;
+    };
+    set_update(&mode)
+}
+
+const UPDATE_MODES: [&str; 4] = ["off", "notify", "download", "apply"];
+
+fn stepped_update(current: &str, delta: isize) -> &'static str {
+    let at = UPDATE_MODES.iter().position(|mode| *mode == current).unwrap_or(1) as isize;
+    let next = (at + delta).clamp(0, UPDATE_MODES.len() as isize - 1) as usize;
+    UPDATE_MODES[next]
+}
+
+fn step_update(delta: isize) -> i32 {
+    set_update(stepped_update(&update_mode(), delta))
+}
+
+fn set_update(mode: &str) -> i32 {
+    if let Err(error) = write_pref("update", mode) {
+        crate::ui::note(&error);
+        return 2;
+    }
+    if env("PRELUDE_UPDATE").is_some() {
+        crate::ui::note("saved, but $PRELUDE_UPDATE remains effective in this environment");
+    }
+    0
+}
+
+fn set_boolean(key: &str, value: bool) -> i32 {
+    if let Err(error) = write_pref(key, if value { "true" } else { "false" }) {
+        crate::ui::note(&error);
+        return 2;
+    }
+    let overridden = match key {
+        "preview" => env("PRELUDE_NO_PREVIEW").is_some(),
+        _ => env("PRELUDE_CLASSIC_ENTER").is_some(),
+    };
+    if overridden {
+        crate::ui::note("saved, but the environment variable remains effective");
+    }
+    0
+}
+
+fn remove_root_interactively() -> i32 {
     let rows = root_rows();
     if rows.is_empty() {
-        crate::ui::note("there are no search roots to remove");
-        return 2;
+        crate::ui::note("there are no search folders to remove");
+        return 0;
     }
     let choices: Vec<(String, String, String)> = rows
         .iter()
-        .map(|(entry, state)| (entry.clone(), entry.clone(), state.clone()))
+        .enumerate()
+        .map(|(index, (entry, state))| (index.to_string(), root_name(entry), format!("{entry} · {state}")))
         .collect();
-    let Some(entry) = crate::actions::pick_one(" remove a search root ", &choices) else {
+    let Some(index) = crate::actions::pick_one(" remove search folder ", &choices)
+        .and_then(|index| index.parse::<usize>().ok())
+    else {
         return 130;
     };
-    match remove_root(&entry) {
+    let Some((entry, _)) = rows.get(index) else { return 2 };
+    remove_root_confirmed(entry)
+}
+
+fn root_name(entry: &str) -> String {
+    Path::new(entry.trim_end_matches('/'))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(entry)
+        .to_string()
+}
+
+fn remove_root_confirmed(entry: &str) -> i32 {
+    if !crate::ui::confirm(
+        &format!("stop searching {entry}?"),
+        "Remove from search",
+        "the folder and every file in it stay untouched",
+    ) {
+        return 130;
+    }
+    match remove_root(entry) {
         Ok(()) => {
             crate::compute::ensure_fileindex();
             crate::ui::note(&format!("{entry} removed — file search is updating"));
             0
         }
-        Err(e) => {
-            crate::ui::note(&e);
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn collection_rows(id: &str) -> Vec<(String, String, String)> {
+    match id {
+        "openwith" => crate::openwith::rules()
+            .into_iter()
+            .map(|(extension, app)| {
+                let label = if extension == "*" { "all other files".into() } else { format!(".{extension}") };
+                (extension, label, app)
+            })
+            .collect(),
+        "snippets" => crate::sources::user::snippet_entries()
+            .into_iter()
+            .map(|(name, command)| (name.clone(), name, command))
+            .collect(),
+        "quicklinks" => crate::compute::quicklink_scope_rows()
+            .into_iter()
+            .map(|item| {
+                let key = item.get("quicklink").to_string();
+                let target = if item.get("quicklink_target").is_empty() {
+                    item.cmd.clone()
+                } else {
+                    item.get("quicklink_target").to_string()
+                };
+                (key, item.title, target)
+            })
+            .collect(),
+        "favorites" => crate::favorites::entries()
+            .into_iter()
+            .map(|key| {
+                let (kind, name) = key.split_once('\t').unwrap_or(("object", &key));
+                (key.clone(), name.to_string(), kind.to_string())
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn manage_collection(it: &Item) -> i32 {
+    let id = it.get("setting");
+    loop {
+        let rows = collection_rows(id);
+        let mut choices = vec![(
+            "add".to_string(),
+            format!("Add {}…", collection_singular(id)),
+            "→ from the Settings row".to_string(),
+        )];
+        choices.extend(rows.iter().enumerate().map(|(index, (_, name, detail))| {
+            (format!("item:{index}"), name.clone(), detail.clone())
+        }));
+        let Some(choice) = crate::actions::pick_one(&format!(" {} ", it.title.to_lowercase()), &choices) else {
+            return 130;
+        };
+        if choice == "add" {
+            return add_collection_item(it);
+        }
+        let Some(index) = choice.strip_prefix("item:").and_then(|value| value.parse::<usize>().ok()) else {
+            return 2;
+        };
+        let Some((key, name, detail)) = rows.get(index) else { return 2 };
+        let actions = vec![
+            ("remove".to_string(), format!("Remove {name}…"), detail.clone()),
+            ("file".to_string(), "Open the backing file".to_string(), crate::paths::tilde(it.get("path"))),
+        ];
+        match crate::actions::pick_one(&format!(" {name} "), &actions).as_deref() {
+            Some("remove") => return remove_collection_key(id, key, name),
+            Some("file") => return open_file(it),
+            _ => continue,
+        }
+    }
+}
+
+fn collection_singular(id: &str) -> &'static str {
+    match id {
+        "openwith" => "rule",
+        "snippets" => "snippet",
+        "quicklinks" => "Quicklink",
+        "favorites" => "Favorite",
+        _ => "item",
+    }
+}
+
+fn add_collection_item(it: &Item) -> i32 {
+    match it.get("setting") {
+        "openwith" => add_openwith_rule(),
+        "snippets" => add_snippet_interactively(),
+        "quicklinks" => add_quicklink_interactively(),
+        "favorites" => add_favorite_interactively(),
+        _ => 2,
+    }
+}
+
+fn remove_collection_item(it: &Item) -> i32 {
+    let rows = collection_rows(it.get("setting"));
+    if rows.is_empty() {
+        crate::ui::note(&format!("there are no {}s to remove", collection_singular(it.get("setting"))));
+        return 0;
+    }
+    let choices: Vec<(String, String, String)> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (_, name, detail))| (index.to_string(), name.clone(), detail.clone()))
+        .collect();
+    let Some(index) = crate::actions::pick_one(
+        &format!(" remove {} ", collection_singular(it.get("setting"))),
+        &choices,
+    ).and_then(|value| value.parse::<usize>().ok()) else {
+        return 130;
+    };
+    let Some((key, name, _)) = rows.get(index) else { return 2 };
+    remove_collection_key(it.get("setting"), key, name)
+}
+
+fn remove_collection_key(id: &str, key: &str, name: &str) -> i32 {
+    let confirm = matches!(id, "snippets" | "quicklinks");
+    if confirm && !crate::ui::confirm(
+        &format!("remove {name}?"),
+        &format!("Remove {name}"),
+        if id == "quicklinks" { "the target is untouched" } else { "the command is removed from Prelude" },
+    ) {
+        return 130;
+    }
+    let result = match id {
+        "openwith" => crate::openwith::forget(key),
+        "snippets" => crate::sources::user::remove_snippet(key),
+        "quicklinks" => crate::compute::remove_quicklink(key),
+        "favorites" => crate::favorites::remove_key(key),
+        _ => Err("that setting is not a collection".into()),
+    };
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn add_openwith_rule() -> i32 {
+    let Some(raw) = crate::ui::prompt_line(" file extension · * means all other files ") else {
+        return 130;
+    };
+    let extension = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    if extension.is_empty()
+        || (extension != "*" && !extension.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_')))
+    {
+        crate::ui::note("use an extension without the dot, or * for all other files");
+        return 2;
+    }
+    let Some(app) = crate::openwith::pick_app(&format!(".{extension} files")) else {
+        return 130;
+    };
+    match crate::openwith::remember(&extension, &app) {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn add_snippet_interactively() -> i32 {
+    let Some(name) = crate::ui::prompt_line(" snippet name ") else { return 130 };
+    let Some(command) = crate::ui::prompt_line(" command · {{name}} marks a blank ") else { return 130 };
+    match crate::sources::user::add_snippet(&name, &command) {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn add_quicklink_interactively() -> i32 {
+    let Some(target) = crate::ui::prompt_line(" target · path, URL, or URL with {q} ") else {
+        return 130;
+    };
+    let (kind, stored) = match crate::compute::resolve_quicklink_target(&target) {
+        Ok(value) => value,
+        Err(error) => {
+            crate::ui::note(&error);
+            return 2;
+        }
+    };
+    let Some(key) = crate::ui::prompt_line(" Quicklink keyword ") else { return 130 };
+    let default_name = Path::new(stored.trim_end_matches('/'))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(key.trim());
+    let Some(name) = crate::ui::prompt_line_initial(" name shown in search ", default_name) else {
+        return 130;
+    };
+    let draft = crate::compute::QuicklinkDraft { name, kind, target: stored };
+    match crate::compute::create_quicklink_from(&key, &draft) {
+        Ok(_) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn add_favorite_interactively() -> i32 {
+    let mut items = crate::cache::gather_agents();
+    crate::favorites::decorate(&mut items);
+    items.retain(|item| crate::favorites::key(item).is_some() && item.get("favorite") != "true");
+    items.sort_by(crate::cache::by_rank);
+    let choices: Vec<(String, String, String)> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (index.to_string(), item.title.clone(), item.style().1.to_string()))
+        .collect();
+    if choices.is_empty() {
+        crate::ui::note("every available Agent, Skill and MCP server is already a Favorite");
+        return 0;
+    }
+    let Some(index) = crate::actions::pick_one(" add Favorite ", &choices)
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return 130;
+    };
+    let Some(item) = items.get(index) else { return 2 };
+    match crate::favorites::set(item, true) {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::note(&error);
             2
         }
     }
@@ -1058,9 +1559,13 @@ fn toggle(it: &Item) -> i32 {
         });
         return 0;
     }
+    // The main launcher caches runtime preferences for the duration of one
+    // panel, while arrow adjustments reload live rows through a subprocess.
+    // Toggle from the row now on screen, not that older process cache, so
+    // `→` followed by Enter cannot write the same value twice or flip backward.
     let (key, now) = match it.get("setting") {
-        "preview" => ("preview", !preview_enabled()),
-        "enter" => ("classic_enter", !classic_enter()),
+        "preview" => ("preview", it.fields.first().map(String::as_str) != Some("on")),
+        "enter" => ("classic_enter", it.fields.first().map(String::as_str) != Some("copy everything")),
         _ => return 2,
     };
     // The environment variable, where it is set, is what the launcher will
@@ -1214,6 +1719,7 @@ pub fn reset_item(it: &Item) -> i32 {
 #[derive(Serialize)]
 struct SettingView {
     key: String,
+    group: String,
     title: String,
     value: String,
     detail: String,
@@ -1227,6 +1733,7 @@ fn view(it: &Item) -> SettingView {
     let optional = |value: &str| (!value.is_empty()).then(|| value.to_string());
     SettingView {
         key: it.get("setting").to_string(),
+        group: it.get("group").to_string(),
         title: it.title.clone(),
         value: it.fields.first().cloned().unwrap_or_default(),
         detail: it.fields.get(1).cloned().unwrap_or_default(),
@@ -1286,7 +1793,11 @@ fn checks() -> Vec<Check> {
         out.push(Check {
             severity: "warning",
             setting: "index".into(),
-            message: "the file and folder index is updating for the current roots".into(),
+            message: if crate::compute::index_building() {
+                "the file and folder index is updating for the current roots".into()
+            } else {
+                "the file and folder index needs an update for the current roots".into()
+            },
         });
     }
     out
@@ -1398,7 +1909,8 @@ pub fn list(json: bool) -> i32 {
     }
     for it in &items {
         println!(
-            "{:<26} {:<38} {}",
+            "{:<10} {:<26} {:<38} {}",
+            it.get("group"),
             it.title,
             it.fields.first().cloned().unwrap_or_default(),
             it.fields.get(1).cloned().unwrap_or_default()
@@ -1483,6 +1995,12 @@ mod tests {
             assert!(!it.get("setting").is_empty(), "{} has no id", it.title);
             assert!(!it.get("source").is_empty(), "{} has no source", it.title);
             assert!(
+                matches!(it.get("group"), "Search" | "Launcher" | "Behavior" | "Library"),
+                "{} has no user-facing category",
+                it.title,
+            );
+            assert_eq!(it.subtitle, it.get("group"));
+            assert!(
                 !it.fields.first().map(String::is_empty).unwrap_or(true),
                 "{} shows no value",
                 it.title
@@ -1490,7 +2008,11 @@ mod tests {
             assert!(
                 matches!(
                     it.get("edit"),
-                    EDIT_PROMPT | EDIT_TOGGLE | EDIT_OPEN | EDIT_ADD_ROOT | EDIT_REBUILD
+                    EDIT_PROMPT
+                        | EDIT_TOGGLE
+                        | EDIT_COLLECTION
+                        | EDIT_MANAGE_ROOTS
+                        | EDIT_REBUILD
                 ),
                 "{} has no editor",
                 it.title
@@ -1543,6 +2065,51 @@ mod tests {
         rows.sort_by(crate::cache::by_rank);
         let keys: Vec<&str> = rows.iter().map(|item| item.get("setting")).collect();
         assert_eq!(&keys[..4], &["roots", "index", "hotkey", "paneldir"]);
+        assert_eq!(rows[0].get("edit"), EDIT_MANAGE_ROOTS);
+        assert_eq!(rows[0].title, "Search folders");
+        assert_eq!(rows[0].fields[1], "choose where file and folder search looks");
+        assert_eq!(crate::defaults::describe(&rows[0], crate::defaults::Surface::Clipboard), "Manage folders");
+        assert_eq!(
+            crate::defaults::on_enter(&rows[0]),
+            crate::defaults::Default_::Act(crate::defaults::Verb::EditSetting),
+            "settings stay operable even when copy-everything is enabled",
+        );
+    }
+
+    #[test]
+    fn every_setting_has_two_specific_arrow_actions() {
+        let expected = [
+            ("roots", "Remove folder", "Add folder", true, true),
+            ("index", "Show status", "Rebuild now", true, true),
+            ("hotkey", "Reset default", "Change…", false, true),
+            ("paneldir", "Reset default", "Change…", false, true),
+            ("key", "Reset default", "Change…", false, true),
+            ("preview", "Set off", "Set on", false, false),
+            ("enter", "Per kind", "Copy everything", false, false),
+            ("update", "Previous mode", "Next mode", false, false),
+            ("openwith", "Remove one…", "Add one…", true, true),
+            ("snippets", "Remove one…", "Add one…", true, true),
+            ("quicklinks", "Remove one…", "Add one…", true, true),
+            ("favorites", "Remove one…", "Add one…", true, true),
+        ];
+        let rows = items();
+        assert_eq!(rows.len(), expected.len());
+        for (id, left, right, left_interactive, right_interactive) in expected {
+            let row = rows.iter().find(|item| item.get("setting") == id).unwrap();
+            assert_eq!(direction_label(row, "left"), left, "{id} left label");
+            assert_eq!(direction_label(row, "right"), right, "{id} right label");
+            assert_eq!(direction_is_interactive(row, "left"), left_interactive, "{id} left mode");
+            assert_eq!(direction_is_interactive(row, "right"), right_interactive, "{id} right mode");
+        }
+    }
+
+    #[test]
+    fn update_arrows_stop_at_the_ends_instead_of_wrapping() {
+        assert_eq!(stepped_update("off", -1), "off");
+        assert_eq!(stepped_update("off", 1), "notify");
+        assert_eq!(stepped_update("notify", -1), "off");
+        assert_eq!(stepped_update("download", 1), "apply");
+        assert_eq!(stepped_update("apply", 1), "apply");
     }
 
     #[test]

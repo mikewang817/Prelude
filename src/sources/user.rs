@@ -143,18 +143,89 @@ pub fn ensure_snippets_file() -> Result<std::path::PathBuf, String> {
 }
 
 pub fn snippets() -> Vec<Item> {
-    let p = ensure_snippets_file().unwrap_or_else(|_| paths::config().join("snippets.toml"));
-    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
+    snippet_entries()
+        .into_iter()
+        .map(|(name, cmd)| Item::new(cmd, Kind::Snippet).sub(&name).put("name", name))
+        .collect()
+}
+
+/// Parsed snippet names and commands, shared by the scope and Settings.
+pub fn snippet_entries() -> Vec<(String, String)> {
+    let path = ensure_snippets_file().unwrap_or_else(|_| paths::config().join("snippets.toml"));
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     crate::minitoml::parse(&text)
         .into_iter()
         .filter_map(|(name, body)| {
-            let cmd = body.get("cmd")?.clone();
-            if cmd.is_empty() || name.is_empty() {
-                return None;
-            }
-            Some(Item::new(cmd, Kind::Snippet).sub(&name).put("name", name))
+            let cmd = body.get("cmd")?.trim().to_string();
+            (!cmd.is_empty() && !name.is_empty()).then_some((name, cmd))
         })
         .collect()
+}
+
+fn toml_string(value: &str) -> String {
+    format!("{value:?}")
+}
+
+fn section_name(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.len() >= 2
+        && ((inner.starts_with('"') && inner.ends_with('"'))
+            || (inner.starts_with('\'') && inner.ends_with('\'')))
+    {
+        Some(inner[1..inner.len() - 1].to_string())
+    } else {
+        Some(inner.to_string())
+    }
+}
+
+/// Append one snippet without rewriting hand-written comments or ordering.
+pub fn add_snippet(name: &str, command: &str) -> Result<(), String> {
+    let name = crate::width::flatten(name.trim());
+    let command = command.trim();
+    if name.is_empty() || command.is_empty() {
+        return Err("a snippet needs both a name and a command".into());
+    }
+    if crate::secrets::looks_secret(command) {
+        return Err("that command appears to contain a credential".into());
+    }
+    let path = ensure_snippets_file()?;
+    let _lock = crate::cache::lock_for_write(&path);
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    if crate::minitoml::parse(&text).contains_key(&name) {
+        return Err(format!("a snippet called {name:?} already exists"));
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!("\n[{}]\ncmd = {}\n", toml_string(&name), toml_string(command)));
+    crate::cache::write_state(&path, text.as_bytes()).map_err(|error| error.to_string())
+}
+
+/// Remove one complete snippet section, leaving every other byte intact.
+pub fn remove_snippet(name: &str) -> Result<(), String> {
+    let path = ensure_snippets_file()?;
+    let _lock = crate::cache::lock_for_write(&path);
+    let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let mut start = None;
+    let mut finish = text.len();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(section) = section_name(line) {
+            if start.is_some() {
+                finish = offset;
+                break;
+            }
+            if section == name {
+                start = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    let start = start.ok_or_else(|| format!("no snippet called {name:?}"))?;
+    let mut out = text;
+    out.replace_range(start..finish, "");
+    crate::cache::write_state(&path, out.as_bytes()).map_err(|error| error.to_string())
 }
 
 /// Clipboard history, newest first. Populated by `prelude clipd`.

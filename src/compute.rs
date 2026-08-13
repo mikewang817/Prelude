@@ -2125,6 +2125,27 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         rows.truncate(200);
         return rows;
     }
+    if scope == Scope::Settings {
+        // Settings are Prelude's own tiny live form, not an inventory source.
+        // Reading them from the launch snapshot left old values and even old
+        // row structure on screen until the whole panel refreshed.
+        let group = term.trim().to_ascii_lowercase();
+        let exact_group = match group.as_str() {
+            "search" => Some("Search"),
+            "launcher" => Some("Launcher"),
+            "behavior" | "behaviour" => Some("Behavior"),
+            "library" => Some("Library"),
+            _ => None,
+        };
+        return crate::settings::items()
+            .into_iter()
+            .filter(|item| {
+                exact_group
+                    .map(|group| item.get("group") == group)
+                    .unwrap_or_else(|| matches_terms(item, term))
+            })
+            .collect();
+    }
     if matches!(scope, Scope::Skills | Scope::Mcp) {
         let kind = if scope == Scope::Skills { Skill } else { Mcp };
         let (archive_view, needles) = capability_archive_filter(term);
@@ -2281,6 +2302,9 @@ pub(crate) fn web_search_row_from(text: &str, q: &str) -> Option<Item> {
 /// without turning the launcher into a file browser. `f:` and `dir:` remain
 /// available when the person explicitly asks for a longer list.
 pub const ROOT_FILE_RESULT_LIMIT: usize = 10;
+/// Applications are fewer and more sharply named than files, so a shorter
+/// block says everything a query of this kind can mean.
+pub const ROOT_APP_RESULT_LIMIT: usize = 5;
 const SCOPED_FILE_RESULT_LIMIT: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2357,27 +2381,33 @@ pub fn ensure_fileindex() {
     crate::cache::spawn_self(&["_index"]);
 }
 
-pub fn index_roots() -> Vec<String> {
-    let cfg = paths::config().join("roots.txt");
-    if let Ok(t) = std::fs::read_to_string(&cfg) {
-        let v: Vec<String> = t
+fn index_roots_from(text: Option<&str>) -> Vec<String> {
+    if let Some(text) = text {
+        // Once the person has a roots file, it is authoritative even when it
+        // contains no folders. Falling back on an empty file made deleting the
+        // final row silently restore three folders that Settings no longer
+        // showed. Defaults are onboarding, not an inescapable minimum.
+        return text
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|l| {
-                l.strip_prefix("~/")
-                    .map(|r| paths::home().join(r).to_string_lossy().into_owned())
-                    .unwrap_or_else(|| l.to_string())
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                line.strip_prefix("~/")
+                    .map(|rest| paths::home().join(rest).to_string_lossy().into_owned())
+                    .unwrap_or_else(|| line.to_string())
             })
             .collect();
-        if !v.is_empty() {
-            return v;
-        }
     }
     ["App", "Documents", "Desktop"]
         .iter()
-        .map(|d| paths::home().join(d).to_string_lossy().into_owned())
+        .map(|directory| paths::home().join(directory).to_string_lossy().into_owned())
         .collect()
+}
+
+pub fn index_roots() -> Vec<String> {
+    let cfg = paths::config().join("roots.txt");
+    let text = std::fs::read_to_string(cfg).ok();
+    index_roots_from(text.as_deref())
 }
 
 #[cfg(target_os = "macos")]
@@ -2787,6 +2817,70 @@ pub fn root_filesystem_rows(term: &str, static_items: &[Item]) -> Vec<Item> {
     finish_filesystem_rows(rows, ROOT_FILE_RESULT_LIMIT)
 }
 
+/// The applications whose own names match, mixed into ordinary search.
+///
+/// Typing an application's name is the single most common reason anybody
+/// opens a launcher, and it was the one population root search could not
+/// answer. `Chrome` returned eight `node_modules` icon files and a Google
+/// search; `Google Chrome.app` was reachable only by first knowing to type
+/// `app:`. That is not a discoverability gap — the person did not fail to
+/// find a feature, they asked the launcher its most ordinary question and
+/// were told about something else.
+///
+/// It costs nothing. Every app row is already in the snapshot an ordinary
+/// query parses for its own file rows, so this is a filter over a `Vec` that
+/// is in memory either way: no index read, no filesystem walk, no subprocess.
+///
+/// Two rules keep the block honest. It sits *below* the catalogue, so an
+/// installed Agent still leads its own name and a quicklink keyword still
+/// resolves ahead of an application that happens to contain it. And it takes
+/// only substring-or-better matches — `name_score`'s forgiving subsequence
+/// tier is refused here, because the block is emitted before the file rows
+/// and `--tiebreak=index` would otherwise let a stretched app match outrank a
+/// file whose name the query actually spells.
+pub fn root_application_rows(term: &str, static_items: &[Item]) -> Vec<Item> {
+    const REAL_MATCH: i64 = 5_000;
+    let term = term.trim();
+    if term.chars().count() < 2 || term.starts_with("tag:") {
+        return Vec::new();
+    }
+    let words: Vec<String> = crate::sources::sessions::split_words(term)
+        .into_iter()
+        .map(|word| word.to_lowercase())
+        .collect();
+    // A path or a tag is a question about the filesystem. Answering it with
+    // applications would make the block mean something different per query.
+    if words.is_empty()
+        || words.iter().any(|word| word.contains('/') || word.starts_with("tag:"))
+    {
+        return Vec::new();
+    }
+    let freq = crate::frecency::load();
+    let mut rows: Vec<Item> = static_items
+        .iter()
+        .filter(|item| item.kind == Kind::App)
+        .filter_map(|item| {
+            let score = name_score(&item.title, &words).filter(|s| *s >= REAL_MATCH)?;
+            let mut item = item.clone();
+            item.data.insert("rank".into(), format!("{score:.3}"));
+            item.score = item.band() as f64 + score as f64;
+            if let Some((uses, last)) = freq.get(&item.cmd) {
+                item.score += crate::frecency::bonus(*uses, *last);
+            }
+            Some(item)
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+    });
+    rows.truncate(ROOT_APP_RESULT_LIMIT);
+    rows
+}
+
 /// `@claude refactor this` — start an agent in the current directory with a
 /// prompt, turning the launcher into the agent's front door.
 pub fn agent_query(q: &str) -> Option<(String, String)> {
@@ -3051,6 +3145,23 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_complete_settings_category_is_an_exact_filter() {
+        let rows = scoped_rows(Scope::Settings, "search", &[]);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|item| item.get("group") == "Search"));
+        assert!(!rows.iter().any(|item| item.get("setting") == "quicklinks"));
+    }
+
+    #[test]
+    fn an_explicitly_empty_search_folder_list_stays_empty() {
+        assert!(index_roots_from(Some("# intentionally none\n")).is_empty());
+        assert_eq!(index_roots_from(None).len(), 3, "defaults exist only before first edit");
+        let rows = index_roots_from(Some("~/App\n/tmp/work\n"));
+        assert_eq!(rows[0], paths::home().join("App").to_string_lossy());
+        assert_eq!(rows[1], "/tmp/work");
+    }
 
     fn run(state: &str, project: &str) -> Item {
         Item::new(format!("kill {state}{project}"), Kind::Run)

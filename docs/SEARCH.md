@@ -53,10 +53,22 @@ The root catalogue contains:
 - every Quicklink, fixed and template alike
 
 Session and Config objects themselves are not in root search; their visible
-scope commands lead to `s:` and `cfg:`. History, applications, and `$PATH`
-commands also require their scope. Files and folders are the deliberate
-exception: any ordinary query of at least two characters adds at most ten
-local matches, while exact `f` still opens the longer `f:` view.
+scope commands lead to `s:` and `cfg:`. History, clipboard rows, and `$PATH`
+commands require their scope.
+
+Local objects are the deliberate exception, in two tiers. Any ordinary query of
+at least two characters adds up to five matching applications, then up to ten
+matching files or folders; exact `f` still opens the longer `f:` view, and
+`app:` still lists every installed application. Both tiers sit below the
+catalogue, so an Agent or a Quicklink keyword still leads its own name.
+Applications sit above files because between two objects of one name, the
+application is what a launcher is usually being asked for — `Chrome` means the
+browser far more often than it means an icon inside somebody's `node_modules`.
+
+An application matches only where the query is genuinely part of its name.
+Files accept a forgiving subsequence; applications do not, because their block
+is printed first and a stretched match would otherwise outrank a file whose
+name the query actually spells.
 
 Local matching uses the object's own name and Finder tags. A parent path is
 shown only as context and does not make a child match. Thus `OpenGhostty`
@@ -236,11 +248,27 @@ Ordinary search combines a small result from two sets:
 `f:` shows a longer combined list; `dir:` restricts it to folders and merges in
 zoxide/recent-`cd` evidence for ranking. Empty folders are indexed too.
 
-Search roots come from `~/.config/prelude/roots.txt`; when absent or empty, the
-built-ins are `~/App`, `~/Documents`, and `~/Desktop`. Adding or removing a root
-starts a background rebuild automatically. The previous index stays searchable
-until the new generation is atomically complete. `prelude index` remains an
-explicit repair/rebuild command, not a normal setup step.
+Search folders are managed in `set:` → **Search folders**. `→` adds through the
+native macOS folder chooser, `←` selects one to remove, and Enter opens the full
+manager to inspect or modify the list. Removal never touches the folder or its
+contents. The CLI exposes the same operations as `prelude settings roots`,
+`add-root`, and `remove-root`.
+
+The Settings panel itself is organized into **Search**, **Launcher**,
+**Behavior**, and **Library**, with columns for the setting, current value, and
+what it affects. Storage source, defaults, environment overrides, and backing
+file paths remain available in Details and `prelude settings --json` rather
+than leading every row. Every setting has contextual `←` and `→` controls,
+whose selected-row meanings appear in the footer; see
+[Actions](ACTIONS.md#prelude-setting) for the complete mapping.
+
+The backing file is `~/.config/prelude/roots.txt`. When it does not exist,
+Prelude starts with `~/App`, `~/Documents`, and `~/Desktop`; once the person has
+managed the list, that file is authoritative, including an intentionally empty
+list. Adding or removing a folder starts a background rebuild automatically.
+The previous index stays searchable until the new generation is atomically
+complete. `prelude index` remains an explicit repair command, not a normal setup
+step.
 
 The index walks to a maximum depth of 7 without following symlinks and respects
 ignore files. It asks Foundation for Finder tags and stores bounded,

@@ -15,8 +15,8 @@ fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-fn a(id: &'static str, label: &str, sub: impl Into<String>) -> Act {
-    (id, label.to_string(), sub.into())
+fn a(id: &'static str, label: impl Into<String>, sub: impl Into<String>) -> Act {
+    (id, label.into(), sub.into())
 }
 
 
@@ -288,23 +288,19 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             let enter = it.get("edit");
             match it.get("setting") {
                 "roots" => {
-                    // Enter is "Add a folder…", so it is absent here.
-                    v.push(a("set-root-remove", "Remove a folder…", "leaves the folder alone"));
-                    v.push(a("details", "Show every root", ""));
+                    v.push(a("details", "Show every search folder", ""));
                 }
-                "index" => {
-                    v.push(a("details", "Show index status", ""));
-                }
+                "index" => {}
                 "hotkey" => {
-                    v.push(a("set-default", "Reset to Cmd+Shift+Space", "still checks for conflicts"));
+                    v.push(a("set-default", "Reset to Cmd+Shift+Space", "same as ←"));
                     v.push(a("set-panel-open", "Start the panel", "if it is not running"));
                     v.push(a("set-panel-restart", "Restart the panel", "picks up a rebuilt binary"));
                 }
-                "paneldir" => v.push(a("set-default", "Reset to $HOME", "")),
-                "preview" | "enter" | "key" => {
+                "paneldir" | "key" | "preview" | "enter" | "update" => {
                     v.push(a("set-default", "Reset to the default", it.get("default")));
                     v.push(a("details", "What this changes", ""));
                 }
+                "openwith" | "snippets" | "quicklinks" | "favorites" => {}
                 _ => {}
             }
             let path = it.get("path");
@@ -316,18 +312,20 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
                     "roots" | "openwith" | "snippets" | "quicklinks" | "favorites"
                         | "key" | "preview" | "enter"
                 );
-                // `set-open-file` is Enter for list-shaped settings. It asks
-                // the owning module to materialise a missing file first, so
-                // "none yet" never turns into a Launch Services error.
-                if enter != crate::settings::EDIT_OPEN && (exists || can_create) {
+                let binary_index = it.get("setting") == "index";
+                // The owning module materialises a missing configuration file
+                // first. The index itself is data, not a file to edit/open.
+                if !binary_index && enter != crate::settings::EDIT_COLLECTION && (exists || can_create) {
                     let label = if exists { "Open the file" } else { "Create and open the file" };
                     v.push(a("set-open-file", label, short.clone()));
                 }
                 if exists {
-                    v.push(a("open", "Open it in your editor", format!("{editor} …")));
-                    v.push(a("reveal-finder", "Reveal in Finder", short.clone()));
+                    if !binary_index {
+                        v.push(a("open", "Open it in your editor", format!("{editor} …")));
+                    }
+                    v.push(a("reveal-finder", if binary_index { "Reveal index in Finder" } else { "Reveal in Finder" }, short.clone()));
                 }
-                v.push(a("copyabs", "Copy the file path", short));
+                v.push(a("copyabs", if binary_index { "Copy index path" } else { "Copy the file path" }, short));
             }
             v
         }
@@ -628,10 +626,10 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
     // Three verbs all end in `emit("RUN", cmd)`, so any of them above means
     // the generic runner is the same keystroke with a duller label.
     let runs_it = already(Verb::RunInShell) || already(Verb::Launch) || already(Verb::OpenUrl);
-    let useful_in_preview = matches!(
-        it.kind,
-        Kind::History | Kind::Script | Kind::Path | Kind::Snippet | Kind::Sys | Kind::Git
-    );
+    // One rule, one surface, two ways in: this row and Ctrl+O are the same
+    // offer, so they answer to the same predicate rather than to two lists
+    // that drifted apart.
+    let useful_in_preview = crate::runhere::can_run_here(it);
     if useful_in_preview
         && !generic_run_would_kill
         && !already(Verb::RunHere)
@@ -1049,9 +1047,9 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         // Prelude's own preferences. Each one is written by the code that
         // owns its file, so a chord goes through the same validation and the
         // same panel restart the CLI performs.
-        "set-root-add" => return crate::settings::add_root_interactively(),
-        "set-root-remove" => return crate::settings::remove_root_interactively(),
         "set-value" => return crate::settings::edit(it),
+        "set-left" => return crate::settings::adjust(it, "left"),
+        "set-right" => return crate::settings::adjust(it, "right"),
         "set-default" => return crate::settings::reset_item(it),
         "set-open-file" => return crate::settings::open_file(it),
         "set-panel-open" => match crate::global::open_panel() {

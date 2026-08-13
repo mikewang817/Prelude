@@ -68,12 +68,15 @@ other secondary actions appear as the first relevant row in `Ctrl+K` instead.
 
 - `Escape` and `←` from a submenu return to the action list.
 - `Escape` and `←` from the action list return to the main search.
-- `→` opens the focused row's actions from the main search, and chooses within
-  a list — the same door `Ctrl+K` and `Enter` open.
+- `→` opens the focused row's actions from the empty main search and chooses
+  within a modal list. In `set:` it instead performs the focused setting's
+  explicitly labelled right-hand adjustment.
 - `Escape` in the main search clears a typed query first, and closes Prelude
   only when there is nothing left to back out of.
-- The arrow keys belong to the query line whenever a query exists, so they act
-  on levels only while nothing is typed. `Ctrl+K` is unconditional.
+- Outside `set:`, arrow keys belong to the query line whenever text exists.
+  Settings are the deliberate exception: `←` and `→` are form controls, and
+  their selected-row meanings appear in the footer. `Ctrl+K` remains the
+  unconditional route to low-frequency and file-level actions.
 - Copy, details, Skill Diff, cached MCP tools, and MCP comparison remain in the
   panel after completion.
 - A canceled confirmation returns to the action list.
@@ -82,18 +85,43 @@ other secondary actions appear as the first relevant row in `Ctrl+K` instead.
 - Parameter choices—Agent, Skill, MCP server, or copy—use a submenu only when
   more than one choice exists.
 
-Both launcher entry points expose one filesystem vocabulary:
+Both launcher entry points expose one object vocabulary. It applies to every
+row that *is* a filesystem object, which `src/ui.rs::object_of` decides once
+for all three chords and their footer labels:
 
-| Key | File | Folder |
-|---|---|---|
-| `Enter` | open with the remembered/macOS application | open in Finder |
-| `Ctrl+Enter` | reveal, select, and foreground Finder | reveal, select, and foreground Finder |
-| `Ctrl+Shift+Enter` | open Ghostty in the containing folder | open Ghostty here |
-| `Ctrl+Option+Enter` | copy the absolute path | copy the absolute path |
+| Kind | the object | `Ctrl+Enter` reveals | `Ctrl+Shift+Enter` stands a terminal in | `Ctrl+Option+Enter` copies |
+|---|---|---|---|---|
+| File, indexed file | its path | it, selected in its folder | its parent | its path |
+| Folder, indexed folder | its path | it, selected in its parent | itself | its path |
+| Application | the `.app` bundle | the bundle | the folder holding it | the bundle path |
+| Config | its path | it | its parent | its path |
+| Session | the native `.jsonl` | that file | the conversation's project | the file path |
+| Run | the project it works in | that folder, in its parent | that project | that path |
+| Skill | `SKILL.md`, else its directory | that | its directory | that path |
+| MCP server | the owner configuration | that file | its parent | its path |
+| Clipboard file/image | the payload on disk | that file | its parent | its path |
+
+Reveal selects the object inside its parent, so a folder row is shown one level
+up while a file is shown where it lives. The terminal destination is *the
+directory this row's work happens in*: a folder itself, a file's parent, and —
+for a Run or a Session, which record their own working directory — that
+project, because a conversation's `.jsonl` lives in the agent's private storage
+and a prompt in `~/.claude/projects/…` answers nothing.
 
 The copy chord hands plain, unescaped POSIX text to the clipboard and closes
-Prelude. Unsupported rows do not advertise or guess an action. `Ctrl+K` exposes
-the same named operations and remains the fallback outside Ghostty.
+Prelude. Rows with no object of their own — history, agents, `$PATH` binaries,
+links, text clips — advertise and perform none of the three, and a Setting is
+deliberately excluded although it carries a path: its backing file belongs in
+Details, and `set:` is a form whose `←`/`→` controls must keep the footer.
+`Ctrl+K` exposes the same named operations and remains the fallback outside
+Ghostty.
+
+`Ctrl+O` runs the focused row inside Prelude and shows its output. It answers
+to `runhere::can_run_here` — the same predicate that decides whether `Ctrl+K`
+offers `Run and show output` — so it reaches History, project scripts, `$PATH`,
+snippets, system commands and Git rows, and is inert everywhere else. It is
+never offered on a Port or Process row, whose command is the kill itself and
+which the panel names, reddens and confirms.
 
 ## Current contextual actions
 
@@ -251,24 +279,33 @@ remain unchanged. Restore from `mcp:is:archived`.
 
 ### Prelude setting
 
-`set:` rows show the effective value and its source. Enter is specific to the
-row: add a root, rebuild the index, prompt for a key/chord/directory/height,
-toggle Quick Look or Enter mode, or open a list-backed file.
+`set:` rows show the effective value. Each row has three deliberate controls:
+Enter opens its main editor/manager, `←` moves toward less/removal/default, and
+`→` moves toward more/addition/change. The footer names both arrow actions for
+the selected row.
 
-The action panel may additionally:
+| Setting | `←` | `→` | Enter |
+|---|---|---|---|
+| Search folders | remove one | add one | manage all |
+| Search index | show status | rebuild | rebuild |
+| hotkey / panel directory / shell key | reset | change | change |
+| Quick Look | off | on | toggle |
+| Enter behavior | per kind | copy everything | toggle |
+| Updates | previous mode | next mode | choose all four modes |
+| Open-with / Snippets / Quicklinks / Favorites | remove one | add one | manage all |
 
-- remove and inspect search roots
-- show index status
-- reset scalar preferences to their actual defaults
-- start or restart the global panel
-- create/open the owning settings file
-- hand over an editor command, reveal the file, or copy its path
+Collection managers provide named add/remove choices and confirmations where
+removal discards a Prelude object. Removing a search folder never deletes the
+folder; removing a Quicklink never touches its target. Favorites can be added
+from the known Agent/Skill/MCP inventory. Open-with rules choose from installed
+applications rather than asking for an unchecked app string.
 
-Resetting the global hotkey means `Cmd+Shift+Space`; resetting the panel
-directory means `$HOME`. `reset all` affects only key, height, Quick Look, and
-Enter mode. It never removes roots, snippets, Quicklinks, Favorites, or
-open-with rules. A valid environment override remains effective over a saved
-value and is named on the row.
+The action panel carries low-frequency operations only: details, actual default
+restoration, panel start/restart, and advanced backing-file access. It does not
+repeat Enter or either arrow under another label. Resetting the global hotkey
+means `Cmd+Shift+Space`; resetting the panel directory means `$HOME`. A valid
+environment override remains effective over a saved value and is called out
+when an attempted arrow edit cannot become effective.
 
 ### File, indexed file, and Config
 

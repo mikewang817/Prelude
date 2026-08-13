@@ -198,6 +198,64 @@ pub fn render_general(items: &[Item], width: usize) -> String {
     out
 }
 
+/// Settings are a form, not search results. Their useful schema is category,
+/// control, current value, and effect; repeating the generic `setting` type on
+/// every row spent a column while communicating nothing. The category remains
+/// on every row so a filtered subset never loses the context that says what
+/// kind of control is left on screen.
+fn settings_widths(width: usize) -> (usize, usize, usize, usize) {
+    let usable = width.max(64) - 8;
+    let group_width = 10;
+    let title_width = (usable * 20 / 100).clamp(20, 30);
+    let value_width = (usable * 28 / 100).clamp(18, 42);
+    let detail_width = usable
+        .saturating_sub(group_width + title_width + value_width + 9)
+        .max(8);
+    (group_width, title_width, value_width, detail_width)
+}
+
+pub fn settings_header(width: usize) -> String {
+    let (group, title, value, _) = settings_widths(width);
+    format!(
+        "{DIM}{}   {}   {}   Effect{RESET}",
+        pad_to("Category", group, false),
+        pad_to("Setting", title, false),
+        pad_to("Current", value, false),
+    )
+}
+
+pub fn render_settings(items: &[Item], width: usize) -> String {
+    let (group_width, title_width, value_width, detail_width) = settings_widths(width);
+    let mut out = String::with_capacity(items.len() * 112);
+
+    for item in items {
+        let group = item.get("group");
+        let value = item.fields.first().map(String::as_str).unwrap_or_default();
+        let detail = item.fields.get(1).map(String::as_str).unwrap_or_default();
+        let title = dtrunc(&flatten(&item.title), title_width);
+        let value = dtrunc(&flatten(value), value_width);
+        let detail = dtrunc(&flatten(detail), detail_width);
+
+        out.push_str(CYAN);
+        out.push_str(&pad_to(group, group_width, false));
+        out.push_str(RESET);
+        out.push_str("   ");
+        out.push_str(&pad_to(&title, title_width, false));
+        out.push_str("   ");
+        out.push_str(YELLOW);
+        out.push_str(&pad_to(&value, value_width, false));
+        out.push_str(RESET);
+        if !detail.is_empty() {
+            out.push_str(&format!("{DIM}   {detail}{RESET}"));
+        }
+        out.push(SEP);
+        out.push_str(&serde_json::to_string(item).unwrap_or_default());
+        out.push('\n');
+    }
+    out.pop();
+    out
+}
+
 /// File search is one stable three-column form: full filename where possible,
 /// then kind, then the parent path. The general catalogue uses percentile
 /// widths because descriptions and process fields compete for space; applying

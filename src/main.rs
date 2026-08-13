@@ -329,6 +329,17 @@ fn main() -> ExitCode {
             }
             0
         }
+        // Left and right remain query-cursor keys everywhere except the
+        // Settings scope. There they are the form's native decrement/remove
+        // and increment/add keys, with a per-row meaning shown in the footer.
+        ["_setting-key", direction, q, line, path, cols, tw] => {
+            println!("{}", setting_key_action(direction, q, line, path, cols, tw));
+            0
+        }
+        ["_setting-apply", direction, line] => match render::parse_line(line) {
+            Some(item) if item.kind == item::Kind::Setting => settings::adjust(&item, direction),
+            _ => 2,
+        },
         ["_enter", line] => {
             let item = render::parse_line(line);
             if let Some(it) = item.as_ref().filter(|i| i.get("mode") == "complete-query") {
@@ -557,17 +568,61 @@ fn bind_actions(q: &str, me: &str, path: &str, cols: &str, tw: &str) -> String {
     // The prefix hints belong to the empty query and nothing else: once there
     // is a query there are results to read, and a row of syntax above them is
     // in the way rather than helpful.
-    let header = if q.trim().is_empty() { ui::HINTS } else { "" };
-    // The arrow keys belong to the query line whenever there is a query to
-    // move through, and to the level structure when there is not. `^K` is the
-    // way in either way, so nothing is lost while they are away.
-    let arrows = if q.is_empty() {
-        format!("rebind({})", ui::ARROW_INTO)
+    let settings_header;
+    let header = if q.trim().is_empty() {
+        ui::HINTS
+    } else if compute::scope_query(q)
+        .is_some_and(|(scope, _)| scope == compute::Scope::Settings)
+    {
+        settings_header = render::settings_header(cols.parse().unwrap_or(100));
+        &settings_header
     } else {
-        format!("unbind({})", ui::ARROW_INTO)
+        ""
     };
-    format!("{search}+{arrows}+change-header({header})+reload({me} _dynamic {} {} {} {})",
+    format!("{search}+change-header({header})+reload({me} _dynamic {} {} {} {})",
             exec::shq(q), exec::shq(path), exec::shq(cols), exec::shq(tw))
+}
+
+/// Contextual arrow behavior for the main list.
+///
+/// A transform rather than query-dependent rebinding keeps one source of
+/// truth: in `set:` the selected row decides the mutation; elsewhere the
+/// arrows retain ordinary line-editing behavior. Interactive changes use
+/// `execute` so their chooser/prompt is visible, while direct enum changes use
+/// `execute-silent`; both reload the live settings rows in place afterwards.
+fn setting_key_action(
+    direction: &str,
+    q: &str,
+    line: &str,
+    path: &str,
+    cols: &str,
+    tw: &str,
+) -> String {
+    let settings_scope = compute::scope_query(q)
+        .is_some_and(|(scope, _)| scope == compute::Scope::Settings);
+    let item = render::parse_line(line);
+    if settings_scope && item.as_ref().is_some_and(|item| item.kind == item::Kind::Setting) {
+        let item = item.as_ref().expect("checked above");
+        let me = exec::shq(&std::env::current_exe().unwrap_or_default().to_string_lossy());
+        let execution = if settings::direction_is_interactive(item, direction) {
+            "execute"
+        } else {
+            "execute-silent"
+        };
+        return format!(
+            "{execution}({me} _setting-apply {} {{2}})+reload({me} _dynamic {} {} {} {})",
+            exec::shq(direction),
+            exec::shq(q),
+            exec::shq(path),
+            exec::shq(cols),
+            exec::shq(tw),
+        );
+    }
+    match direction {
+        "right" if q.is_empty() => format!("print({})+accept", ui::OPEN_ACTIONS),
+        "right" => "forward-char".into(),
+        _ => "backward-char".into(),
+    }
 }
 
 /// Emit query-dependent rows, then the pre-rendered static list.
@@ -586,13 +641,20 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
     };
     let rows = compute::dynamic_rows_with(q, &static_items);
     let special = compute::is_special(q);
-    let ordinary_files = if special {
-        Vec::new()
+    let (ordinary_apps, ordinary_files) = if special {
+        (Vec::new(), Vec::new())
     } else {
-        compute::root_filesystem_rows(q, &static_items)
+        (
+            compute::root_application_rows(q, &static_items),
+            compute::root_filesystem_rows(q, &static_items),
+        )
     };
     if !rows.is_empty() {
-        let rendered = if compute::scope_query(q).is_some_and(|(scope, _)| {
+        let rendered = if compute::scope_query(q)
+            .is_some_and(|(scope, _)| scope == compute::Scope::Settings)
+        {
+            render::render_settings(&rows, cols)
+        } else if compute::scope_query(q).is_some_and(|(scope, _)| {
             matches!(scope, compute::Scope::Files | compute::Scope::Directories)
         }) {
             render::render_files(&rows, cols)
@@ -621,9 +683,18 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
             println!();
         }
     }
-    // Files supplement the launcher rather than taking it over: the Agent and
-    // Quicklink catalogue keeps its established lead, then come the ten local
-    // objects whose own names matched, and finally the web fallback.
+    // Local objects supplement the launcher rather than taking it over: the
+    // Agent and Quicklink catalogue keeps its established lead, then come the
+    // things on this machine whose own names matched, and finally the web
+    // fallback.
+    //
+    // Applications go above files, because between two objects of the same
+    // name the application is what a launcher is usually being asked for —
+    // `Chrome` means the browser far more often than it means an icon inside
+    // somebody's `node_modules`.
+    if !ordinary_apps.is_empty() {
+        println!("{}", render::render_general(&ordinary_apps, cols));
+    }
     if !ordinary_files.is_empty() {
         println!("{}", render::render_general(&ordinary_files, cols));
     }
@@ -1011,6 +1082,58 @@ mod tests {
         assert!(agents.iter().all(|i| i.kind != Kind::Session), "sessions have their own s: scope");
     }
 
+    /// Typing an application's name is the commonest question a launcher is
+    /// asked, and it was the one root search could not answer: `Chrome`
+    /// returned icon files out of `node_modules` and a web search, while
+    /// `Google Chrome.app` sat unread in the very snapshot that query parses.
+    #[test]
+    fn an_application_answers_its_own_name_in_ordinary_search() {
+        use crate::compute::root_application_rows;
+        use crate::item::{Item, Kind};
+
+        let app = |name: &str, path: &str| {
+            Item::new(format!("open -a '{name}'"), Kind::App)
+                .title(name)
+                .put("path", path)
+        };
+        let all = vec![
+            app("Google Chrome", "/Applications/Google Chrome.app"),
+            app("Zed", "/Applications/Zed.app"),
+            app("Notes", "/System/Applications/Notes.app"),
+            Item::new("chrome.js", Kind::File).put("path", "/x/node_modules/chrome.js"),
+            Item::new("claude", Kind::Agent).put("agent", "claude"),
+        ];
+
+        let hits = root_application_rows("Chrome", &all);
+        assert_eq!(hits.len(), 1, "the application is found by its own name");
+        assert_eq!(hits[0].title, "Google Chrome");
+        assert_eq!(hits[0].kind, Kind::App);
+        assert_eq!(
+            crate::defaults::on_enter(&hits[0]),
+            crate::defaults::Default_::Act(crate::defaults::Verb::Launch),
+            "Enter on an application launches it rather than handing over text"
+        );
+
+        // A leading substring beats one in the middle, so the app whose name
+        // begins with the query leads.
+        let notes = root_application_rows("note", &all);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Notes");
+
+        // Three refusals, each of which would make the block mean something
+        // different from one query to the next.
+        assert!(root_application_rows("z", &all).is_empty(), "one character is not a name");
+        assert!(
+            root_application_rows("zd", &all).is_empty(),
+            "a stretched subsequence must not outrank the file rows printed below it"
+        );
+        assert!(
+            root_application_rows("Applications/Zed", &all).is_empty(),
+            "a path is a question about the filesystem"
+        );
+        assert!(root_application_rows("tag:work", &all).is_empty());
+    }
+
     #[test]
     fn clipboard_is_strictly_recent_and_preserves_file_objects() {
         let history = concat!(
@@ -1086,6 +1209,35 @@ mod tests {
         assert!(!include_str!("ui.rs").contains("--height"));
     }
 
+    /// Ctrl+O was bound on every row and ran its text through `sh -c` with no
+    /// per-kind rule and no confirmation, while the action panel withheld the
+    /// same offer from exactly the rows where it was dangerous.
+    #[test]
+    fn the_run_here_key_and_its_action_row_answer_to_one_rule() {
+        use crate::item::{Item, Kind};
+
+        for kind in [Kind::History, Kind::Script, Kind::Path, Kind::Snippet, Kind::Sys, Kind::Git] {
+            assert!(crate::runhere::can_run_here(&Item::new("ls", kind)), "{kind:?}");
+        }
+        // A port's and a process's command *is* the kill. The panel names it,
+        // reddens it and confirms it; the key must not offer a quiet second
+        // route to the same thing.
+        for kind in [Kind::Port, Kind::Proc] {
+            let it = Item::new("kill 42", kind).put("pid", "42");
+            assert!(!crate::runhere::can_run_here(&it), "{kind:?}");
+            assert_eq!(crate::runhere::run_item(&it), 0, "{kind:?} stays inert");
+            let panel = crate::actions::actions_for(&it, crate::defaults::Surface::Clipboard);
+            assert!(!panel.iter().any(|(id, ..)| *id == "runhere"));
+        }
+        // And an object is not a command. A file row's text is its path, so
+        // running it tried to execute the file.
+        let file = Item::new("/tmp/x.sh", Kind::Find).put("path", "/tmp/x.sh");
+        assert!(!crate::runhere::can_run_here(&file));
+        for kind in [Kind::File, Kind::Dir, Kind::App, Kind::Link, Kind::Agent, Kind::Session] {
+            assert!(!crate::runhere::can_run_here(&Item::new("x", kind)), "{kind:?}");
+        }
+    }
+
     #[test]
     fn filesystem_chords_are_one_consistent_object_vocabulary() {
         use crate::item::{Item, Kind};
@@ -1132,12 +1284,61 @@ mod tests {
             Some(std::path::PathBuf::from("/tmp/project")),
             "a file row stands it where the file is",
         );
-        // And nothing else offers it: a history entry has no directory that
-        // is *its*, and guessing one would stop the key meaning one thing.
-        for kind in [Kind::History, Kind::Agent, Kind::Session, Kind::Link, Kind::App] {
+        // Every row carrying a real object gets the same three verbs, because
+        // every one of them already offered those verbs by name in ^K. An
+        // application is revealed as the bundle it is and the terminal stands
+        // beside it, not inside its Contents.
+        let app = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
+        assert_eq!(crate::ui::path_to_copy(&app), Some("/Applications/Zed.app"));
+        assert_eq!(
+            crate::ui::terminal_directory(&app),
+            Some(std::path::PathBuf::from("/Applications")),
+        );
+        let app_footer = crate::ui::footer_for_item("Launch it", Some(&app), true, 160);
+        assert!(app_footer.contains("Reveal"));
+        assert!(!app_footer.contains("Reveal in parent"), "a bundle is revealed as itself");
+
+        // A live run's object is the project it is working in — the case the
+        // chord exists for, and the one it did not answer.
+        let run = Item::new("kill 42", Kind::Run)
+            .put("cwd", "/tmp/project")
+            .put("path", "/tmp/project");
+        assert_eq!(
+            crate::ui::terminal_directory(&run),
+            Some(std::path::PathBuf::from("/tmp/project")),
+            "a cd is only useful in a shell you already have",
+        );
+        assert!(crate::ui::footer_for_item("Copy the cd command", Some(&run), true, 160)
+            .contains("Terminal in project"));
+
+        // A conversation is revealed as its native file, but the terminal goes
+        // where the work is. Deriving it from the file would stand a prompt in
+        // the agent's private storage.
+        let session = Item::new("claude --resume x", Kind::Session)
+            .put("file", "/Users/me/.claude/projects/slug/x.jsonl")
+            .put("cwd", "/tmp/project");
+        assert_eq!(
+            crate::ui::path_to_copy(&session),
+            Some("/Users/me/.claude/projects/slug/x.jsonl"),
+        );
+        assert_eq!(
+            crate::ui::terminal_directory(&session),
+            Some(std::path::PathBuf::from("/tmp/project")),
+        );
+
+        // And nothing else offers any of them: a history entry, an agent CLI
+        // and a URL have no filesystem object that is *theirs*, and guessing
+        // one would stop the keys meaning one thing.
+        for kind in [Kind::History, Kind::Agent, Kind::Link, Kind::Path, Kind::Sys] {
             let it = Item::new("x", kind).put("path", "/tmp/project");
             assert_eq!(crate::ui::terminal_directory(&it), None, "{kind:?}");
+            assert_eq!(crate::ui::path_to_copy(&it), None, "{kind:?}");
+            let bare = crate::ui::footer_for_item("Copy the command", Some(&it), true, 160);
+            assert!(!bare.contains("Ctrl+Enter"), "{kind:?} advertises no object chord");
         }
+        // A text clip has no payload on disk, so it carries no object either.
+        let text_clip = Item::new("hello", Kind::Clip).put("clip_kind", "text");
+        assert_eq!(crate::ui::path_to_copy(&text_clip), None);
         // Keys are spelled out; a glyph is only legible to somebody who
         // already knows it.
         assert!(!shown.contains('⇧'));
@@ -1481,21 +1682,31 @@ mod tests {
                 "and the person's keyword still leads the built-in scope");
     }
 
-    /// Arrows move between levels only while there is no text to move
-    /// through. Taking `←`/`→` away from a half-typed scope would be the
-    /// launcher deciding it knows better than the person editing.
+    /// Arrows remain line-editing keys outside Settings, become contextual
+    /// controls inside it, and keep `→` as Actions on the empty home.
     #[test]
-    fn the_arrow_keys_yield_to_a_query_and_ctrl_k_never_does() {
-        let actions = |q: &str| crate::bind_actions(q, "prelude", "/dev/null", "80", "20");
-        assert!(actions("").contains(&format!("rebind({})", crate::ui::ARROW_INTO)),
-                "an empty query has nothing to move through, so → enters");
-        assert!(actions("c:").contains(&format!("unbind({})", crate::ui::ARROW_INTO)),
-                "a typed scope keeps its cursor keys");
-        assert!(actions("claude ").contains(&format!("unbind({})", crate::ui::ARROW_INTO)));
+    fn arrow_keys_are_contextual_without_stealing_query_editing() {
+        let file = crate::item::Item::new("x", crate::item::Kind::File);
+        let file_line = format!("x{}{}", crate::render::SEP, serde_json::to_string(&file).unwrap());
+        assert_eq!(
+            crate::setting_key_action("right", "claude", &file_line, "/dev/null", "80", "20"),
+            "forward-char",
+        );
+        assert_eq!(
+            crate::setting_key_action("left", "c:", &file_line, "/dev/null", "80", "20"),
+            "backward-char",
+        );
+        assert!(crate::setting_key_action("right", "", &file_line, "/dev/null", "80", "20")
+            .contains(crate::ui::OPEN_ACTIONS));
 
-        // `→` cannot be an --expect key, because those cannot be unbound. It
-        // announces itself on the output queue instead, and the marker must
-        // never look like an item.
+        let setting = crate::settings::items().into_iter()
+            .find(|item| item.get("setting") == "preview").unwrap();
+        let line = format!("x{}{}", crate::render::SEP, serde_json::to_string(&setting).unwrap());
+        let action = crate::setting_key_action("right", "set:", &line, "/dev/null", "80", "20");
+        assert!(action.contains("_setting-apply right"));
+        assert!(action.contains("execute-silent"));
+        assert!(action.contains("+reload("));
+
         assert!(!crate::ui::OPEN_ACTIONS.contains(crate::render::SEP));
         assert!(!crate::ui::OPEN_ACTIONS.trim().is_empty());
     }
