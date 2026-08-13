@@ -1,8 +1,12 @@
 target/
 .DS_Store
 
-# Local editor / agent settings, machine-specific
-.claude/
+# Local editor / agent settings, machine-specific.
+# The parity loop's verification skills and its driver are not machine-specific
+# — a loop whose stop condition lives outside the repository has none.
+.claude/*
+!.claude/skills/
+!.claude/commands/
 
 # Draft posts, not part of the published project
 social-media/
