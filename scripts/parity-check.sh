@@ -111,13 +111,43 @@ check_P1a() {
 
 # Raycast lets you order and extend the fallbacks. Prelude has exactly one,
 # hard-wired to the `g` quicklink.
+#
+# Its own fixture, in a throwaway XDG_CONFIG_HOME, for the reason P3's has one:
+# reading the person's configured list asks what they happen to have set, and
+# an entry naming a quicklink they later deleted is *correctly* skipped, so the
+# count and the config would legitimately disagree.
 check_P1b() {
-    "$PRELUDE" settings get fallbacks >/dev/null 2>&1 ||
-        { echo "no 'fallbacks' setting"; return 1; }
-    want=$("$PRELUDE" settings get fallbacks 2>/dev/null | tr ',' '\n' | grep -c . )
-    got=$("$PRELUDE" _dynamic "$NONSENSE" 2>/dev/null | payload | grep -c . )
-    [ "$got" -eq "$want" ] ||
-        { echo "configured $want fallback(s), emitted $got"; return 1; }
+    home="$TMP/xdg-fallbacks/config"
+    mkdir -p "$home" || return 1
+    fb() { XDG_CONFIG_HOME="$home" "$PRELUDE" "$@"; }
+
+    fb settings get fallbacks >/dev/null 2>&1 || { echo "no 'fallbacks' setting"; return 1; }
+    fb settings set fallbacks "g,ddg" >/dev/null 2>&1 ||
+        { echo "could not configure two providers"; return 1; }
+
+    rows=$(fb _dynamic "$NONSENSE" 2>/dev/null | payload)
+    n=$(printf '%s\n' "$rows" | grep -c . )
+    [ "$n" -eq 2 ] || { echo "configured 2 providers, emitted $n"; return 1; }
+
+    # Order is the person's, and P1a's properties hold for every row, not only
+    # the first: a second provider whose title was not the query would be
+    # filtered out by the query that computed it.
+    printf '%s\n' "$rows" | jq -r --arg q "$NONSENSE" 'select(.title != $q) | .title' |
+        grep -q . && { echo "a provider row is not titled with the query"; return 1; }
+    first=$(printf '%s\n' "$rows" | head -1 | jq -r '.fields[0]')
+    second=$(printf '%s\n' "$rows" | sed -n 2p | jq -r '.fields[0]')
+    [ "$first" != "$second" ] || { echo "both rows name the same provider"; return 1; }
+    case "$first" in *Google*) ;; *) echo "order not preserved: $first before $second"; return 1 ;; esac
+
+    # And a broken list still cannot dead-end a query.
+    fb settings set fallbacks zznosuchkeyword >/dev/null 2>&1 || return 1
+    n=$(fb _dynamic "$NONSENSE" 2>/dev/null | payload | grep -c . )
+    [ "$n" -eq 1 ] || { echo "a list naming nothing emitted $n rows, not the built-in one"; return 1; }
+    fb settings check 2>&1 | grep -q zznosuchkeyword ||
+        { echo "'settings check' is silent about a keyword that resolves to nothing"; return 1; }
+
+    scoped=$(fb _dynamic "f:$NONSENSE" 2>/dev/null | payload | grep -c . )
+    [ "$scoped" -eq 0 ] || { echo "$scoped fallback row(s) leaked into f:"; return 1; }
 }
 
 # ----------------------------------------------------------------- P2  aliases
@@ -250,7 +280,7 @@ check_P10() {
 printf '\033[1mRaycast parity — interaction polish\033[0m\n\n'
 
 item P1a done  "Fallback row: is the query, survives, absent in a scope"
-item P1b todo  "Fallbacks are an ordered, configurable list"
+item P1b done  "Fallbacks are an ordered, configurable list"
 item P2  done  "Alias a stable object, refused at the moment of naming"
 item P3  done  "The alias shows on the row, and has a manager"
 item P4a spike "Launch with a query already typed — nothing can reveal the panel"

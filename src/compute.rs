@@ -2280,16 +2280,22 @@ pub const WEB_SEARCH_KEY: &str = "g";
 pub const WEB_SEARCH_NAME: &str = "Google";
 pub const WEB_SEARCH_TEMPLATE: &str = "https://www.google.com/search?q={q}";
 
-fn web_search_provider_from(text: &str) -> (String, String) {
-    quicklink_entry(&crate::minitoml::parse(text), WEB_SEARCH_KEY)
-        .and_then(|(key, body)| {
-            let template = body.get("target").or_else(|| body.get("url"))?.clone();
-            if !template.contains("{q}") {
-                return None;
-            }
-            Some((body.get("name").cloned().unwrap_or(key), template))
-        })
-        .unwrap_or_else(|| (WEB_SEARCH_NAME.to_string(), WEB_SEARCH_TEMPLATE.to_string()))
+/// A quicklink that can take a query, or nothing.
+///
+/// The `{q}` test is what makes a fallback list a list of *providers* rather
+/// than of arbitrary rows: every fallback has to display the query, and a
+/// fixed target has nowhere to put it.
+pub(crate) fn template_provider(
+    links: &crate::minitoml::Table,
+    key: &str,
+) -> Option<(String, String)> {
+    quicklink_entry(links, key).and_then(|(key, body)| {
+        let template = body.get("target").or_else(|| body.get("url"))?.clone();
+        if !template.contains("{q}") {
+            return None;
+        }
+        Some((body.get("name").cloned().unwrap_or(key), template))
+    })
 }
 
 /// The row that turns any query into a web search, appended to every list.
@@ -2307,33 +2313,65 @@ fn web_search_provider_from(text: &str) -> (String, String) {
 /// leaves it below anything that scored the same. And it is absent inside a
 /// scope — `f:`, `c:`, `h:` and the rest are a person saying where to look,
 /// and answering "or the web" to that is not an answer.
-pub fn web_search_row(q: &str) -> Option<Item> {
-    web_search_row_from(&quicklinks_text(), q)
+pub fn fallback_rows(q: &str) -> Vec<Item> {
+    fallback_rows_from(&quicklinks_text(), &crate::settings::fallbacks(), q)
 }
 
-pub(crate) fn web_search_row_from(text: &str, q: &str) -> Option<Item> {
+/// `spec` is the person's ordered list of quicklink keywords.
+///
+/// Order is theirs and is preserved; a repeated keyword is taken once. A
+/// keyword that names nothing, or names something with no `{q}` in it, is
+/// dropped here and reported by `prelude settings check` — a fallback that
+/// cannot carry the query would be a row that lies about what pressing it
+/// does.
+///
+/// If nothing at all resolves, the built-in provider is emitted anyway. That
+/// is the one property this row exists for: it must be impossible for a query
+/// to dead-end, so an empty or broken list degrades to a working search rather
+/// than to silence.
+pub(crate) fn fallback_rows_from(text: &str, spec: &str, q: &str) -> Vec<Item> {
     let term = q.trim();
     // Nothing typed is the home screen, and the bare browsers (`:` for the
     // scope list, `/` for skills) are a keystroke on the way somewhere, not a
     // thing anybody wants looked up.
     if term.is_empty() || term == ":" || term == "/" || term == "@" {
-        return None;
+        return Vec::new();
     }
     if scope_query(term).is_some() || exact_scope_command(term).is_some() {
-        return None;
+        return Vec::new();
     }
-    let (name, template) = web_search_provider_from(text);
-    let url = template.replace("{q}", &percent_encode(term));
-    Some(
-        Item::new(url.clone(), Kind::Link)
-            // The query itself, not "Search Google for …": fzf matches
-            // displayed text, and a row that has to be matched against a
-            // prefix nobody typed is a row that disappears when it is needed.
-            .title(term)
-            .fields([format!("Search {name}"), dtrunc_template(&template)])
-            .put("url", url)
-            .put("web_search", "true"),
-    )
+    let links = crate::minitoml::parse(text);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut providers: Vec<(String, String)> = Vec::new();
+    for key in spec.split([',', ' ']).map(str::trim).filter(|key| !key.is_empty()) {
+        if !seen.insert(key.to_lowercase()) {
+            continue;
+        }
+        if let Some(provider) = template_provider(&links, key) {
+            providers.push(provider);
+        }
+    }
+    if providers.is_empty() {
+        providers.push((WEB_SEARCH_NAME.to_string(), WEB_SEARCH_TEMPLATE.to_string()));
+    }
+    let encoded = percent_encode(term);
+    providers
+        .into_iter()
+        .map(|(name, template)| {
+            let url = template.replace("{q}", &encoded);
+            Item::new(url.clone(), Kind::Link)
+                // The query itself, not "Search Google for …": fzf matches
+                // displayed text, and a row that has to be matched against a
+                // prefix nobody typed is a row that disappears when it is
+                // needed. Every provider in the list obeys this, not just the
+                // first — otherwise the second fallback is invisible to the
+                // query that produced it.
+                .title(term)
+                .fields([format!("Search {name}"), dtrunc_template(&template)])
+                .put("url", url)
+                .put("web_search", "true")
+        })
+        .collect()
 }
 
 // ─── indexed file and folder search ─────────────────────────────────────

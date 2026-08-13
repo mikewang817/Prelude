@@ -44,8 +44,8 @@ rediscover them every pass:
 | P1a | Fallback row: is the query, survives, absent in a scope | **done** |
 | P10 | Object chords appear on object rows and nowhere else | **done** |
 | P2 | Alias a stable object, refused at the moment of naming | **done** |
+| P1b | Fallbacks are an ordered, configurable list | **done** |
 | P3 | The alias shows on the row, and has a manager | **done** |
-| P1b | Fallbacks are an ordered, configurable list | todo |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
 | P8 | A trashed object says where it went, and offers the way back | todo |
 | P4a | Launch with a query already typed | spike |
@@ -86,7 +86,7 @@ sharing one `title` local, and a test over that would be a test of `format!`.
 ## P1a — the fallback row holds its three properties · done
 
 Typing something the catalogue has nothing for must not draw an empty box.
-`compute::web_search_row` already answers this, and the check pins the three
+`compute::fallback_rows` answers this, and the check pins the three
 properties that make it safe to emit on every keystroke: its display text
 **is** the query (titled anything else, the query that computed it would
 filter it out), it is emitted **last** so `--tiebreak=index` leaves it under
@@ -95,26 +95,50 @@ the person saying where to look.
 
 This is `done` and stays checked because P1b edits exactly this code.
 
-## P1b — fallbacks are an ordered, configurable list · todo
+## P1b — fallbacks are an ordered, configurable list · done
 
 **Raycast**: a configurable, ordered set of fallbacks — search the web, ask
 AI, open a specific extension — shown when nothing matches.
 
-**Prelude now**: exactly one, following the `g` quicklink, with the built-in
-template as the fallback for having deleted it.
+**What was built**: a `fallbacks` key in `settings.toml`, an ordered list of
+quicklink keywords defaulting to the one `g`, with a "When nothing matches" row
+in the Search group. `compute::fallback_rows_from` is the pure function;
+`web_search_row_from` is gone, because a name promising one row while returning
+the first of several is worse than no name.
 
-**The shape of the answer**: an ordered list of quicklink keys. A `fallbacks`
-scalar in `settings.toml` naming keys in order is the cheap version and the
-one to build — it needs no new file, so `settings.rs` stays the single answer
-to "what is this preference set to", and the entries are already validated
-because they are quicklink keys.
+All three P1a properties hold **per row**, which is the part that could have
+gone quietly wrong: a second provider titled anything but the query is
+filtered out by the query that computed it, so it would be missing exactly when
+it was wanted, and the check now asserts it for every row rather than the
+first.
 
-Every entry must keep all three P1a properties. In particular each emitted row
-still has to display the query, which means a fallback list is a list of
-*providers*, not a list of arbitrary rows.
+A keyword must name a quicklink containing `{q}` — a fixed target has nowhere
+to put the query, which is what makes this a list of *providers* rather than of
+arbitrary rows. Unusable keywords are skipped when used and reported by
+`settings check`, never refused at write time: a quicklink deleted later would
+otherwise make a saved setting retroactively unwritable.
 
-**Check**: `settings get fallbacks` parses, and the row count for an
-unmatchable query equals the configured count.
+**If nothing resolves, the built-in provider is emitted anyway.** An empty or
+broken list must not be able to make a query dead-end — that is the one failure
+this row exists to prevent.
+
+The row's value column is the list *as stored*, not the resolved provider
+names, because `get` prints that column and `set` has to accept what `get`
+printed. The first attempt showed `Google` and could not be round-tripped. The
+resolved names are in Details and anything unusable is called out in the Effect
+column, the way an environment override already is.
+
+**Cost**: `_dynamic` now initialises the memoised `prefs()` where it did not
+before — one small file read. Interleaved A/B: Δp50 +0.19, +0.31, +0.12 ms on
+~18 ms keystrokes.
+
+**Check**: rewritten with its own fixture in a throwaway `XDG_CONFIG_HOME`, for
+the reason P3's has one. It configures two providers and asserts two rows in
+that order, each displaying the query; then configures a keyword that names
+nothing and asserts one built-in row and a `settings check` warning; then that
+a scope still gets none. Counting the person's configured entries would have
+been wrong in a way that mattered: an entry naming a quicklink they deleted is
+*correctly* skipped, so the count and the config legitimately disagree.
 
 ## P2 — alias a stable object · done
 
@@ -195,6 +219,14 @@ asks for the name second — the object is the part a person can recognise, the
 name is the only part that can be refused, and the refusal comes from
 `aliases::vet`, the same door `prelude alias` uses, so the two surfaces cannot
 disagree about what a name may be.
+
+**A defect this item shipped, found while building P1b and fixed there.**
+`defaults::name` holds a per-setting table of what Enter does, and the Aliases
+row was not in it, so it fell through to `"Open the file"` while Enter actually
+opened `manage_collection`. The footer described an action the key did not
+perform. The panel test did not catch it — it asserts only that `^K` never
+repeats Enter's label, and those two happened not to collide. Adding a
+collection row means adding an arm to that table; the fallthrough now says so.
 
 **Check**: the check was rewritten and now brings its own fixture in a
 throwaway `XDG_CONFIG_HOME` — it names a real application, asserts the row

@@ -292,6 +292,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
                 }
             }
             "update" => "Choose update mode…",
+            "fallbacks" => "Choose the providers…",
             "enter" => {
                 if item.fields.first().map(String::as_str) == Some("per kind") {
                     "Switch to copy-everything"
@@ -303,6 +304,11 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
             "snippets" => "Manage snippets",
             "quicklinks" => "Manage Quicklinks",
             "favorites" => "Manage Favorites",
+            "aliases" => "Manage aliases",
+            // Anything not named here falls back to the backing file, which is
+            // right for a row that has no manager and a lie for one that does:
+            // Enter on a collection opens `manage_collection`, so a missing arm
+            // makes the footer describe an action the key does not perform.
             _ => "Open the file",
         };
     }

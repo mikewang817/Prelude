@@ -246,7 +246,9 @@ a chord goes through
 restart the CLI performs. The four that had only an environment variable get
 `settings.toml`, and **the variable still wins** — a variable is a
 per-invocation instruction and a file is a standing one, so the narrower has to
-be able to override the broader. `toggle` says so when it is writing a file the
+be able to override the broader. `fallbacks` is the fifth key in that file and
+deliberately has no variable: those four had one before the file existed, and
+inventing a new one would widen the surface this module exists to narrow. `toggle` says so when it is writing a file the
 environment is already overriding, because a setting that visibly does nothing
 is worse than one that refuses.
 
@@ -842,20 +844,34 @@ in it for `git commit`, so fzf drew `0/58` and a blank rectangle, and nothing
 on screen said the machine had understood the question and declined to answer
 it. The person most likely to hit this is the one who has just given Ctrl-R to
 the launcher and typed the command they were looking for. So
-`compute::web_search_row` computes one web-search row *from* the query and
-`dynamic` prints it after everything else. It cannot fail to exist, which is
-the whole point — every other row here has to be found.
+`compute::fallback_rows` computes them *from* the query and `dynamic` prints
+them after everything else. They cannot fail to exist, which is the whole point
+— every other row here has to be found.
 
-Three things make it safe to have on every query, and each is the part to keep.
-Its **display text is the query**, so fzf matches it by construction; titled
-`Search Google for …` it would be filtered out by the very query that computed
-it. It is emitted **last**, after the catalogue, so `--tiebreak=index` leaves
-it under anything that scored the same and it leads only when it is the only
-thing left. And it is **absent inside a scope** — `f:`, `c:`, `h:` and the rest
-are a person saying where to look, and "or the web" is not an answer to that.
-The provider follows the `g` quicklink rather than hard-coding Google, because
-somebody who re-points that keyword has said where their web searches go; the
-built-in template is the fallback for having deleted it, not the authority.
+Three things make them safe to have on every query, and each is the part to
+keep. Their **display text is the query**, so fzf matches them by construction;
+titled `Search Google for …` a row would be filtered out by the very query that
+computed it — and this holds for **every** provider in the list, not just the
+first, or the second one is invisible exactly when it is needed. They are
+emitted **last**, after the catalogue, so `--tiebreak=index` leaves them under
+anything that scored the same. And they are **absent inside a scope** — `f:`,
+`c:`, `h:` and the rest are a person saying where to look, and "or the web" is
+not an answer to that.
+
+The providers are the `fallbacks` setting: an ordered list of quicklink
+keywords, defaulting to the one `g`. Following the person's keywords rather
+than hard-coding Google is the same argument as before — somebody who
+re-points `g` has said where their web searches go — and a *list* only extends
+it. A keyword must name a quicklink with `{q}` in it, because a fixed target
+has nowhere to put the query; one that does not is skipped at the moment it
+would be used and reported by `settings check`, never refused at write time,
+since a quicklink deleted later would otherwise make a saved setting
+retroactively unwritable. **If nothing in the list resolves, the built-in
+template is emitted anyway.** That is not politeness: an empty list would make
+a query dead-end, which is the one failure this row exists to prevent, and it
+is why the row's value column is the list as stored while the resolved names
+live in Details — `get` prints that column and `set` has to accept what `get`
+printed.
 
 `/` has the two states a search provider has. An *incomplete* name browses —
 `/cnipa-oo` lists the Skill rows it matches — and a complete one is an

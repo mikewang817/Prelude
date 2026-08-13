@@ -30,7 +30,9 @@ const DEFAULT_KEY: &str = "^R";
 const DEFAULT_PREVIEW: bool = true;
 const DEFAULT_CLASSIC_ENTER: bool = false;
 const DEFAULT_UPDATE: &str = "notify";
-const PREF_KEYS: &[&str] = &["key", "preview", "classic_enter", "update"];
+const DEFAULT_FALLBACKS: &str = crate::compute::WEB_SEARCH_KEY;
+const PREF_KEYS: &[&str] =
+    &["key", "preview", "classic_enter", "update", "fallbacks"];
 
 // ---------------------------------------------------------------------------
 // settings.toml — the preferences that had nowhere else to live
@@ -46,6 +48,7 @@ struct Prefs {
     preview: Option<bool>,
     classic_enter: Option<bool>,
     update: Option<String>,
+    fallbacks: Option<String>,
     present: std::collections::BTreeSet<String>,
 }
 
@@ -71,6 +74,7 @@ fn prefs() -> &'static Prefs {
             preview: flag("preview"),
             classic_enter: flag("classic_enter"),
             update: get("update").and_then(|v| validate_pref("update", &v).ok()),
+            fallbacks: get("fallbacks").and_then(|v| validate_pref("fallbacks", &v).ok()),
             present: root
                 .into_iter()
                 .flat_map(|table| table.keys().cloned())
@@ -108,6 +112,7 @@ fn canonical_key(key: &str) -> Option<&'static str> {
     match key.trim().to_ascii_lowercase().replace('-', "_").as_str() {
         "key" | "launcher_key" => Some("key"),
         "preview" | "quicklook" | "quick_look" => Some("preview"),
+        "fallbacks" | "fallback" => Some("fallbacks"),
         "enter" | "classic_enter" => Some("classic_enter"),
         "update" | "updates" | "auto_update" => Some("update"),
         "hotkey" | "global_hotkey" => Some("hotkey"),
@@ -145,6 +150,23 @@ fn validate_pref(key: &str, value: &str) -> Result<String, String> {
         "preview" | "classic_enter" => parse_bool(value)
             .map(|v| v.to_string())
             .ok_or_else(|| format!("{key} is on or off (also true/false, yes/no or 1/0)")),
+        // Syntax only. Whether a keyword names something that can take a query
+        // is answered against `quicklinks.toml` at the moment it is used, and
+        // reported by `checks`: this file must not decide it, because a
+        // quicklink removed later would make a valid setting retroactively
+        // unwritable.
+        "fallbacks" => {
+            let keys: Vec<&str> =
+                value.split([',', ' ']).map(str::trim).filter(|k| !k.is_empty()).collect();
+            if keys.is_empty() {
+                return Err("fallbacks is one or more quicklink keywords, in order".into());
+            }
+            for key in &keys {
+                crate::compute::normalize_quicklink_key(key)
+                    .map_err(|why| format!("“{key}” cannot be a keyword: {why}"))?;
+            }
+            Ok(keys.join(", "))
+        }
         _ => Err(format!("{key} is not stored in settings.toml")),
     }
 }
@@ -194,6 +216,34 @@ pub fn parse_update_mode(value: &str) -> crate::update::Mode {
 }
 
 /// The pre-2024 default: Enter hands over everything, whatever kind it is.
+/// The ordered quicklink keywords a query with no answer falls back to.
+///
+/// No environment variable: the four that have one had one before
+/// `settings.toml` existed, and inventing a fifth would widen the surface this
+/// module exists to narrow.
+pub fn fallbacks() -> String {
+    prefs().fallbacks.clone().unwrap_or_else(|| DEFAULT_FALLBACKS.to_string())
+}
+
+/// The keywords that resolve, and those that do not, for the row and `check`.
+pub fn fallback_state() -> (Vec<String>, Vec<String>) {
+    let links = crate::compute::quicklinks();
+    let spec = fallbacks();
+    let mut good = Vec::new();
+    let mut bad = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for key in spec.split([',', ' ']).map(str::trim).filter(|key| !key.is_empty()) {
+        if !seen.insert(key.to_lowercase()) {
+            continue;
+        }
+        match crate::compute::template_provider(&links, key) {
+            Some((name, _)) => good.push(name),
+            None => bad.push(key.to_string()),
+        }
+    }
+    (good, bad)
+}
+
 pub fn classic_enter() -> bool {
     if env("PRELUDE_CLASSIC_ENTER").is_some() {
         return true;
@@ -650,7 +700,7 @@ fn count_of(path: &Path, section: Option<&str>) -> usize {
 
 fn setting_group(id: &str) -> &'static str {
     match id {
-        "roots" | "index" => "Search",
+        "roots" | "index" | "fallbacks" => "Search",
         "hotkey" | "paneldir" | "key" => "Launcher",
         "preview" | "enter" | "update" => "Behavior",
         _ => "Library",
@@ -746,6 +796,32 @@ pub fn items() -> Vec<Item> {
             .put("path", indexed.to_string_lossy().into_owned())
             .put("source", if stale { "stale" } else { "current" }),
     );
+
+    // The Search group, because it is what an unanswerable query answers with.
+    //
+    // The value column is the list exactly as it is stored, because `get`
+    // prints it and `set` has to accept what `get` printed. What the keywords
+    // resolve to is named in Details, and anything unusable is called out in
+    // the Effect column, the way an environment override already is.
+    let (good, bad) = fallback_state();
+    let effect = if good.is_empty() {
+        format!(
+            "none of these work · the built-in {} search is used",
+            crate::compute::WEB_SEARCH_NAME
+        )
+    } else if bad.is_empty() {
+        "providers offered in order for a query with no answer".to_string()
+    } else {
+        format!("in order for a query with no answer · {} unusable", bad.len())
+    };
+    v.push(preference_row(
+        "fallbacks",
+        "When nothing matches",
+        fallbacks(),
+        &effect,
+        EDIT_PROMPT,
+        ("fallbacks", DEFAULT_FALLBACKS, ""),
+    ));
 
     let global = crate::global::configured_summary();
     // Installed is a file check. Whether the helper is running needs `pgrep`
@@ -960,6 +1036,22 @@ pub fn detail(it: &Item) -> Vec<String> {
             out.push("Left/right step without wrapping; Enter shows all four choices.".into());
             setting_origin(it, &mut out);
         }
+        "fallbacks" => {
+            let (good, bad) = fallback_state();
+            out.push("Offered in this order when a query matches nothing:".into());
+            if good.is_empty() {
+                out.push(format!("  {} (built in)", crate::compute::WEB_SEARCH_NAME));
+            } else {
+                out.extend(good.iter().enumerate().map(|(n, name)| format!("  {}. {name}", n + 1)));
+            }
+            for key in &bad {
+                out.push(format!("  {key} — no quicklink of that name takes a {{q}}"));
+            }
+            out.push(String::new());
+            out.push("Each row shows the query itself, so it survives the search that made it.".into());
+            out.push("A query inside a scope gets none of them.".into());
+            setting_origin(it, &mut out);
+        }
         "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             let rows = collection_rows(it.get("setting"));
             if rows.is_empty() {
@@ -1004,7 +1096,7 @@ fn ensure_setting_file(it: &Item) -> Result<PathBuf, String> {
         "quicklinks" => crate::compute::ensure_quicklinks_file()?,
         "favorites" => crate::favorites::ensure_file()?,
         "aliases" => crate::aliases::ensure_file()?,
-        "key" | "preview" | "enter" => {
+        "key" | "preview" | "enter" | "fallbacks" => {
             if !file().exists() {
                 crate::cache::write_atomic(
                     &file(),
@@ -1156,7 +1248,7 @@ pub fn direction_label(it: &Item, direction: &str) -> &'static str {
     match it.get("setting") {
         "roots" => if left { "Remove folder" } else { "Add folder" },
         "index" => if left { "Show status" } else { "Rebuild now" },
-        "hotkey" | "paneldir" | "key" => if left { "Reset default" } else { "Change…" },
+        "hotkey" | "paneldir" | "key" | "fallbacks" => if left { "Reset default" } else { "Change…" },
         "preview" => if left { "Set off" } else { "Set on" },
         "enter" => if left { "Per kind" } else { "Copy everything" },
         "update" => if left { "Previous mode" } else { "Next mode" },
@@ -1177,7 +1269,7 @@ pub fn direction_is_interactive(it: &Item, direction: &str) -> bool {
     !matches!(
         (it.get("setting"), direction),
         ("preview" | "enter" | "update", _)
-            | ("hotkey" | "paneldir" | "key", "left")
+            | ("hotkey" | "paneldir" | "key" | "fallbacks", "left")
     )
 }
 
@@ -1196,7 +1288,7 @@ pub fn adjust(it: &Item, direction: &str) -> i32 {
     match it.get("setting") {
         "roots" => if left { remove_root_interactively() } else { add_root_interactively() },
         "index" => if left { show_index_status() } else { crate::runhere::run_cmd("prelude index") },
-        "hotkey" | "paneldir" | "key" => {
+        "hotkey" | "paneldir" | "key" | "fallbacks" => {
             if left { reset_item(it) } else { prompt_for(it) }
         }
         "preview" => set_boolean("preview", !left),
@@ -1710,7 +1802,7 @@ fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
     match key {
         "hotkey" => crate::global::set_hotkey(raw_value),
         "paneldir" => crate::global::set_directory(raw_value),
-        key @ ("key" | "preview" | "classic_enter" | "update") => {
+        key @ ("key" | "preview" | "classic_enter" | "update" | "fallbacks") => {
             let value = validate_pref(key, raw_value)?;
             write_pref(key, &value)?;
             let shown = match (key, value.as_str()) {
@@ -1755,12 +1847,13 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
         }
         "hotkey" => crate::global::set_hotkey("cmd+shift+space"),
         "paneldir" => crate::global::set_directory_default(),
-        key @ ("key" | "preview" | "classic_enter" | "update") => {
+        key @ ("key" | "preview" | "classic_enter" | "update" | "fallbacks") => {
             remove_pref(key)?;
             let default = match key {
                 "key" => DEFAULT_KEY,
                 "preview" => "on",
                 "update" => DEFAULT_UPDATE,
+                "fallbacks" => DEFAULT_FALLBACKS,
                 _ => "per kind",
             };
             let shown = format!("{key} restored to {default}");
@@ -1841,6 +1934,28 @@ fn checks() -> Vec<Check> {
                 }
             }
         }
+    }
+    // Syntax passed and the keyword still names nothing that can take a query.
+    // Only resolvable here, against `quicklinks.toml`, and worth saying: the
+    // setting looks saved and does nothing, which is the shape this file is
+    // meant to make impossible.
+    let (good, bad) = fallback_state();
+    for key in bad {
+        out.push(Check {
+            severity: "warning",
+            setting: "fallbacks".into(),
+            message: format!("“{key}” is not a quicklink that takes a {{q}}; it is skipped"),
+        });
+    }
+    if good.is_empty() {
+        out.push(Check {
+            severity: "warning",
+            setting: "fallbacks".into(),
+            message: format!(
+                "nothing in the list works; the built-in {} search is used instead",
+                crate::compute::WEB_SEARCH_NAME
+            ),
+        });
     }
     for (key, variable) in [("key", "PRELUDE_KEY")] {
         if let Some(value) = env(variable) {
@@ -2137,7 +2252,9 @@ mod tests {
         let mut rows = items();
         rows.sort_by(crate::cache::by_rank);
         let keys: Vec<&str> = rows.iter().map(|item| item.get("setting")).collect();
-        assert_eq!(&keys[..4], &["roots", "index", "hotkey", "paneldir"]);
+        // `fallbacks` joins the Search group, after the index and before the
+        // Launcher rows: it is what an unanswerable *search* answers with.
+        assert_eq!(&keys[..4], &["roots", "index", "fallbacks", "hotkey"]);
         assert_eq!(rows[0].get("edit"), EDIT_MANAGE_ROOTS);
         assert_eq!(rows[0].title, "Search folders");
         assert_eq!(rows[0].fields[1], "choose where file and folder search looks");
@@ -2160,6 +2277,7 @@ mod tests {
             ("preview", "Set off", "Set on", false, false),
             ("enter", "Per kind", "Copy everything", false, false),
             ("update", "Previous mode", "Next mode", false, false),
+            ("fallbacks", "Reset default", "Change…", false, true),
             ("openwith", "Remove one…", "Add one…", true, true),
             ("snippets", "Remove one…", "Add one…", true, true),
             ("quicklinks", "Remove one…", "Add one…", true, true),

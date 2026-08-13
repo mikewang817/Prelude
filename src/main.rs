@@ -714,14 +714,19 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
 /// way when something did. Emitted after the catalogue, `--tiebreak=index`
 /// keeps it below every row that scored the same.
 fn web_search(q: &str, cols: usize, tw: Option<usize>, general: bool) {
-    if let Some(row) = compute::web_search_row(q) {
-        let rendered = if general {
-            render::render_general(&[row], cols)
-        } else {
-            render::render_with(&[row], cols, None, tw)
-        };
-        println!("{rendered}");
+    let rows = compute::fallback_rows(q);
+    if rows.is_empty() {
+        return;
     }
+    // Rendered together so the shared column widths are computed once over the
+    // whole block, rather than each provider measuring itself into a different
+    // column from the one beside it.
+    let rendered = if general {
+        render::render_general(&rows, cols)
+    } else {
+        render::render_with(&rows, cols, None, tw)
+    };
+    println!("{rendered}");
 }
 
 /// Scriptable copy helper retained for tools and tests. The interactive
@@ -1385,7 +1390,10 @@ mod tests {
     /// to be there.
     #[test]
     fn any_query_can_be_taken_to_the_web() {
-        use crate::compute::{web_search_row_from as row, QUICKLINKS_DEFAULT as DEFAULTS};
+        use crate::compute::{fallback_rows_from, QUICKLINKS_DEFAULT as DEFAULTS, WEB_SEARCH_KEY};
+        // The default list is one keyword. Every assertion below is unchanged;
+        // only the door is, because there can now be more than one row.
+        let row = |text: &str, q: &str| fallback_rows_from(text, WEB_SEARCH_KEY, q).into_iter().next();
         use crate::item::Kind;
         let it = row(DEFAULTS, "git commit").expect("an ordinary query reaches the web");
         assert_eq!(it.kind, Kind::Link, "an object acts; it is not handed over as text");
@@ -1414,7 +1422,8 @@ mod tests {
     /// configuration. Deleting the keyword does not delete the fallback.
     #[test]
     fn the_always_on_web_search_follows_the_keyword_the_person_owns() {
-        use crate::compute::web_search_row_from as row;
+        use crate::compute::{fallback_rows_from, WEB_SEARCH_KEY};
+        let row = |text: &str, q: &str| fallback_rows_from(text, WEB_SEARCH_KEY, q).into_iter().next();
         let mine = "[g]\nname = \"Kagi\"\nurl = \"https://kagi.com/search?q={q}\"\n";
         let it = row(mine, "rust async").unwrap();
         assert_eq!(it.get("url"), "https://kagi.com/search?q=rust%20async");
@@ -1423,6 +1432,45 @@ mod tests {
         let none = "[notes]\nkind = \"folder\"\ntarget = \"~/notes\"\n";
         let it = row(none, "rust async").unwrap();
         assert_eq!(it.get("url"), "https://www.google.com/search?q=rust%20async");
+    }
+
+    /// A list of fallbacks is a list of *providers*, in the person's order.
+    ///
+    /// The property that must hold for every one of them, not just the first,
+    /// is that the row displays the query: fzf matches displayed text, so a
+    /// second provider titled anything else is invisible to the query that
+    /// computed it. And the list can never resolve to nothing — that is the
+    /// whole reason this row exists.
+    #[test]
+    fn fallbacks_are_providers_in_the_persons_order_and_cannot_resolve_to_none() {
+        use crate::compute::{fallback_rows_from as rows, QUICKLINKS_DEFAULT as D};
+
+        let two = rows(D, "ddg, g", "git commit");
+        assert_eq!(two.len(), 2);
+        assert!(two[0].fields[0].contains("DuckDuckGo"), "the person's order is kept");
+        assert!(two[1].fields[0].contains("Google"));
+        for row in &two {
+            assert_eq!(row.title, "git commit", "every provider displays the query");
+            assert!(row.get("url").contains("git%20commit"));
+        }
+
+        // A keyword named twice is one provider; whitespace separates as well
+        // as a comma, because a person writing a list does both.
+        assert_eq!(rows(D, "g,  g   ddg", "x").len(), 2);
+
+        // A fixed target has nowhere to put the query, so it is not a
+        // provider — and a list of nothing but those still answers.
+        let fixed = "[notes]\nkind = \"folder\"\ntarget = \"~/notes\"\n";
+        let only = rows(fixed, "notes", "x");
+        assert_eq!(only.len(), 1);
+        assert!(only[0].get("url").starts_with("https://www.google.com/search"));
+        assert_eq!(rows(D, "zznosuchkeyword", "x").len(), 1);
+        assert_eq!(rows(D, "", "x").len(), 1);
+
+        // A scope is a person saying where to look, however many providers
+        // are configured.
+        assert!(rows(D, "g, ddg", "f: readme").is_empty());
+        assert!(rows(D, "g, ddg", "").is_empty());
     }
 
     /// Ctrl+R spent decades meaning "search my shell history", and the
