@@ -47,14 +47,20 @@ rediscover them every pass:
 | P1b | Fallbacks are an ordered, configurable list | **done** |
 | P3 | The alias shows on the row, and has a manager | **done** |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
-| P8 | A trashed object says where it went, and offers the way back | todo |
 | P4a | Launch with a query already typed | spike |
 | P4b | A chord per command | spike |
 | P5 | `prelude://` deeplinks | spike |
 
-Suggested order is the table's. P2/P3 are one feature in two halves. The three
-spikes are one question wearing three hats and are answered together or not at
-all; see below.
+**This track has no `todo` left.** Six items were built or already held, two
+were struck, and the three that remain are one question wearing three hats:
+whether Prelude gets to be something macOS can deliver a URL to. That answer
+is not the loop's to invent, so `parity-loop` has nothing to pick here until
+somebody decides it. A next track — the extension model, or something else
+off the out-of-scope list — needs its own scorecard written the way this one
+should have been: from observed behaviour, never from an absence.
+
+P2/P3 were one feature in two halves. The three spikes are answered together
+or not at all; see below.
 
 ### Struck
 
@@ -80,6 +86,39 @@ instead, which is why neither was wrong.
 Nothing was implemented for it, and no test was added. The invariant it was
 groping at — every level names the row — is held structurally by the levels
 sharing one `title` local, and a test over that would be a test of `format!`.
+
+**P8 — "a trashed object says where it went, and offers the way back".** Both
+halves already hold.
+
+*Saying where it went*: all three destructive paths print the exact
+destination, because `paths::trash` returns it and every caller uses it —
+`moved to ~/.Trash/Chrome.app` for a file or application, the same for a
+native Session, and `review deleted — now in ~/.Trash/review` for a Skill
+copy. Each confirmation already puts Cancel first and already names the
+destination and the consequence: *recoverable from Finder*. And the message
+reaches a person on **both** entry points, which is the part that could have
+been half-true: the panel prints it and holds for `CONFIRM`, and the zsh
+widget uses `zle -M`, which sits below the prompt until the next keystroke.
+
+*The way back*: `~/.Trash` is already a first-class Folder object. Typing the
+path Prelude has just printed gives a row whose Enter opens it in Finder, with
+Reveal, Copy path and Open terminal here beside it — and since P2 it can be
+given a name, and since before that a Quicklink keyword.
+
+The proposed `show-trash` action was refused rather than built, and that is
+the part worth keeping. It would put a *global* destination-opener on every
+deletable row, present before anything had been deleted and unrelated to the
+row carrying it. Every other entry in `actions_for` is about the item it is
+on. Raycast's toast-with-undo has a weaker guarantee than what is already
+here: an undo that expires, against a Trash that does not.
+
+The misreading is the same shape P6 was struck for — an item asserting
+something is *missing*, written from a grep instead of from the call sites.
+Both were authored in the same sitting, before either had been tested, so
+this is one original error found twice rather than a lesson ignored. Of the
+ten items on this scorecard, the two that were wrong were the two phrased as
+absences; the six that survived were phrased as observed behaviour. That is
+the rule to carry into any future scorecard.
 
 ---
 
@@ -287,22 +326,6 @@ application favourite it had no way to add, which is half a collection.
 
 **Check**: app and link rows offer `favorite`.
 
-## P8 — say where it went · todo
-
-**Raycast**: a toast after a destructive action, with undo.
-
-**Prelude now**: `ui::confirm` puts Cancel first, and `paths::trash` moves to
-`~/.Trash` rather than unlinking, uniquifying rather than overwriting. So the
-undo already exists — macOS owns it. What is missing is being told, and a way
-back to it.
-
-**The shape of the answer**: the confirmation names the destination, and the
-row's `^K` grows a `show-trash`. Not a new undo mechanism: building one would
-mean Prelude retaining what it moved, which is a worse answer than the one the
-system already gives.
-
-**Check**: an app row offers `show-trash`.
-
 ## P10 — the object chords hold · done
 
 `ui::object_of` answers once — the path, and whether it is a directory — and
@@ -310,9 +333,11 @@ all three chords plus their footer labels read that one answer. Session and
 skill rows carry them; an agent CLI has no object that is *theirs* and carries
 none.
 
-This is the regression guard under everything above it. P3 renders into a
-column, P7 adds an action, P8 adds another: each is one careless change away
-from the footer advertising a chord that does nothing.
+This is the regression guard under everything above it. P3 renders into the
+detail column and P7 adds an action, and either is one careless change away
+from the footer advertising a chord that does nothing. This sentence has now
+been rewritten twice because it named items that were later struck; name the
+work, not the item numbers, if it needs rewriting again.
 
 ---
 

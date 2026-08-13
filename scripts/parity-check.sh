@@ -247,15 +247,10 @@ check_P7() {
     [ -z "$missing" ] || { echo "no favorite action on:$missing"; return 1; }
 }
 
-# ------------------------------------------------------- P8  where things went
-
-# Prelude's one destructive class already *is* an undo — `paths::trash` moves
-# rather than unlinks. What is missing is saying so, and a way back.
-check_P8() {
-    r=$(row app)
-    [ -n "$r" ] || { echo "no app row to probe"; return 1; }
-    action_ids "$r" | grep -qx 'show-trash' || { echo "no 'show-trash' action"; return 1; }
-}
+# P8 was struck. It claimed a trashed object does not say where it went and
+# offers no way back; all three trash paths already print the destination, and
+# `~/.Trash` is already an openable Folder object. See "Struck" in
+# docs/PARITY.md.
 
 # ------------------------------------------------- P10  the object chords hold
 
@@ -287,7 +282,6 @@ item P4a spike "Launch with a query already typed — nothing can reveal the pan
 item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
 item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"
 item P7  done  "Pin an app or a quicklink, inside its band"
-item P8  todo  "A trashed object says where it went, and offers the way back"
 item P10 done  "Object chords appear on object rows and nowhere else"
 
 printf '\n  %d pass · %d fail · %d todo · %d ready · %d spike\n' \
