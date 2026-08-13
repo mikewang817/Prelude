@@ -229,7 +229,11 @@ runtime comes through it, so a row and the behaviour cannot disagree.
 
 Six settings own a file each and are written by the code that owns that file —
 `roots.txt`, `global.toml`, `open.toml`, `snippets.toml`, `quicklinks.toml`,
-`favorites.txt`. Do not write any of them from here; a chord goes through
+`favorites.txt`. `aliases.txt` is owned the same way, by `aliases.rs`, and is
+the one owned file with no settings row yet: it can be built from
+`prelude alias` and not seen in the launcher, which is the gap `ql:` was made
+to close for quicklinks and is recorded against P3 in `docs/PARITY.md`. Do not
+write any of them from here; a chord goes through
 `global::set_hotkey` so it gets the same validation, conflict check and panel
 restart the CLI performs. The four that had only an environment variable get
 `settings.toml`, and **the variable still wins** — a variable is a
@@ -954,10 +958,14 @@ does not.
 
 **fzf matches against displayed text.** A row computed *from* the query can
 never fuzzy-match it, so `is_special()` recognizes intent and must not
-calculate, shell out or use the network — it runs on every keystroke. Exact
-Quicklink aliases are the one tiny config lookup, because aliases outrank
-fuzzy matches. `{}` in a binding is the *transformed* text, so bindings use
-`{2}` to reach the payload.
+calculate, shell out or use the network — it runs on every keystroke. Two tiny
+config lookups are admitted, both because an exact name outranks a fuzzy match
+and neither can be answered any later: an exact Quicklink key, and an exact
+alias in `aliases.txt`. Both are memoised per process, which is per keystroke —
+`_dynamic` is a fresh process every time — so what is admitted is one open and
+parse of a small file, measured at +0.14ms on a 17ms keystroke. A third would
+need the same measurement, not the same argument. `{}` in a binding is the
+*transformed* text, so bindings use `{2}` to reach the payload.
 
 **Layout must be computed once and passed down.** The per-keystroke helper
 runs in a separate process. If both sides measure their own widths they drift,

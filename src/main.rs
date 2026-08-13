@@ -6,6 +6,7 @@
 
 mod actions;
 mod agent;
+mod aliases;
 mod ansi;
 mod archive;
 mod bus;
@@ -197,6 +198,7 @@ fn main() -> ExitCode {
         ["quicklink", rest @ ..] | ["quicklinks", rest @ ..] | ["ql", rest @ ..] => {
             compute::quicklink_cli(rest)
         }
+        ["alias", rest @ ..] | ["aliases", rest @ ..] => aliases::cli(rest),
         ["skills", rest @ ..] => {
             json_dump(sources::agents::skills(), rest.contains(&"--json"))
         }
@@ -439,6 +441,9 @@ HUMANS
   prelude settings get KEY | set KEY VALUE | reset KEY|all
   prelude settings check [--json] | path [KEY]
   prelude settings add-root PATH | remove-root PATH | roots
+  prelude alias [list] | add KEY NAME | remove KEY
+                         name an Agent, Skill, MCP server, app or quicklink;
+                         typing the name goes straight to it
   prelude doctor agents|sessions|skills|mcp
                          what is wrong with the agent side of the machine
                          --json for fields · --repair asks about each finding

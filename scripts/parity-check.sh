@@ -127,11 +127,19 @@ check_P1b() {
 check_P2() {
     "$PRELUDE" alias list >/dev/null 2>&1 || { echo "no 'alias' verb"; return 1; }
     for taken in "f:" "claude" ; do
-        if "$PRELUDE" alias add "$taken" whatever >/dev/null 2>&1; then
+        why=$("$PRELUDE" alias add "$taken" zzqqnosuchobject 2>&1)
+        if [ $? -eq 0 ]; then
             echo "accepted a reserved alias: $taken"
             "$PRELUDE" alias remove "$taken" >/dev/null 2>&1
             return 1
         fi
+        # The refusal has to be about the *name*. Exit status alone passed
+        # while the target was resolved first and the key never examined —
+        # right answer, wrong question, and the check could not tell.
+        case "$why" in
+            *"$taken"*) ;;
+            *) echo "refused $taken without naming it: $why"; return 1 ;;
+        esac
     done
 }
 
@@ -211,8 +219,8 @@ printf '\033[1mRaycast parity — interaction polish\033[0m\n\n'
 
 item P1a done  "Fallback row: is the query, survives, absent in a scope"
 item P1b todo  "Fallbacks are an ordered, configurable list"
-item P2  todo  "Alias any row, refused at the moment of naming"
-item P3  todo  "The alias shows on the row it belongs to"
+item P2  done  "Alias a stable object, refused at the moment of naming"
+item P3  todo  "The alias shows on the row, and has a manager"
 item P4a spike "Launch with a query already typed — nothing can reveal the panel"
 item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
 item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"

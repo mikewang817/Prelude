@@ -118,6 +118,12 @@ Favorites can promote Agent, Skill, and MCP ones, and only within their band.
 Favorites are not an Agent feature and cover stable objects outside this
 document too; `favorites.rs` is the whole list.
 
+An Agent, Skill or MCP server can also be given a name in `aliases.txt`, which
+stores that same object key and resolves it against the catalogue as it is
+typed. A built-in Agent's own name is refused as an alias, because an installed
+Agent already leads it and the alias would push that row down. Aliases write no
+Agent data and are not part of any Agent's inventory; `aliases.rs` owns them.
+
 The named root commands—Agent Control Center, Running Agents, Past
 Conversations, Skills, MCP Servers, and Agent Config—make these views
 reachable without knowing a prefix first.

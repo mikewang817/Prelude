@@ -43,9 +43,9 @@ rediscover them every pass:
 |---|---|---|
 | P1a | Fallback row: is the query, survives, absent in a scope | **done** |
 | P10 | Object chords appear on object rows and nowhere else | **done** |
+| P2 | Alias a stable object, refused at the moment of naming | **done** |
 | P1b | Fallbacks are an ordered, configurable list | todo |
-| P2 | Alias any row, refused at the moment of naming | todo |
-| P3 | The alias shows on the row it belongs to | todo |
+| P3 | The alias shows on the row, and has a manager | todo |
 | P7 | Pin an app or a quicklink, inside its band | **done** |
 | P8 | A trashed object says where it went, and offers the way back | todo |
 | P4a | Launch with a query already typed | spike |
@@ -116,32 +116,51 @@ still has to display the query, which means a fallback list is a list of
 **Check**: `settings get fallbacks` parses, and the row count for an
 unmatchable query equals the configured count.
 
-## P2 — alias any row · todo
+## P2 — alias a stable object · done
 
 **Raycast**: any command can be given a short alias; typing it goes straight
 there.
 
-**Prelude now**: only a quicklink has a key. `is_special` resolves an exact
-key ahead of the catalogue and `quicklink_with_neighbours` keeps the
-catalogue underneath it. Nothing else — a scope, an app, a skill, a session —
-can be named.
+**What was built**: `aliases.rs`, an `aliases.txt` of `alias<TAB>object key`
+where the key is exactly what `favorites::key` writes, so the two files speak
+one vocabulary and neither knows the other's format. `aliases::target_of` sits
+beside the quicklink exact-key lookup in `is_special` and `needs_static_items`,
+and `compute::alias_rows` resolves the key against the catalogue.
 
-**The shape of the answer**: an `aliases.txt` of `alias → object key`, a
-sibling of `favorites.txt` and built on the same stable object keys, which
-already exist for Agent, Skill and MCP and are what P7 extends to the rest.
-Resolution sits beside the quicklink exact-key path, not on top of it, and
-must not calculate or shell out — it runs on every keystroke.
+The title changed from "any row". `favorites::key` answers for the objects
+with an identity that outlives a gather — an Agent, a Skill, an MCP server, an
+application, a saved Quicklink. A session, a file and a history entry have no
+such identity, and naming one would mean storing a path in this file. Raycast
+can alias anything because everything it lists is a command it defined;
+Prelude lists the machine, and most of the machine has no stable name.
 
-Refusal happens **at the moment of naming**, on the three grounds
-`quicklink_conflict` already refuses: a scope prefix, a name another entry
-carries, and a duplicate. That is not tidiness — an alias accepted and then
-silently unreachable is the failure mode CLAUDE.md records for `[f]`. Keys
-accept letters and digits of any script.
+**Refusal happens at the moment of naming**, through `aliases::vet`, and every
+caller goes through it *before* looking at the target. Four grounds: the key
+itself (`normalize_quicklink_key` excludes `:` `/` `@` `.` and accepts letters
+and digits of any script), a scope command, a built-in Agent's own name, a
+keyword a Quicklink already carries, and a duplicate.
+
+An alias whose object is absent from this gather resolves to nothing and falls
+through to ordinary search, rather than standing in for an application that
+has been uninstalled.
+
+**Cost**: one memoised open and parse of a small file per process, which is
+per keystroke. Measured by interleaving both binaries in one run rather than
+in blocks — measured in blocks the machine's own drift was several times the
+effect. Δp50 −0.02ms, +0.14ms, +0.04ms over three queries.
 
 **Check**: `prelude alias list` works, and `alias add f:` and `alias add
-claude` are both refused.
+claude` are both refused *by name*.
 
-## P3 — the alias shows on the row · todo
+The check was tightened while this item was being built, and the reason is
+worth keeping. It asserted only a non-zero exit, and the first implementation
+satisfied it while resolving the target first and never examining the key —
+the refusal said "nothing here is called *whatever*", which is true, useless,
+and about the wrong half. Right answer, wrong question, and a check reading
+exit status alone could not tell. It now requires the refusal to name the key,
+which is the behaviour the item is actually about.
+
+## P3 — the alias shows on the row, and has a manager · todo
 
 **Raycast**: the alias renders on its row, so you learn it by seeing it.
 
@@ -150,7 +169,17 @@ claude` are both refused.
 **The shape of the answer**: into `fields`, which the flexible column already
 carries — not a sixth column. Column widths are shared across all kinds and
 taken at a percentile; a new column for a field almost no row has would move
-the dots for two thousand rows.
+the dots for two thousand rows. `alias_rows` should then dedupe on the alias
+as well as on `(kind, cmd)`, the way `quicklink_with_neighbours` dedupes on
+its key, once there is a marker to dedupe on.
+
+**P2 left a second half here deliberately.** `aliases.txt` is the only file
+`settings.rs` lists as owned that has no settings row, so a person can build a
+set of aliases from the CLI and have no way to see them in the launcher. That
+is exactly the state `ql:` was built to end — "the only way to answer *what
+quicklinks do I have* was to open the TOML" — and it should not outlive this
+item. What is needed is the Favorites row's shape: a count, `←` remove, `→`
+add, and Enter opening a real manager.
 
 **Check**: at least one root row's payload carries `alias`.
 

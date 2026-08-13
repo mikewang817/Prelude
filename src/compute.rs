@@ -1562,6 +1562,37 @@ pub(crate) fn quicklink_with_neighbours(exact: Item, q: &str, static_items: &[It
     rows
 }
 
+/// The object an exactly-typed alias names, leading the rows that still match.
+///
+/// The same two rules as `quicklink_with_neighbours`, for the same reason: an
+/// exact name leads the list, and it does not clear the room — the catalogue
+/// underneath keeps whatever else the letters match, so completing a name
+/// never deletes a candidate that was on screen a keystroke ago.
+///
+/// An alias whose object is not in this gather resolves to nothing and the
+/// query falls through to ordinary search. That is deliberate: the alternative
+/// is a row standing in for an application that has been uninstalled, and a
+/// launcher that shows what is not there is worse than one that shows less.
+/// `alias:` is where a name with nothing behind it should be explained, and
+/// that screen does not exist yet.
+fn alias_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
+    let target = crate::aliases::target_of(q)?;
+    let exact = static_items
+        .iter()
+        .find(|it| crate::favorites::key(it).as_deref() == Some(target.as_str()))?
+        .clone();
+    let same = (exact.kind, exact.cmd.clone());
+    let mut rows = vec![exact];
+    rows.extend(
+        root_items(static_items)
+            .into_iter()
+            .filter(|it| (it.kind, it.cmd.clone()) != same)
+            .filter(|it| matches_terms(it, q))
+            .take(50),
+    );
+    Some(rows)
+}
+
 fn exact_quicklink_item(q: &str) -> Option<Item> {
     let text = quicklinks_text();
     if exact_quicklink_key_from(&text, q) {
@@ -1698,6 +1729,10 @@ pub fn needs_static_items(q: &str) -> bool {
         // with it. This is a config read on the handful of keystrokes that
         // complete a keyword, not on every keystroke.
         || exact_quicklink_item(t).is_some()
+        // A named object needs it for a stronger reason: a quicklink stores
+        // its target beside the key, but an alias stores only an identity and
+        // the row itself lives in the catalogue.
+        || crate::aliases::target_of(t).is_some()
 }
 
 fn skill_prefix_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
@@ -3008,6 +3043,13 @@ pub fn is_special(q: &str) -> bool {
     if exact_quicklink_item(t).is_some() {
         return true;
     }
+    // Beside the quicklink lookup and not on top of it: the two vocabularies
+    // cannot collide, because `aliases::conflict` refuses a name a quicklink
+    // already carries at the moment it is typed. One memoised read of a small
+    // file, on the same terms the quicklink lookup is admitted here.
+    if crate::aliases::target_of(t).is_some() {
+        return true;
+    }
     if translate_query(t).is_some() {
         return true;
     }
@@ -3061,6 +3103,9 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
     }
     if let Some(item) = exact_quicklink_item(q) {
         return quicklink_with_neighbours(item, q, static_items);
+    }
+    if let Some(rows) = alias_rows(q, static_items) {
+        return rows;
     }
     if let Some(url) = web_url(q) {
         rows.push(
