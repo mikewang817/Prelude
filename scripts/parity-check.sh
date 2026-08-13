@@ -242,6 +242,19 @@ check_P5() {
     ln _open-url --dry-run 'prelude://run?alias=zzlinkapp' >/dev/null 2>&1 ||
         { echo "a named application is not reachable by link"; return 1; }
 
+    # And still reachable with copy-everything on. `classic_enter` is a
+    # preference about what the *launcher's* Enter does; read through
+    # `on_enter` it made every deeplink refuse for anybody who had turned it
+    # on — safe, and silently dead. A unit test cannot see this, because
+    # `settings::prefs` is hard-coded to its defaults under `cfg(test)`.
+    # `on` rather than "copy everything": `settings get enter` prints the
+    # latter and `set` does not accept it, which is a round-trip defect of its
+    # own and not this check's to assert.
+    ln settings set enter on >/dev/null 2>&1 ||
+        { echo "could not set copy-everything"; return 1; }
+    ln _open-url --dry-run 'prelude://run?alias=zzlinkapp' >/dev/null 2>&1 ||
+        { echo "copy-everything makes every link refuse"; return 1; }
+
     # A URL is untrusted input. Each of these must refuse, and the first one is
     # the security boundary rather than a typo guard: a Skill's Enter hands
     # text over, and a web page must not be able to cause that.

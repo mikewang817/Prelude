@@ -228,8 +228,12 @@ fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
 /// page gets to cause.
 fn may_be_linked(item: &crate::item::Item) -> bool {
     use crate::defaults::{Default_, Verb};
+    // `by_kind`, not `on_enter`: `classic_enter` is a preference about what
+    // the *launcher's* Enter does, and this has no launcher and no clipboard.
+    // Read through `on_enter` it made every deeplink refuse for anybody who
+    // had turned copy-everything on — safe, and silently dead.
     matches!(
-        crate::defaults::on_enter(item),
+        crate::defaults::by_kind(item),
         Default_::Act(Verb::Open) | Default_::Act(Verb::Launch) | Default_::Act(Verb::OpenUrl)
     )
 }
@@ -306,7 +310,7 @@ fn act_on(url: &str, dry: bool) -> i32 {
                 println!("would open {} ({})", item.title, item.style().1);
                 return 0;
             }
-            crate::ui::perform(item, crate::defaults::on_enter(item))
+            crate::ui::perform(item, crate::defaults::by_kind(item))
         }
         "" => refuse("that prelude:// link says nothing to do"),
         // The verb is not repeated back. It is arbitrary text from a web page,

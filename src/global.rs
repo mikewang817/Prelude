@@ -506,6 +506,7 @@ pub fn restart_panel() -> Result<String, String> {
         return Err("the launcher panel is not installed; run `prelude global install`".into());
     }
     ensure_terminal_bindings()?;
+    ensure_link_handler();
     // A rebuild can change both the parent loop and Prelude-owned Ghostty
     // bindings. Refresh while the old panel is still healthy, then replace it.
     write_quick_config(&quick_config_path())?;
@@ -911,6 +912,9 @@ pub fn refresh_panel_config_if_changed() -> Result<bool, String> {
         return Ok(false);
     }
     let terminal_changed = ensure_terminal_bindings()?;
+    // Not part of `terminal_changed`: a handler appearing is not a Ghostty
+    // configuration change and needs no reload.
+    ensure_link_handler();
     let body = generated_quick_config()?;
     if std::fs::read(&destination).ok().as_deref() == Some(body.as_bytes()) {
         return Ok(terminal_changed);
@@ -1177,8 +1181,39 @@ fn ensure_global_key_ready() -> Result<(), String> {
     }
 }
 
+
+/// Should this machine build a `prelude://` handler right now?
+///
+/// Pure so the two ways of getting it wrong stay pinned. Rebuilding one that
+/// exists would run `osacompile` and `lsregister` on every `global start`, for
+/// a bundle that is already correct — an update swaps the binary at the same
+/// path, so a handler that exists still points at the right place. And
+/// building one for a machine with no panel would register a URL scheme on
+/// behalf of somebody who never asked for the launcher.
+fn link_handler_wanted(panel_installed: bool, handler_present: bool) -> bool {
+    panel_installed && !handler_present
+}
+
+/// Generate the handler if an existing installation has none.
+///
+/// `install` always regenerates; this is for the paths an installation that is
+/// *already there* goes through. Without it the scheme ships and is invisible
+/// to everybody who already had Prelude: `update` swaps the binary and then
+/// asks the new one to regenerate Ghostty's config and restart the panel, and
+/// none of that would ever create the bundle. The feature would work only for
+/// people installing for the first time.
+///
+/// Degrades to nothing. A panel that starts without a URL scheme is better
+/// than one that refuses to start over it.
+fn ensure_link_handler() {
+    if link_handler_wanted(quick_config_path().is_file(), crate::link::installed()) {
+        let _ = crate::link::install();
+    }
+}
+
 fn start_current() -> Result<(), String> {
     ensure_terminal_bindings()?;
+    ensure_link_handler();
     if quick_config_path().is_file() {
         write_quick_config(&quick_config_path())?;
     }
@@ -1769,6 +1804,20 @@ pub fn dispatch(args: &[&str]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    /// The two ways of getting the upgrade path wrong, and they pull opposite
+    /// ways: rebuild too eagerly and every `global start` pays `osacompile`
+    /// and `lsregister` for a bundle that was already right; guard too hard
+    /// and the scheme ships invisible to everybody who already had Prelude,
+    /// because `update` regenerates Ghostty's config and restarts the panel
+    /// and never once creates it.
+    #[test]
+    fn a_link_handler_is_built_for_an_existing_panel_and_only_when_missing() {
+        assert!(link_handler_wanted(true, false), "an existing panel with no handler gets one");
+        assert!(!link_handler_wanted(true, true), "one that is there is not rebuilt");
+        assert!(!link_handler_wanted(false, false), "no panel means no URL scheme");
+        assert!(!link_handler_wanted(false, true));
+    }
+
     use super::*;
 
     fn temp(name: &str) -> PathBuf {

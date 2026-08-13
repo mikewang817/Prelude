@@ -94,16 +94,33 @@ pub enum Verb {
 
 /// The one place that decides what Enter means.
 pub fn on_enter(item: &Item) -> Default_ {
-    use Default_::*;
-    use Kind::*;
     // Settings are controls, not payload. Making `copy everything` copy
     // `set:roots` instead of opening its manager made the very screen that can
     // turn the preference off unusable. Control-plane rows always act.
-    if item.kind == Setting {
-        return Act(Verb::EditSetting);
+    if item.kind == Kind::Setting {
+        return Default_::Act(Verb::EditSetting);
     }
     if crate::settings::classic_enter() {
-        return Insert;
+        return Default_::Insert;
+    }
+    by_kind(item)
+}
+
+/// What this row is, before anybody's preference about Enter is applied.
+///
+/// `classic_enter` says what the *launcher's* Enter does, and a caller with no
+/// launcher and no clipboard in front of it must not be governed by it.
+/// `prelude://` is the case: asking `on_enter` there meant that turning on
+/// copy-everything silently made every deeplink refuse, because every row's
+/// answer had become "hand it over" — a feature dead for a whole class of
+/// people, and quietly.
+///
+/// Split out rather than restated, so there is still one table.
+pub fn by_kind(item: &Item) -> Default_ {
+    use Default_::*;
+    use Kind::*;
+    if item.kind == Setting {
+        return Act(Verb::EditSetting);
     }
     // Starting an agent with a prompt is a request for an answer, not for a
     // command to review. Run it here and show what it says. Resuming an
@@ -176,7 +193,7 @@ pub fn on_enter(item: &Item) -> Default_ {
 
         // A setting's row already states its value, so Enter is the change
         // rather than another look at it.
-        Setting => unreachable!("settings return before the payload policy"),
+        Setting => unreachable!("settings return above, before the payload policy"),
 
         // A folder is an object like a file: Finder is the harmless default.
         // `cd` remains the first explicit alternative in ^K.
