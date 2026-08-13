@@ -1,6 +1,6 @@
 ---
 description: Run one iteration of the Raycast-parity loop — pick the topmost unmet item, implement it, verify, review against the invariants, promote, commit.
-argument-hint: "[item id, e.g. P6 — omit to take the topmost todo]"
+argument-hint: "[item id, e.g. P7 — omit to take the topmost todo]"
 ---
 
 Run **one** iteration of the parity loop. One item, start to finish. Do not
@@ -18,6 +18,12 @@ Two things end the loop rather than starting an iteration:
   iteration: fix it, verify, commit, stop. Promote nothing while one is red.
 - **An item is READY** — passing while marked `todo`. Promote it in both
   `scripts/parity-check.sh` and `docs/PARITY.md`, commit that alone, stop.
+
+A third ending is found mid-iteration rather than at the start: the item turns
+out **not to be a gap**. Strike it per §3 — check and section together, with
+the misreading named — record it under `Struck` in `docs/PARITY.md`, commit
+that alone, stop. Do not invent work to justify the row, and do not add a test
+for an invariant the code already holds structurally.
 
 Never touch a `spike`. Its note in `docs/PARITY.md` says what would unblock
 it, and that answer is not yours to invent mid-loop.

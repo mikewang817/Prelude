@@ -47,15 +47,38 @@ rediscover them every pass:
 | P2 | Alias any row, refused at the moment of naming | todo |
 | P3 | The alias shows on the row it belongs to | todo |
 | P4a | Launch with a query already typed | todo |
-| P6 | The action panel names the row it is acting on | todo |
 | P7 | Pin an app or a quicklink, inside its band | todo |
 | P8 | A trashed object says where it went, and offers the way back | todo |
 | P4b | A chord per command | spike |
 | P5 | `prelude://` deeplinks | spike |
 
-Suggested order is the table's: P6 and P7 are small and self-contained, P2/P3
-are one feature in two halves, P1b and P4a each open a door the spikes need
-later.
+Suggested order is the table's: P7 is small and self-contained, P2/P3 are one
+feature in two halves, P1b and P4a each open a door the spikes need later.
+
+### Struck
+
+An item removed because it turned out not to be a gap. Recorded rather than
+deleted, for the same reason the out-of-scope list is: so the next pass does
+not rediscover it.
+
+**P6 — "the action panel names the row it is acting on".** It does already.
+`panel()` builds the header as `Default: <verb> · Enter` and, two lines below,
+passes ` <title> · <kind> ` as the fzf border label, which `base_args` renders
+because `--border=rounded` and `--border-label-pos=3` are on every panel. The
+submenu reuses that same `title` local, and `apply` names the object again in
+any confirmation it raises. So the noun is stated at all three levels, already
+through `width::dtrunc` and `width::flatten`.
+
+The item was written after reading only the `header` variable and not the
+`label` argument under it. The lesson is not about this panel: a scorecard
+item asserting something is *missing* is the one shape that a quick grep can
+confirm and cannot refute, and it needs the call site read before it earns a
+row. The two `done` items were both written from an observed behaviour
+instead, which is why neither was wrong.
+
+Nothing was implemented for it, and no test was added. The invariant it was
+groping at — every level names the row — is held structurally by the levels
+sharing one `title` local, and a test over that would be a test of `format!`.
 
 ---
 
@@ -146,26 +169,6 @@ seeded from outside is not a reason for the answer to depend on who seeded it.
 
 **Check**: `prelude open --dry-run 'c:'` reports the query it would seed.
 
-## P6 — the action panel names the row · todo
-
-**Raycast**: the panel is titled with what you are acting on.
-
-**Prelude now**: `actions.rs:936` builds the header as `Default: <verb> ·
-Enter`. It states the verb and not the noun. You reach `^K` after typing a
-query and arrowing through results, and the panel that opens tells you what
-Enter does to a row it declines to name.
-
-**The shape of the answer**: the focused row's title in the header beside the
-default verb. The header is a line that cannot be selected, so this costs no
-row and no column. Mind the width: CLAUDE.md already records that a header
-long enough stops reading as a hint, and the title needs `width::dwidth`, not
-`len()`.
-
-This also needs an `_actions --header` door so the header can be read without
-standing up fzf — the reason every other internal door exists.
-
-**Check**: `_actions --header <session row>` contains that session's title.
-
 ## P7 — pin an app or a quicklink · todo
 
 **Raycast**: pin any result to the top.
@@ -211,8 +214,8 @@ skill rows carry them; an agent CLI has no object that is *theirs* and carries
 none.
 
 This is the regression guard under everything above it. P3 renders into a
-column, P6 edits the panel, P7 adds an action: all three are one careless
-change away from the footer advertising a chord that does nothing.
+column, P7 adds an action, P8 adds another: each is one careless change away
+from the footer advertising a chord that does nothing.
 
 ---
 

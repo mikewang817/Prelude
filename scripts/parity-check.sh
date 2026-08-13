@@ -152,19 +152,10 @@ check_P4a() {
 check_P4b() { echo "spike"; return 1; }
 check_P5()  { echo "spike"; return 1; }
 
-# ------------------------------------------------------------ P6  panel header
-
-# `^K` states the verb ("Default: Copy the command · Enter") and not the noun.
-# Needs an `_actions --header` door, for the reason every other door exists.
-check_P6() {
-    r=$(row session)
-    [ -n "$r" ] || { echo "no session row to probe"; return 1; }
-    title=$(printf '%s\n' "$r" | payload | jq -r .title)
-    head=$("$PRELUDE" _actions --header "$r" 2>/dev/null | strip_ansi) ||
-        { echo "no '_actions --header' door"; return 1; }
-    [ -n "$head" ] || { echo "empty header"; return 1; }
-    case "$head" in *"$title"*) ;; *) echo "header omits the row: $head"; return 1 ;; esac
-}
+# P6 was struck. It claimed the action panel names the verb and not the noun,
+# which was a misreading: `panel()` states the verb in the header and the row
+# on the border label two lines below, and every level under it reuses that
+# same title. See "Struck" in docs/PARITY.md.
 
 # ------------------------------------------------------------- P7  pin any row
 
@@ -223,7 +214,6 @@ item P3  todo  "The alias shows on the row it belongs to"
 item P4a todo  "Launch with a query already typed"
 item P4b spike "A chord per command — Ghostty global: binds run Ghostty actions"
 item P5  spike "prelude:// deeplinks — needs a bundle with CFBundleURLTypes"
-item P6  todo  "The action panel names the row it is acting on"
 item P7  todo  "Pin an app or a quicklink, inside its band"
 item P8  todo  "A trashed object says where it went, and offers the way back"
 item P10 done  "Object chords appear on object rows and nowhere else"
