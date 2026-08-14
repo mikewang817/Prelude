@@ -411,9 +411,19 @@ flag most of the launcher must not have.** The action panel is a modal over the
 list — fzf exits, the panel runs, and the `continue` starts fzf again — so `→`
 on the fifth row and `←` straight back used to put the cursor on the first, on
 a list whose whole point is that you had already found something in it.
-`run_fzf` therefore carries the selected line back out (the raw line, because
-rendering is lossy and two rows can parse alike), `position_in` finds it in the
-same feed, and `with_cursor` adds `--bind start:pos(N)` to the next launch.
+`run_fzf` therefore carries the selected line back out, `position_in` finds it
+in the same feed, and `with_cursor` adds `--bind start:pos(N)` to the next
+launch.
+
+**`position_in` matches on the payload, because `--ansi` means fzf does not
+give back what it was given.** It parses the colour codes out for display and
+prints the line *without* them, and every row here is coloured — so comparing
+whole lines found nothing, on every row, and said nothing about it. The first
+version of this fix shipped that way and behaved exactly like no fix at all.
+The payload is the right key regardless: it carries no colour, it is what every
+binding already addresses a row by (`{2}`), and it is the row's identity rather
+than its appearance. Measured, against the real feed: whole-line match `NONE`,
+payload match the row fzf's own `--listen` state reported the cursor on.
 **`--sync` is what makes `start` mean anything**: fzf consumes its input
 asynchronously, so without it `start` fires before the list exists and `pos()`
 lands on whichever handful of rows have arrived — a bug that would read as

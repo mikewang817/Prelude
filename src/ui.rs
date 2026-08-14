@@ -236,14 +236,27 @@ mod cursor_tests {
     /// in it.
     #[test]
     fn coming_back_from_a_modal_lands_on_the_row_you_left() {
-        let feed = "alpha\nbeta\ngamma\n";
-        assert_eq!(position_in(feed, "alpha"), Some(1), "pos() is one-based");
-        assert_eq!(position_in(feed, "gamma"), Some(3));
+        let row = |title: &str, cmd: &str| format!("{DIM}{title}{RESET}{SEP}{{\"cmd\":\"{cmd}\"}}");
+        let feed = format!("{}\n{}\n{}\n", row("alpha", "a"), row("beta", "b"), row("gamma", "c"));
+
+        // What fzf hands back, which is *not* what it was fed: `--ansi` means
+        // the colour codes are parsed for display and printed stripped. Every
+        // row here is coloured, so comparing whole lines found nothing, every
+        // time, without saying so.
+        let returned = |title: &str, cmd: &str| format!("{title}{SEP}{{\"cmd\":\"{cmd}\"}}");
+        assert_eq!(position_in(&feed, &returned("alpha", "a")), Some(1), "pos() is one-based");
+        assert_eq!(position_in(&feed, &returned("gamma", "c")), Some(3));
+        // And the fed form still resolves, so this does not depend on which
+        // of the two shapes reaches it.
+        assert_eq!(position_in(&feed, &row("beta", "b")), Some(2));
+
         // A row that is not in *this* feed — it came from a query that
         // rebuilt the list, and the list we are returning to is the home one.
         // No position is better than a wrong one.
-        assert_eq!(position_in(feed, "delta"), None);
-        assert_eq!(position_in(feed, ""), None);
+        assert_eq!(position_in(&feed, &returned("delta", "d")), None);
+        // A line with no payload at all is not a row.
+        assert_eq!(position_in(&feed, "alpha"), None);
+        assert_eq!(position_in(&feed, ""), None);
 
         let args = vec!["--ansi".to_string()];
         // The first launch is untouched: `--sync` would hold the finder until
@@ -258,8 +271,26 @@ mod cursor_tests {
 }
 
 /// Where a line sits in the feed, one-based, which is what `pos()` counts in.
+///
+/// Matched on the payload rather than the whole line, because **`--ansi` means
+/// fzf does not give back what it was given**: it parses the colour codes out
+/// for display and prints the line without them, so a rendered row — and every
+/// row here is coloured — can never be found by string equality. That failed
+/// silently, which is the worst shape available: no position, no error, and a
+/// cursor back at the top exactly as before the fix.
+///
+/// The payload is the right key anyway. It carries no colour, it is what every
+/// binding already addresses the row by (`{2}`), and it is the row's identity
+/// rather than its appearance.
 fn position_in(feed: &str, line: &str) -> Option<usize> {
-    feed.lines().position(|candidate| candidate == line).map(|at| at + 1)
+    let payload = payload_of(line)?;
+    feed.lines()
+        .position(|candidate| payload_of(candidate) == Some(payload))
+        .map(|at| at + 1)
+}
+
+fn payload_of(line: &str) -> Option<&str> {
+    line.split_once(SEP).map(|(_, payload)| payload)
 }
 
 /// The same arguments, plus a starting cursor when we are coming back to a
