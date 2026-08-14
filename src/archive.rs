@@ -39,7 +39,7 @@ fn file() -> PathBuf {
 /// Stable archive identity. A merged Skill is one object by name; every owner
 /// variant of one MCP server shares its normalized capability id.
 pub fn key(item: &Item) -> Option<String> {
-    matches!(item.kind, Kind::Skill | Kind::Mcp)
+    matches!(item.kind, Kind::Skill)
         .then(|| crate::favorites::key(item))
         .flatten()
 }
@@ -101,7 +101,7 @@ fn decorate_with(items: &mut [Item], archived: &BTreeSet<String>) {
     for item in items {
         if key(item).is_some_and(|key| archived.contains(&key)) {
             item.data.insert("archived".into(), "true".into());
-        } else if matches!(item.kind, Kind::Skill | Kind::Mcp) {
+        } else if matches!(item.kind, Kind::Skill) {
             item.data.remove("archived");
         }
     }
@@ -110,7 +110,7 @@ fn decorate_with(items: &mut [Item], archived: &BTreeSet<String>) {
 /// Default inventory surfaces put archived capabilities away. The complete
 /// gathered snapshot retains them so explicit archive scopes can restore them.
 pub fn visible(item: &Item) -> bool {
-    !matches!(item.kind, Kind::Skill | Kind::Mcp) || item.get("archived") != "true"
+    !matches!(item.kind, Kind::Skill) || item.get("archived") != "true"
 }
 
 #[cfg(test)]
@@ -122,18 +122,11 @@ mod tests {
         let skill = Item::new("/review", Kind::Skill)
             .put("name", "review")
             .put("dir", "/private/home/.claude/skills/review");
-        let first = Item::new("claude mcp get drive", Kind::Mcp)
-            .put("name", "Drive")
-            .put("capability_id", "mcp:drive")
-            .put("definition_public", "API_KEY=must-not-appear");
-        let second = Item::new("codex mcp get drive", Kind::Mcp)
-            .put("name", "Drive")
-            .put("capability_id", "mcp:drive");
         assert_eq!(key(&skill).as_deref(), Some("skill\treview"));
-        assert_eq!(key(&first).as_deref(), Some("mcp\tmcp:drive"));
-        assert_eq!(key(&first), key(&second), "owner variants are one capability");
-        let stored = format!("{}{}", key(&skill).unwrap(), key(&first).unwrap());
-        assert!(!stored.contains("/private") && !stored.contains("API_KEY"));
+        // The stored key is the name and nothing else: never the path a copy
+        // happens to live at, which is machine-specific and changes when a
+        // Skill moves.
+        assert!(!key(&skill).unwrap().contains("/private"));
         assert!(key(&Item::new("claude", Kind::Agent).put("agent", "claude")).is_none());
     }
 
@@ -176,21 +169,15 @@ mod tests {
     }
 
     #[test]
-    fn one_overlay_marks_every_mcp_owner_variant_and_only_that_skill() {
+    fn one_overlay_marks_the_named_skill_and_only_that_skill() {
         let mut items = vec![
             Item::new("/review", Kind::Skill).put("name", "review"),
             Item::new("/deploy", Kind::Skill).put("name", "deploy"),
-            Item::new("claude mcp get drive", Kind::Mcp)
-                .put("name", "Drive")
-                .put("capability_id", "mcp:drive"),
-            Item::new("codex mcp get drive", Kind::Mcp)
-                .put("name", "Drive")
-                .put("capability_id", "mcp:drive"),
         ];
-        let values = BTreeSet::from(["skill\treview".into(), "mcp\tmcp:drive".into()]);
+        let values = BTreeSet::from(["skill\treview".into()]);
         decorate_with(&mut items, &values);
-        assert_eq!(items.iter().filter(|item| item.get("archived") == "true").count(), 3);
+        assert_eq!(items.iter().filter(|item| item.get("archived") == "true").count(), 1);
         assert!(visible(&items[1]));
-        assert!(!visible(&items[0]) && !visible(&items[2]));
+        assert!(!visible(&items[0]));
     }
 }

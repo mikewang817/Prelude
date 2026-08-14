@@ -21,7 +21,7 @@ cargo clippy --release     # expected warning-free
 `_surface`, `_panel`, `_dump`, `_dump-root`, `_dump-all`, `_footer`, `_focus`, `_preview`,
 `_bind`, `_dynamic`, `_copy`, `_runhere`, `_ask`, `_enter`, `_hist`, `_tab`, `_refresh`,
 `_refresh-path`, `_refresh-panel-after-update`, `_restart-panel-after-update`, `_copy-skill`,
-`_rm-skill`, `_lend-skill`, `_lend-mcp`, `_actions` are internal entry points. They
+`_rm-skill`, `_actions` are internal entry points. They
 exist so behaviour can be tested without standing up a terminal — use them
 rather than trying to drive fzf.
 
@@ -204,6 +204,18 @@ ordinary apps should keep macOS's reuse semantics.
 
 ## Agent Control Plane work
 
+**MCP is gone, and so is capability borrowing.** Both were removed wholesale —
+`lend.rs`, `mcp_tools.rs`, `Kind::Mcp`, `Scope::Mcp`, the inventory source, the
+doctor report and the control-graph node — because a Skill reached by its path
+needs neither. What went with them is worth naming so it is not rediscovered as
+a gap: owner-reported server health, the tool inventory, the cross-agent
+definition matrix, and the one-run `--plugin-dir`/`--skill`/`--mcp-config`
+flags. `cache::carry_over` survives without a caller: nothing aggregates by
+partition any more, so `incomplete_partitions` is always empty and the merge
+path never runs. It is kept because the *other* half of that lesson —
+`keeps_last_good`, an empty result that coincides with a lost command — is
+still live for every source.
+
 `agent.rs` is the one registry for built-in Agent identity, invocation,
 settings paths and support flags. Session, Run, Control, action and borrowing
 code consumes it; do not add another supported-Agent list or advertise an
@@ -221,8 +233,8 @@ arriving on a row whose detail lives in its subtitle must carry that subtitle
 into `fields` with it or silently delete it.
 
 Favorites are Prelude preferences for stable object keys — an Agent, Skill or
-MCP server, an application by its name, a saved Quicklink by the keyword the
-person gave it. They never carry paths, commands or definitions, never write
+an application by its name, a saved Quicklink by the keyword the person gave
+it. They never carry paths, commands or definitions, never write
 native Agent data, and only promote inside the existing band. Tests address a
 temporary preference path and must not read the person's real
 `favorites.txt`.
@@ -239,17 +251,54 @@ application per gather. Every prefix `key` can produce must be accepted by
 `parse`, or a favourite is written, dropped on the way back in, and reported
 as saved.
 
-Skill/MCP archive state reuses those stable object identities but lives as
+**A Skill is used by pointing an agent at its file, and that is what Enter
+hands over.** `Use the skill "<name>": read <abs path to SKILL.md> and follow
+it.` — no install, no borrow flag, no restart, and it works in an agent that is
+already open, which is the case every other route ignored. Enter used to copy
+`claude /name`, a shell command that *starts* an agent; the common question is
+the opposite one, where you have Claude Code in front of you and the Skill
+lives in a root Claude does not read. `^K` keeps the two narrower forms, both
+conditional on where you are standing: `/name` needs that agent to own it, and
+`Start … with it` needs you not to have one open.
+
+**Discovery is now decoupled from invocation, and that is what makes breadth
+cheap.** `agent::SPECS` stays at four because it is about driving a CLI;
+`skill_dirs` is forty-odd because a Skill is a directory with a `SKILL.md` in
+it, and the portable invocation means Prelude never has to launch the Agent
+that owns one. A root that is absent costs a failed `read_dir` — the whole
+table measured +0.25ms against the five it replaced. Being *wrong* costs the
+same, which is the trap: an invented path never fails visibly, it just never
+matches, so every entry traces to vendor docs, a cross-agent survey, or a
+directory seen on a real machine. `~/.kimi-code/skills` was the case that
+proved it: a real Skill sitting on this machine that Prelude could not see.
+
+The path is the identity, and the simplification that follows is the point.
+Two Skills sharing a name are two different sentences, so a name collision
+stops being a problem to solve rather than one to detect. Nothing needs to be
+installed, so there is no action that puts a second copy of a tree on disk, and
+therefore no duplicate state to manage: an `Install into…` that copied, a
+`Consolidate` that replaced a copy with a symlink, a `skill:is:duplicated`
+filter and a `prelude skills duplicates` report were all built here and all
+deleted, because the sentence removes the need each of them answered. A Skill
+lives wherever it lives, in one place, and Prelude is the index over all of
+them.
+
+`classic_enter` must leave this alone. The preference chooses between *acting*
+and *being handed text*, and on a row that already hands over text all it could
+do is change **which** text — turning the portable invocation into a `/name`
+that does nothing in the agent you are talking to. So it now applies only to
+rows whose Enter would act.
+
+Skill archive state reuses those stable object identities but lives as
 atomic 0600 metadata at `$XDG_DATA_HOME/prelude/capabilities.json`. It is a
-Prelude view overlay: never move a Skill, edit/disable an MCP definition, clear
-a Favorite, or retain a path/command/definition in it. Archived capabilities
-stay in the complete gathered snapshot so `skill:is:archived` and
-`mcp:is:archived` can restore them, but leave Home, root search, `a:`, default
-capability scopes, slash invocation and Session borrow pickers. Per-keystroke
-rules read the decorated `archived` field and never the metadata file.
+Prelude view overlay: never move a Skill, clear a Favorite, or retain a path in
+it. Archived Skills stay in the complete gathered snapshot so
+`skill:is:archived` can restore them, but leave Home, root search, `a:`, `skill:`
+and slash invocation. Per-keystroke rules read the decorated `archived` field
+and never the metadata file.
 
 `docs/AGENT-CONTROL-PLANE.md` is the implementation source of truth. Read it
-before changing Agent, Run, Session, Skill, MCP, Config, Home, messaging or
+before changing Agent, Run, Session, Skill, Config, Home, messaging or
 Agent doctor behaviour, and update its current behavior, support matrix and
 limitations in the same commit. A conversation summary is not a substitute for
 updating that file.
@@ -466,8 +515,7 @@ not having one.
 **Which rows those are is one question, asked once, in `ui::object_of`.** The
 three chords used to ask it separately and each answered `File | Find | Dir`,
 which was narrower than the data by eight kinds. An application, a config, a
-conversation, a live Run, a Skill, an MCP server and a clipped image all carry
-a real path — and every one of them already offered *the same verbs by name* in
+conversation, a live Run, a Skill and a clipped image all carry a real path — and every one of them already offered *the same verbs by name* in
 `^K`: `Reveal in Finder`, `Copy path`, `Open terminal in containing folder`. So
 the keys were dead on exactly the rows whose own action panel proved the key
 had something to do. `object_of` returns the path and whether it is a
@@ -500,8 +548,7 @@ bypassed all four, and a Port row's command *is* `kill $(lsof -ti tcp:3000)`.
 On an `f:` row it tried to execute the file. `runhere::can_run_here` is now the
 one predicate and both the key and the panel row read it; everything else is
 inert, on Tab's precedent. The rows that genuinely want output in the panel —
-an MCP server, a one-off agent question, the update row — already run it on
-Enter. Ctrl+P is
+a one-off agent question, the update row — already run it on Enter. Ctrl+P is
 different: Quick Look replaces
 the result area until Ctrl+P is pressed again, without selecting or acting on
 anything. The preview is hidden by default and never owns a permanent column.
@@ -666,45 +713,6 @@ empty result on its own is written, because a launcher that goes on showing
 containers which have stopped is the opposite failure. A non-zero exit is
 deliberately *not* counted — a CLI answering "none configured" with status 1
 has told us something true.
-
-**An aggregated source fails in parts, and the guard above only sees the
-whole.** The MCP inventory asks every agent and returns their rows together,
-so a `claude` that timed out beside a `codex` that answered produces a result
-that is *not empty* — and the empty-result rule never fires. The whole cache
-was replaced and every claude row went with it: the launcher ran perfectly and
-quietly held less data, which is the only failure shape here that nobody
-reports. `exec::note_incomplete` names the partition that could not be asked and
-`cache::carry_over` keeps the last good rows for those partitions, while every
-other partition is replaced wholesale so an agent whose last server was
-removed still loses the row.
-
-`sources::agents::trusted` decides, and it decides after *parsing* and before
-*acting*, because the case that matters cannot be seen before the first and
-everything after the second is expensive. Three outcomes: exit 0 with no
-records is an authoritative empty; a non-zero exit that still produced records
-is an answer; a non-zero exit with none is a refusal. Ahead of all three sits
-*unfinished* — never started, killed, killed by a signal, or truncated at the
-output cap — because a fragment must not replace a complete answer. The last
-two of those were the subtle ones: both make `ok()` false without being named,
-so having parsed a single record was enough to slip past the refusal test. What makes the last one
-subtle is that `Error: authentication required` splits on `": "` exactly as a
-server line does — it parsed as a server *named* `Error`, so "records were
-parsed" was true and a refusal replaced three real rows with one imaginary
-one. The count that decides is therefore the number of lines carrying a health
-status, which an error message cannot produce by accident; rows without one
-are still displayed, so a format that stops printing statuses degrades to
-showing rows rather than to erasing them. Output that will not parse at all is
-never an answer, whatever the exit code — that is `codex mcp list --json`
-returning something unreadable, which is not the same as no servers.
-
-**One format, one parser.** `parse_claude_list` is shared by the inventory and
-the tool scanner because two readings of one output is one too many: they
-filtered differently, counted differently, and only one of them had learned
-that an error message parses as a server. The other trusted it *and* ran
-`claude mcp get Error` on the way — which is why the decision now happens
-before the per-server work rather than after it. Everything downstream of that
-parse costs a subprocess per entry and, in `mcp_tools`, a started MCP server;
-none of it should be spent on an answer that is about to be discarded.
 
 `exec::require` is `which` for the same reason. **PATH is not the same
 everywhere Prelude runs**: the panel is a Ghostty started by launchd and does
@@ -897,9 +905,10 @@ terminal, and `·` is the separator on every row. `doctor` measures it with a
 cursor-position report and caches the answer. Always use `width::dwidth`.
 
 **The home and root commands are not the catalogue.** An empty query renders
-the things this launcher manages — a question an agent is blocked on, the
-Agents themselves, what they are running, their Skills, their MCP servers, and
-the newest `sessions::IN_MAIN_LIST` conversations. Ordering is `by_rank` like
+the two kinds with an action behind them — Skills and the newest
+`sessions::IN_MAIN_LIST` conversations — plus a question an agent is blocked
+on. Agents, Runs and their inventory counts are readouts with nothing to press
+Enter on; they stay in `a:`, `r:` and root search. Ordering is `by_rank` like
 everywhere else, so the kind bands do the work and the home has no second
 ordering rule of its own.
 
@@ -991,8 +1000,7 @@ printed.
 `/` has the two states a search provider has. An *incomplete* name browses —
 `/cnipa-oo` lists the Skill rows it matches — and a complete one is an
 invocation, so `/cnipa-ooa` is the single row that runs it and the Skill row
-is gone. Nothing here shows two rows for one intent, and MCP servers are not
-on `/` at all: they are not invoked by name, and `mcp:` is their scope.
+is gone. Nothing here shows two rows for one intent.
 
 **A Quicklink is banded by the person having named it, not by what it points
 at.** `Item::band` is `Kind::priority` for everything else and
@@ -1010,7 +1018,7 @@ band and the label come from its being a quicklink. `Item::style` is why the
 label is not `kind.style()` at any call site.
 
 **The kind column names what a row *is*, not what Enter does to it.** Look at
-the other twenty-six labels — `agent`, `session`, `skill`, `mcp`, `clipboard`,
+the other labels — `agent`, `session`, `skill`, `clipboard`,
 `history`, `app`, `folder`, `branch`, `script`, `port`, `process` — they are
 nouns naming a source. What Enter does is already stated twice, in the footer
 and at the top of the `^K` panel, and a third statement in a five-column row
@@ -1306,7 +1314,7 @@ every gather. A cached state is a state that was true a minute ago, which for
 this view is worse than none.
 
 A Run and a Session are related facts, not the same record. `control.rs`
-builds the canonical Agent/Run/Session/Skill/MCP graph; launcher Items are
+builds the canonical Agent/Run/Session/Skill graph; launcher Items are
 views over it. Run ids are `agent:pid:started`, Session ids are
 `agent:native-id`, and both sides carry the edge. An explicit resume argument
 is exact. Cwd-latest is allowed only when one run of that agent exists in the
@@ -1407,26 +1415,6 @@ a notification fires — are pure functions pinned by tests: the bar is empty
 when there is nothing to say, and a run is announced once per stop,
 including a run first seen already quiet.
 
-MCP status is asked of each agent (`claude mcp list`, `codex mcp list
---json`), never read from config files — the config misses claude.ai-hosted
-servers entirely and cannot report whether anything works. Complete MCP
-definitions must never survive in an Item or cache: command arguments, env,
-headers and even URLs can hold credentials. Cache only a redacted semantic
-fingerprint and display summary; `lend::resolve` asks the owner CLI again on
-an explicit action. Account-hosted servers with no local definition are
-`portable=false` and must expose no borrow/install target. `privacy_migrations`
-scrubs old MCP and derived search caches once.
-
-Actual MCP tools come from `mcp_tools.rs`, not from pretending `mcp get` is a
-tool list. The slow source starts enabled stdio servers, performs initialize
-plus paginated `tools/list`, keeps only bounded credential-filtered names and
-descriptions, drains but never retains stderr, and kills the child. HTTP and
-hosted servers are explicitly `unsupported` when Prelude has no owner auth;
-that is different from a successful empty list. Tool inventory has a five
-minute TTL and never runs per key. Current Claude/Codex help has no
-server-level Enable/Disable verb, so no such action is offered. Prelude's 0600 `borrow/` staging files are the deliberate
-exception and are never search input.
-
 Each agent has its own invocation syntax. `opencode` needs a subcommand
 where the others take a prompt positionally; `codex exec` refuses to run
 outside a git repository. See `AGENTS` in `sources/sessions.rs`.
@@ -1481,31 +1469,5 @@ divergent; a missing or unreadable hash is unknown. If redacted private lines
 exist across copies, equality is `private-unknown`, never identical. Replacement must show `diff -ru`,
 re-hash both copies around that comparison, reject changed or sensitive
 sources, move the target to Trash, and only then copy. `copy_tree` excludes
-VCS/cache metadata but not runtime dependencies. MCP matrices use the same
-principle with redacted public fingerprints; incomparable source formats say
-so instead of claiming equality.
+VCS/cache metadata but not runtime dependencies.
 
-**Borrowing is the lighter half of that, and the one to reach for first.**
-Every agent has a flag for taking a capability it does not own, for one run
-only — see the table in `lend.rs`. Three of the eight pairings have no such
-flag, and those offer nothing rather than a command that fails after the
-launcher has closed. Borrowing writes only inside Prelude's own cache: the
-claude plugin shim symlinks the owner's skill rather than copying it, so
-editing the original is enough.
-
-There is a third route that needs no flag at all: hand the agent the skill's
-own file. A skill row therefore carries both bare forms in `^K` —
-`Copy the slash command` (`/name`) and `Point an agent at its file`
-(`Read <path> and follow it.`) — named, rather than one of them chosen for
-you. Prelude used to choose, by asking `pane_current_command` which agent the
-pane under the popup was running and handing its owner `/name` and everyone
-else the file. Nothing can answer that now; the failure it avoided is still
-real, because `/name` at an agent that lacks the skill is prose that does
-nothing, and does nothing *silently*.
-
-Two traps are pinned by tests. `--mcp-config` is *variadic*, so written with
-a space it swallows a prompt typed after it as another config file — always
-the `=` form. And a server's env block routinely holds an API key, so it is
-never inlined: claude gets a 0600 file in the cache, and codex, which has
-only an inline form, is told no. That is `secrets.rs`'s rule applied to the
-one path that hands user data to a command line.

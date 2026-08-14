@@ -142,16 +142,6 @@ pub fn lost_commands() -> usize {
 /// rest.
 static INCOMPLETE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// Say that this part of the source could not be asked, and that its previous
-/// answer is therefore still the best one available.
-pub fn note_incomplete(partition: &str) {
-    if let Ok(mut set) = INCOMPLETE.lock() {
-        if !set.iter().any(|p| p == partition) {
-            set.push(partition.to_string());
-        }
-    }
-}
-
 pub fn incomplete_partitions() -> Vec<String> {
     INCOMPLETE.lock().map(|set| set.clone()).unwrap_or_default()
 }
@@ -293,11 +283,6 @@ pub fn own_process_group(command: &mut Command) {
     }
 }
 
-/// Kill a child and everything it started.
-pub fn kill_tree(pid: i32) {
-    kill_group(pid);
-}
-
 fn kill_group(pid: i32) {
     if pid <= 0 {
         return;
@@ -329,33 +314,6 @@ pub fn which(name: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&path)
         .map(|d| d.join(name))
         .find(|p| p.is_file())
-}
-
-/// `which`, for a tool whose absence means this source cannot answer.
-///
-/// The difference matters where the cache is concerned. Most `which` calls
-/// ask whether something optional exists — zoxide, docker — and "no" is a
-/// complete answer. For the agent CLIs it is not, because **PATH is not the
-/// same everywhere Prelude runs**: the global panel is a Ghostty started by
-/// launchd, which does not inherit a login shell's PATH, so `claude` can be
-/// missing there and present in every terminal on the machine. Treated as an
-/// honest empty, that wiped the person's MCP inventory out of the panel and
-/// left them looking at a launcher that had lost their servers.
-///
-/// Counting it as a lost command means the last good answer survives instead.
-/// An agent that really has been uninstalled still loses its rows, as soon as
-/// any refresh returns something — which is the same refresh, if any other
-/// agent is present.
-pub fn require(name: &str) -> Option<std::path::PathBuf> {
-    let found = which(name);
-    if found.is_none() {
-        LOST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Named, not merely counted: in an aggregated source this is the one
-        // partition that went missing, and everything already known about it
-        // has to survive the refresh.
-        note_incomplete(name);
-    }
-    found
 }
 
 /// Quote for the shell only when it actually needs it.

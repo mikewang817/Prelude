@@ -495,18 +495,83 @@ fn mtime_nanos(p: &Path) -> Option<u128> {
         .map(|duration| duration.as_nanos())
 }
 
-/// Has the roots list been edited since the index was built?
+/// How long an index may go without being rebuilt, whatever the mtimes say.
 ///
-/// The failure this answers is silent and was the whole problem: you add a
-/// folder, `f:` keeps returning the old set, and nothing anywhere says the
-/// index is the reason.
+/// The root check below is exact for anything created *in* a search folder and
+/// blind to anything created deeper, because a directory's mtime moves only
+/// when its own children change — `~/App/project/src/new` leaves `~/App`
+/// untouched. This is the floor under that blindness, and it is the same shape
+/// as `refresh.rs`'s `FORCE_AFTER`: act on a changed mtime, and act anyway
+/// after a while, because a cheap check that cannot see everything still must
+/// not mean "never".
+///
+/// An hour rather than a day because the failure is a person not finding a
+/// folder they made, and rather than a minute because the rebuild walks tens of
+/// thousands of entries. It runs detached and the previous generation stays
+/// searchable throughout, so the cost is CPU that nobody waits on.
+const INDEX_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Has anything happened that the index does not know about?
+///
+/// Three questions, cheapest first, and the second is the one this exists for.
+///
+/// **The roots list was edited.** The original failure: you add a folder, `f:`
+/// keeps returning the old set, and nothing says the index is the reason.
+///
+/// **A search folder's own contents changed.** A directory's mtime moves when a
+/// direct child is added or removed, *by anyone* — Finder, `mkdir`, `git
+/// clone`, an agent. Without this the index only ever tracked Prelude's own
+/// idea of the roots, so a project folder created any other way stayed
+/// unfindable until the person happened to edit their roots list or ran
+/// `prelude index` — which made the explicit repair door a routine step, the
+/// exact thing it is documented not to be.
+///
+/// **It is simply old.** `INDEX_MAX_AGE`, for everything below the first level.
+///
+/// All three are settled by `stat`: a handful of them, no directory walk, so
+/// this stays affordable on the per-keystroke path that calls it. Nothing needs
+/// remembering either — a rebuild rewrites the index file, which makes it newer
+/// than the roots it was built from, so the answer settles itself.
 pub fn index_stale() -> bool {
-    let built = mtime_nanos(&crate::compute::fileindex_path());
-    match (built, mtime_nanos(&roots_file())) {
-        (None, _) => true,
-        (Some(built), Some(edited)) => edited > built,
-        (Some(_), None) => false,
-    }
+    stale_from(
+        mtime_nanos(&crate::compute::fileindex_path()),
+        mtime_nanos(&roots_file()),
+        &crate::compute::index_roots()
+            .iter()
+            .map(|root| mtime_nanos(std::path::Path::new(root)))
+            .collect::<Vec<_>>(),
+        index_age(),
+    )
+}
+
+/// The rule itself, with the filesystem handed in.
+///
+/// Separated because the version that read real paths could only be tested by
+/// re-implementing it in the test and asserting the two agreed — which proves
+/// the copies match and nothing about whether the rule is right, and quietly
+/// depended on the machine it ran on. That test passed or failed according to
+/// whether `~/App` happened to be older than the cache, so it read as flaky
+/// and was actually correct: it fired the moment the rule gained a condition
+/// its copy did not have.
+pub(crate) fn stale_from(
+    built: Option<u128>,
+    roots_edited: Option<u128>,
+    root_mtimes: &[Option<u128>],
+    age: Option<std::time::Duration>,
+) -> bool {
+    let Some(built) = built else { return true };
+    roots_edited.is_some_and(|edited| edited > built)
+        || root_mtimes.iter().flatten().any(|changed| *changed > built)
+        || age.is_some_and(|age| age > INDEX_MAX_AGE)
+}
+
+fn index_age() -> Option<std::time::Duration> {
+    std::fs::metadata(crate::compute::fileindex_path())
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
 }
 
 /// A current v1 index is still missing every folder. Treat that as an upgrade
@@ -2204,17 +2269,36 @@ mod tests {
     /// A stale index is the failure this surface exists to make visible: you
     /// add a folder, `f:` keeps answering from the old set, and nothing says
     /// the index is why.
+    ///
+    /// Every condition is walked with the filesystem handed in, because the
+    /// previous version of this test re-implemented the rule and compared the
+    /// two. That could only ever catch the copies drifting, and its answer
+    /// depended on whether the real `~/App` happened to be older than the real
+    /// cache — so it looked flaky while being right.
     #[test]
-    fn editing_the_roots_marks_the_index_stale() {
-        // Absent index, whatever the roots say.
-        let built = mtime_nanos(&crate::compute::fileindex_path());
-        let edited = mtime_nanos(&roots_file());
-        let stale = match (built, edited) {
-            (None, _) => true,
-            (Some(b), Some(e)) => e > b,
-            (Some(_), None) => false,
-        };
-        assert_eq!(stale, index_stale());
+    fn the_index_is_stale_for_each_reason_it_can_be() {
+        let hour = std::time::Duration::from_secs(3600);
+        let fresh = Some(std::time::Duration::from_secs(60));
+        // No index at all, whatever anything else says.
+        assert!(stale_from(None, None, &[], None));
+        assert!(stale_from(None, Some(1), &[Some(1)], fresh));
+        // Built, and nothing has happened since.
+        assert!(!stale_from(Some(10), Some(5), &[Some(5), Some(1)], fresh));
+        // The roots list was edited — the original reason this existed.
+        assert!(stale_from(Some(10), Some(11), &[Some(5)], fresh));
+        // A search folder's own contents changed. This is the one that makes a
+        // project created outside Prelude findable: a directory's mtime moves
+        // when a direct child is added or removed, whoever did it.
+        assert!(stale_from(Some(10), Some(5), &[Some(5), Some(11)], fresh));
+        // A root that cannot be stat'ed is not evidence of change. A folder on
+        // an unmounted volume must not rebuild the index on every keystroke.
+        assert!(!stale_from(Some(10), Some(5), &[None, None], fresh));
+        // And age alone, which is the floor under the level the mtimes cannot
+        // see: `~/App/project/src/new` leaves `~/App` untouched.
+        assert!(stale_from(Some(10), Some(5), &[Some(5)], Some(hour + hour)));
+        assert!(!stale_from(Some(10), Some(5), &[Some(5)], Some(hour - fresh.unwrap())));
+        // An age that cannot be read is not an age past the limit.
+        assert!(!stale_from(Some(10), Some(5), &[Some(5)], None));
     }
 
     /// Every setting states its value on the row. A setting whose value you

@@ -645,7 +645,6 @@ pub fn object_of(item: &Item) -> Option<(&str, bool)> {
             Some(file) => (file, false),
             None => (field("dir")?, true),
         },
-        Kind::Mcp => (field("file").or_else(|| field("config"))?, false),
         // A live agent's object is the project it is working in.
         Kind::Run => (field("cwd").or_else(|| field("path"))?, true),
         // Only the clips that put a payload on disk. A text clip has none.
@@ -831,13 +830,6 @@ fn act(item: &Item, verb: crate::defaults::Verb) -> i32 {
             emit("INSERT", &format!("cd {}", shq(d)));
         }
         EditSetting => return crate::settings::edit(item),
-        RunSkill => {
-            // A skill name means nothing to a shell, so pick an agent that
-            // actually has it and hand the invocation over.
-            let agent = item.get("agent").split(',').next().unwrap_or("claude").trim().to_string();
-            let agent = if agent == "shared" { "claude".to_string() } else { agent };
-            emit("INSERT", &format!("{agent} {}", shq(&item.cmd)));
-        }
     }
     0
 }

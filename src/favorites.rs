@@ -45,10 +45,6 @@ pub fn key(item: &Item) -> Option<String> {
     let (kind, value) = match item.kind {
         Kind::Agent => ("agent", item.get("agent")),
         Kind::Skill => ("skill", item.get("name")),
-        Kind::Mcp => {
-            let id = item.get("capability_id");
-            ("mcp", if id.is_empty() { item.get("name") } else { id })
-        }
         // An application is named by its name. The bundle path is the only
         // other thing on the row and is the one thing that may not be stored,
         // and a bundle identifier would mean reading an `Info.plist` for every
@@ -157,23 +153,17 @@ mod tests {
         let skill = Item::new("run skill", Kind::Skill)
             .put("name", "review")
             .put("dir", "/private/home/.claude/skills/review");
-        let mcp = Item::new("owner details", Kind::Mcp)
-            .put("name", "node repl")
-            .put("capability_id", "mcp:node-repl")
-            .put("def", "API_KEY=must-not-appear");
         let app = Item::new("open -a 'Google Chrome'", Kind::App)
             .title("Google Chrome")
             .put("path", "/Applications/Google Chrome.app");
         assert_eq!(key(&agent).as_deref(), Some("agent\tclaude"));
         assert_eq!(key(&skill).as_deref(), Some("skill\treview"));
-        assert_eq!(key(&mcp).as_deref(), Some("mcp\tmcp:node-repl"));
         assert_eq!(key(&app).as_deref(), Some("app\tGoogle Chrome"));
-        let all = [key(&agent), key(&skill), key(&mcp), key(&app)]
+        let all = [key(&agent), key(&skill), key(&app)]
             .into_iter()
             .flatten()
             .collect::<String>();
         assert!(!all.contains("/private") && !all.contains("/Applications"));
-        assert!(!all.contains("API_KEY"));
     }
 
     // A Quicklink is keyed by the name the person gave it, before its target's

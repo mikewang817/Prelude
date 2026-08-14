@@ -28,7 +28,6 @@ pub enum Kind {
     Snippet,
     Clip,
     Skill,
-    Mcp,
     Ssh,
     App,
     Sys,
@@ -67,7 +66,6 @@ impl Kind {
             // is more urgent than anything you might start.
             Run => 995,
             Skill => 990,
-            Mcp => 985,
             Session => 980,
             Config => 975,
             // Below the agent cluster and above the search commands: these
@@ -121,7 +119,6 @@ impl Kind {
             Snippet => (YELLOW, "snippet"),
             Clip => (CYAN, "clipboard"),
             Skill => (MAGENTA, "skill"),
-            Mcp => (MAGENTA, "mcp"),
             Ssh => (CYAN, "ssh"),
             App => (BLUE, "app"),
             Sys => (YELLOW, "system"),
@@ -168,7 +165,7 @@ impl Kind {
         use Kind::*;
         &[
             Msg, Agent, Run, Session, Config, Setting, Search, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
-            Clip, Skill, Mcp, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
+            Clip, Skill, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }
 }

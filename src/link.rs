@@ -435,8 +435,7 @@ mod tests {
         // Everything an alias can also name, and none of it is linkable.
         let skill = Item::new("/review", Kind::Skill).put("name", "review");
         let agent = Item::new("claude", Kind::Agent).put("agent", "claude");
-        let mcp = Item::new("claude mcp get drive", Kind::Mcp).put("name", "drive");
-        for it in [&skill, &agent, &mcp] {
+        for it in [&skill, &agent] {
             assert!(!may_be_linked(it), "{:?} hands over or starts; a link may not", it.kind);
         }
     }

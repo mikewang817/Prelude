@@ -20,8 +20,7 @@ The home contains, in Kind order:
 2. installed Agent launch rows
 3. live Agent Runs
 4. non-archived Skills
-5. non-archived MCP servers
-6. up to the 15 newest visible Sessions
+5. up to the 15 newest visible Sessions
 
 Files, applications, commands, history, clipboard records, ports, processes,
 containers, settings, and search commands are gathered but do not appear on an
@@ -29,13 +28,11 @@ empty query.
 
 The list is already sorted before `home_items` filters it. Kind decides the
 band; source rank, Favorites, and frecency only reorder objects inside the same
-Kind. A Favorite cannot lift a Skill above an Agent or an MCP server above a
-Run.
+Kind. A Favorite cannot lift a Skill above an Agent.
 
 Archived Sessions normally leave the home. If an archived Session is attached
 to a live Run, it becomes visible while that Run exists; the archive flag is
-not cleared. Archived Skills and MCP servers remain hidden until explicitly
-requested.
+not cleared. Archived Skills remain hidden until explicitly requested.
 
 ## Ordinary root search
 
@@ -48,7 +45,7 @@ specialized layouts such as the wider name/path treatment in `f:` and `dir:`.
 The root catalogue contains:
 
 - unanswered questions
-- Agent, Run, Skill, and MCP inventory rows
+- Agent, Run and Skill inventory rows
 - scope commands such as `Past Conversations` and `Files & Folders`
 - every Quicklink, fixed and template alike
 
@@ -113,7 +110,7 @@ and can save it as a Quicklink.
 
 | Prefix | Items selected from the cached snapshot |
 |---|---|
-| `a:` | questions, Agents, Runs, Skills, MCP servers, and Agent Config |
+| `a:` | questions, Agents, Runs, Skills, and Agent Config |
 | `r:` | live Runs only |
 | `s:` | Claude Code, Codex, and pi Sessions |
 | `skill:` | non-archived Skills merged across Agent directories |
@@ -129,7 +126,6 @@ and can save it as a Quicklink.
 | `port:` | cached listening TCP ports |
 | `proc:` | processes with CPU and memory fields |
 | `docker:` | running Docker containers |
-| `mcp:` | non-archived Claude/Codex MCP inventory rows |
 | `cfg:` | existing Agent settings and instruction files |
 | `ql:` | every Quicklink, including entries that do not resolve |
 | `set:` | Prelude settings with their effective values and sources |
@@ -151,7 +147,7 @@ required to appear in a row's displayed text.
 | `a:agent:claude` | exact Agent filter |
 | `a:project:Prelude` | exact project name or full path |
 | `a:state:waiting` | explicit Run-state filter |
-| `a:using deploy` | Runs that explicitly loaded the named Skill or MCP capability |
+| `a:using deploy` | Runs that explicitly loaded the named Skill |
 | `a:without deploy` | Runs that loaded none of the named capabilities |
 
 `using` and `without` inspect capability names extracted from that Run's launch
@@ -165,7 +161,7 @@ a:using:"claude.ai Google Drive"
 ```
 
 Sessions are deliberately excluded from `a:` and remain under `s:`. Archived
-Skills and MCP servers are also excluded. Unknown filter-shaped words are kept
+Skills are also excluded. Unknown filter-shaped words are kept
 as literal search needles, which visibly collapses the result instead of
 silently widening it.
 
@@ -201,13 +197,10 @@ A local Session rename does not remove the native title from search.
 |---|---|
 | `skill:is:archived` | archived Skills only |
 | `skill:is:all` | archived and visible Skills |
-| `mcp:is:archived` | archived MCP capability rows only |
-| `mcp:is:all` | archived and visible MCP capability rows |
 
-Archive is a Prelude view overlay. It does not move Skill directories, disable
-MCP servers, or edit Agent files. MCP owner variants sharing one normalized
-capability id archive together. Archived capabilities also leave `a:`, the
-home, root search, slash invocation, and Session borrow pickers.
+Archive is a Prelude view overlay. It does not move Skill directories or edit
+Agent files. Archived Skills also leave `a:`, the home, root search and slash
+invocation.
 
 ## Agent and Skill invocation
 
@@ -386,7 +379,7 @@ must be downloaded in System Settings.
 - `cache::gather` has a 40 ms external deadline.
 - Fast subprocess sources run concurrently; a source missing the deadline falls
   back to its previous cache while the worker refreshes that cache.
-- Session inventory, MCP status, Skill hashes, MCP tools, ports, and fleet
+- Session inventory, Skill hashes, ports, and fleet
   identity live behind cache tiers.
 - Run liveness and waiting state are refreshed with syscalls on each gather.
 - Scope filtering and intent recognition do not start Agent CLIs or repeat the

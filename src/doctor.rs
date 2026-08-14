@@ -430,10 +430,9 @@ pub fn dispatch(rest: &[&str]) -> i32 {
         "agents" => emit(agents_report(), mode),
         "sessions" => emit(sessions_report(), mode),
         "skills" => emit(skills_report(), mode),
-        "mcp" => emit(mcp_report(), mode),
         other => {
             eprintln!(
-                "prelude: no doctor called {other} — try agents, sessions, skills or mcp"
+                "prelude: no doctor called {other} — try agents, sessions or skills"
             );
             2
         }
@@ -1009,7 +1008,7 @@ fn skills_report() -> Report {
         rows.push(row);
     }
 
-    rows.extend(staging_rows(Staged::Shims));
+    rows.extend(staging_rows());
 
     let mut cost = Row::new("cost", format!("{ms:.0}ms"));
     cost.note(format!(
@@ -1128,142 +1127,6 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// doctor mcp
-// ---------------------------------------------------------------------------
-
-/// A server has not been health-checked recently enough to believe.
-const HEALTH_TTL: u64 = 120;
-/// The tool inventory's own, longer, TTL — it starts servers, so it runs far
-/// less often.
-const TOOLS_TTL: u64 = 600;
-
-fn mcp_report() -> Report {
-    // An explicit diagnostic may pay for authoritative owner CLI health.
-    let _ = crate::cache::refresh_named("mcp");
-    let servers = crate::cache::read_cached("mcp");
-    let now = crate::frecency::now() as u64;
-    let mut rows = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-
-    if servers.is_empty() {
-        let mut row = Row::new("mcp", "none");
-        row.issue("no-servers", "no MCP servers reported by the installed Agent CLIs");
-        rows.push(row);
-        return Report::new("mcp", rows);
-    }
-
-    for server in &servers {
-        let owner = server.get("agent");
-        let name = server.get("name");
-        let transport = server.get("transport");
-        let health = server.get("health");
-        let tools_status = server.get("tools_status");
-        let mut row = Row::new(
-            format!("{owner} · {name}"),
-            format!("{transport} · {health} · tools {tools_status}"),
-        );
-
-        if !seen.insert((owner.to_string(), name.to_lowercase())) {
-            row.issue("duplicate-definition", "this owner defines this server name more than once");
-        }
-
-        // Health, with auth split out from failure. They arrive through the
-        // same field and mean opposite things: an auth failure is a server
-        // that works and does not know you, and telling somebody to debug a
-        // connection when they simply need to log in wastes the afternoon.
-        match health {
-            "ok" => {}
-            "auth" => row.issue(
-                "needs-auth",
-                format!(
-                    "{owner} reports this server is not logged in — an authentication state, not a connection failure; \
-                     the launcher's Login action for this row is the way in"
-                ),
-            ),
-            "failed" => row.issue(
-                "connection-failed",
-                format!("{owner} could not reach this server"),
-            ),
-            "disabled" => {
-                let reason = server.get("reason");
-                row.note(if reason.is_empty() {
-                    "deliberately disabled by its owner — not a fault".to_string()
-                } else {
-                    format!("deliberately disabled by its owner: {reason}")
-                });
-            }
-            other => row.issue(
-                "health-unknown",
-                format!("{owner} reported no usable status for this server ({other})"),
-            ),
-        }
-
-        let health_at = server.get("health_checked_at").parse::<u64>().unwrap_or(0);
-        if health_at == 0 || now.saturating_sub(health_at) > HEALTH_TTL {
-            row.issue("health-stale", "the health snapshot is stale or missing");
-        }
-
-        // Tool inventory, said in full. `unsupported` (Prelude has no owner
-        // auth for an HTTP or account-hosted server), `disabled` (nothing to
-        // ask) and `failed` (asked and it broke) are three different answers,
-        // and only the last is a fault. An empty successful list is a fourth.
-        let tools: Vec<crate::mcp_tools::Tool> =
-            serde_json::from_str(server.get("tools")).unwrap_or_default();
-        let error = server.get("tools_error");
-        match tools_status {
-            "ok" if tools.is_empty() => {
-                row.note("tool inventory succeeded and this server offers no tools")
-            }
-            "ok" => row.note(format!(
-                "{} tool{} inventoried: {}",
-                tools.len(),
-                if tools.len() == 1 { "" } else { "s" },
-                tools.iter().take(8).map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")
-            )),
-            "unsupported" => row.note(format!(
-                "tool inventory is not supported for this server{}",
-                if error.is_empty() { String::new() } else { format!(" — {error}") }
-            )),
-            "disabled" => row.note("disabled, so there is nothing to inventory"),
-            "pending" => row.note("tool inventory has not run yet; it is a background five-minute cache"),
-            "failed" => row.issue(
-                "tools-failed",
-                format!(
-                    "the tools/list handshake failed{}",
-                    if error.is_empty() { String::new() } else { format!(" — {error}") }
-                ),
-            ),
-            other => row.issue("tools-unknown", format!("unrecognised tool inventory state `{other}`")),
-        }
-        let tools_at = server.get("tools_checked_at").parse::<u64>().unwrap_or(0);
-        let tools_countable = !matches!(tools_status, "unsupported" | "disabled" | "pending");
-        if tools_countable && (tools_at == 0 || now.saturating_sub(tools_at) > TOOLS_TTL) {
-            row.issue("tools-stale", "the tool inventory is stale or missing");
-        }
-
-        if !matches!(transport, "stdio" | "http" | "sse" | "hosted") {
-            row.issue("transport-unknown", "the transport could not be normalized");
-        }
-        if !server.get("def").is_empty() {
-            row.issue(
-                "definition-retained",
-                "a complete server definition was retained in the cache — a privacy violation",
-            );
-        }
-        if server.get("sensitive") == "true" {
-            row.note("private definition fields are omitted from retained data");
-        }
-        if server.get("portable") == "false" {
-            row.note("owner-account only; no transferable local definition");
-        }
-        rows.push(row);
-    }
-
-    rows.extend(staging_rows(Staged::Files));
-    Report::new("mcp", rows)
-}
-
-// ---------------------------------------------------------------------------
 // Prelude's own private staging area
 // ---------------------------------------------------------------------------
 
@@ -1271,18 +1134,6 @@ fn mcp_report() -> Report {
 /// staged borrow: a borrow is used by the command it was staged for, minutes
 /// later at the outside.
 const STALE_STAGED: u64 = 7 * 24 * 60 * 60;
-
-/// Which half of `borrow/` a report is asking about.
-///
-/// Two kinds of thing live there and they belong to different reports: the
-/// claude plugin shims are Skill borrowing (`doctor skills`), and the 0600
-/// JSON files are MCP server definitions (`doctor mcp`). One function finds
-/// both so the ownership rule is written once.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Staged {
-    Shims,
-    Files,
-}
 
 fn staging_root() -> std::path::PathBuf {
     paths::cache().join("borrow")
@@ -1322,16 +1173,15 @@ fn mtime_of(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn staging_rows(want: Staged) -> Vec<Row> {
-    staging_rows_in(&staging_root(), want)
+fn staging_rows() -> Vec<Row> {
+    staging_rows_in(&staging_root())
 }
 
-fn staging_rows_in(root: &Path, want: Staged) -> Vec<Row> {
+fn staging_rows_in(root: &Path) -> Vec<Row> {
     use std::os::unix::fs::PermissionsExt;
-    let subject = match want {
-        Staged::Shims => "borrowed skills",
-        Staged::Files => "staged definitions",
-    };
+    // One subject now: nothing writes this directory any more, so whatever is
+    // in it is left over from a Prelude that did.
+    let subject = "staged borrows";
     let shown_root = paths::tilde(&root.to_string_lossy());
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
@@ -1361,9 +1211,6 @@ fn staging_rows_in(root: &Path, want: Staged) -> Vec<Row> {
     for path in paths {
         let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
         let is_dir = meta.is_dir();
-        if (want == Staged::Shims) != is_dir {
-            continue;
-        }
         counted += 1;
         let shown = paths::tilde(&path.to_string_lossy());
         let evidence = |path: &Path| Repair::Trash {
@@ -1620,19 +1467,11 @@ pub fn run() -> i32 {
     let unknown = skill_rows.iter().filter(|skill| skill.get("integrity") == "unknown").count();
     let sensitive = skill_rows.iter().flat_map(|skill| crate::capability::copies(skill))
         .filter(|copy| copy.sensitive_files > 0).count();
-    let mcp_rows: Vec<&crate::item::Item> = items.iter().filter(|i| i.kind == Kind::Mcp).collect();
-    let mcps: Vec<&str> = mcp_rows.iter().map(|i| i.title.as_str()).collect();
-    let unhealthy = mcp_rows.iter().filter(|server| server.get("health") != "ok").count();
-    let private = mcp_rows.iter().filter(|server| server.get("sensitive") == "true").count();
-    let tools_ok = mcp_rows.iter().filter(|server| server.get("tools_status") == "ok").count();
-    let tools_failed = mcp_rows.iter().filter(|server| server.get("tools_status") == "failed").count();
-    let tools_pending = mcp_rows.iter().filter(|server| server.get("tools_status") == "pending").count();
     println!("\n  {CYAN}agents{RESET}");
     println!("    {DIM}skills:{RESET} {skills} unique · {divergent} divergent · {unknown} unhashed");
     println!("    {DIM}skill privacy:{RESET} {sensitive} copies contain redacted credential-like lines");
-    println!("    {DIM}mcp servers:{RESET} {}", if mcps.is_empty() { "none".into() } else { mcps.join("  ") });
-    println!("    {DIM}mcp health:{RESET} {unhealthy} need attention · {private} definitions keep private fields out of cache");
-    println!("    {DIM}mcp tools:{RESET} {tools_ok} inventoried · {tools_failed} failed · {tools_pending} pending");
+
+
     let clis: Vec<&str> = ["claude", "codex", "pi", "cursor-agent", "opencode", "gemini"]
         .iter().copied().filter(|c| which(c).is_some()).collect();
     println!("    {DIM}CLIs on PATH:{RESET} {}", clis.join("  "));
@@ -1640,7 +1479,7 @@ pub fn run() -> i32 {
     println!("\n  {CYAN}clipboard{RESET}");
     println!("    {DIM}watcher:{RESET} {}", if crate::clipd::is_running() {
         format!("{GREEN}running{RESET}") } else { format!("{YELLOW}not running{RESET} (starts on first search)") });
-    println!("\n  {DIM}deeper: prelude doctor agents · sessions · skills · mcp   (--json, --repair){RESET}");
+    println!("\n  {DIM}deeper: prelude doctor agents · sessions · skills   (--json, --repair){RESET}");
     println!();
     if ok { 0 } else { 1 }
 }
@@ -1926,7 +1765,7 @@ mod tests {
     fn a_broken_symlink_is_reported_and_never_offered_a_repair_that_cannot_work() {
         let root = temp("symlink");
         std::os::unix::fs::symlink(root.join("gone"), root.join("dangling.json")).expect("link");
-        let rows = staging_rows_in(&root, Staged::Files);
+        let rows = staging_rows_in(&root);
         let codes: Vec<&str> = rows[0].issues.iter().map(|i| i.code.as_str()).collect();
         assert_eq!(codes, ["staged-symlink"]);
         assert!(rows[0].issues[0].repair.is_none(), "a repair here could only ever fail");
@@ -1942,7 +1781,7 @@ mod tests {
         std::fs::set_permissions(root.join("real.json"), std::fs::Permissions::from_mode(0o600))
             .expect("chmod");
         std::os::unix::fs::symlink(root.join("real.json"), root.join("live.json")).expect("link");
-        let rows = staging_rows_in(&root, Staged::Files);
+        let rows = staging_rows_in(&root);
         let codes: Vec<&str> = rows[0].issues.iter().map(|i| i.code.as_str()).collect();
         assert_eq!(codes, ["staged-symlink", "staged-symlink"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -1956,14 +1795,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let missing = temp("absent");
         let root = missing.join("never-created");
-        let rows = staging_rows_in(&root, Staged::Files);
+        let rows = staging_rows_in(&root);
         assert!(rows[0].ok && rows[0].issues.is_empty(), "nothing staged is not a fault");
         assert!(rows[0].notes.join(" ").contains("does not exist yet"));
 
         let closed = temp("closed");
         std::fs::write(closed.join("borrowed.json"), b"{}").expect("stage");
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        let rows = staging_rows_in(&closed, Staged::Files);
+        let rows = staging_rows_in(&closed);
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         assert!(!rows[0].ok, "an unreadable root is a fault");
         assert_eq!(rows[0].issues[0].code, "staging-unreadable");
@@ -2140,8 +1979,7 @@ mod tests {
         std::fs::create_dir_all(shim.join("skills")).expect("shim");
         std::fs::write(root.join("server.json"), b"{}").expect("stage");
 
-        let mut rows = staging_rows_in(&root, Staged::Shims);
-        rows.extend(staging_rows_in(&root, Staged::Files));
+        let rows = staging_rows_in(&root);
         let report = Report::new("skills", rows);
         assert!(!report.repairable().is_empty(), "the fixtures have to produce some");
         for (_, issue) in report.repairable() {

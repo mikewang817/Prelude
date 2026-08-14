@@ -12,11 +12,11 @@
   <a href="docs/SEARCH.md"><strong>Search guide</strong></a>
 </p>
 
-![Prelude showing agents, active runs, skills, MCP servers, and recent sessions](docs/assets/prelude.png)
+![Prelude showing skills and recent agent sessions](docs/assets/prelude.png)
 
 Prelude is a Rust program built on [fzf](https://github.com/junegunn/fzf). It
 indexes commands, files, apps, clipboard history, projects, Agent sessions,
-Skills, and MCP servers, while keeping large collections behind explicit
+and Skills, while keeping large collections behind explicit
 scopes. Its gather path has a 40 ms budget.
 
 ## Install
@@ -51,10 +51,10 @@ commands and coding agents.
 
 | Typical desktop launcher | Prelude |
 |---|---|
-| Searches apps, files, and links | Also indexes shell history, `$PATH`, project scripts, clipboard objects, sessions, Skills, MCP servers, and live Agent processes |
+| Searches apps, files, and links | Also indexes shell history, `$PATH`, project scripts, clipboard objects, sessions, Skills, and live Agent processes |
 | Executes a command as soon as it is selected | Copies command text for review from either launcher entry point |
 | Treats results as interchangeable text | Opens files, folders, apps, and URLs directly through macOS while keeping shell commands editable |
-| Adds AI as another prompt box | Shows Agent inventory, live state, sessions, capability ownership, MCP health, and waiting questions |
+| Adds AI as another prompt box | Shows Skills, past conversations, live Agent state, and waiting questions |
 | Integrates with one assistant at a time | Uses one typed registry for Claude Code, Codex, pi, and OpenCode |
 
 There is one launcher surface with two ways in:
@@ -85,12 +85,11 @@ From the launcher you can:
 - pin, rename, archive, fork, export, reveal, or safely trash a Session
 - merge Skills by name across Agent directories and compare their complete trees
 - copy a Skill permanently or prepare a supported one-run loan
-- read Claude and Codex MCP status, transport, cached tools, and redacted definitions
-- archive Skills and MCP servers in Prelude without changing native Agent files
-- inspect the versioned Agent/Run/Session/Skill/MCP graph with `prelude control --json`
+- archive Skills in Prelude without changing native Agent files
+- inspect the versioned Agent/Run/Session/Skill graph with `prelude control --json`
 
 Support is capability-specific. For example, Claude and pi can borrow a Skill
-for one run; Claude and Codex can borrow an MCP server; OpenCode Sessions are
+for one run; OpenCode Sessions are
 not currently discovered. Prelude omits an action when the owning CLI has no
 known syntax instead of constructing a command that only looks plausible.
 
@@ -118,7 +117,6 @@ a:waiting                 Runs or questions waiting for input
 s:agent:claude since:24h  recent Claude Code Sessions
 s:is:pinned               pinned Sessions
 skill:is:archived         archived Skills, ready to restore
-mcp:is:archived           archived MCP servers, ready to restore
 /cnipa-ooa                run an installed Skill and show its answer
 @claude explain this      ask an installed Agent and show its answer
 Prelude                    files and folders named Prelude
@@ -232,7 +230,7 @@ search: the first press opens Prelude, the second moves what you type into the
 ## Names and Favorites
 
 A Quicklink names a target you type in. An **alias** names something Prelude
-already has — an Agent, a Skill, an MCP server, an application, or a saved
+already has — an Agent, a Skill, an application, or a saved
 Quicklink — so you reach it by a word of your own instead of by whatever it is
 called:
 
@@ -254,7 +252,7 @@ that is accepted and then silently unreachable is the worst of the three
 outcomes.
 
 **Favorites** are the lighter version: no name, just promotion. `Ctrl+K` →
-*Add to Favorites* on an Agent, Skill, MCP server, application or saved
+*Add to Favorites* on an Agent, Skill, application or saved
 Quicklink lifts it above its neighbours, and `set:` → **Favorites** manages the
 set. Promotion stays inside a row's own kind, so a pinned application never
 outranks an Agent.
@@ -290,7 +288,7 @@ things with a stable name are reachable this way.
   and message bus stay in its XDG directories. Outside them it writes three
   things, all during explicit setup: managed blocks in `~/.zshrc` and Ghostty's
   configuration, the LaunchAgent, and the `prelude://` handler in
-  `~/Applications`. `prelude global uninstall` removes all of them. Agent CLIs, MCP checks, web
+  `~/Applications`. `prelude global uninstall` removes all of them. Agent CLIs, web
   searches, and currency conversion use the network only when explicitly asked.
 - The update check is the one exception, and it is stated rather than buried:
   at most twelve times an hour, Prelude asks GitHub's releases API for a
@@ -301,9 +299,8 @@ things with a stable name are reachable this way.
   stages a verified archive, and `apply` installs it — never mid-session, only
   as the panel next starts. `prelude update` is a request you typed, so it
   works under every setting including `off`.
-- Secret-looking history, clipboard text, messages, tags, MCP fields, and
-  exported transcripts are filtered or redacted. Complete MCP definitions are
-  not retained in ordinary Items or caches.
+- Secret-looking history, clipboard text, messages, tags, and
+  exported transcripts are filtered or redacted.
 - File, application, Skill-copy, and inactive-Session removal goes through the
   Trash, and Prelude says where it put it. Irreversible process termination
   confirms first.

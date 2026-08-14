@@ -26,9 +26,7 @@ mod global;
 mod init;
 mod item;
 mod link;
-mod lend;
 mod minitoml;
-mod mcp_tools;
 mod openwith;
 mod panel;
 mod paths;
@@ -134,6 +132,7 @@ fn main() -> ExitCode {
         ["watch"] => fleet::watch(),
         ["control"] => control::list(false),
         ["control", "--json"] => control::list(true),
+
         ["global", rest @ ..] => global::dispatch(rest),
 
         // The agent-facing verbs. These are what an agent runs from its own
@@ -251,13 +250,6 @@ fn main() -> ExitCode {
             println!("{}", render::render(&items, term_width()));
             0
         }
-        // Scriptable equivalent of the ^K action, and what its test drives.
-        ["_copy-skill", dir, agent, name] => {
-            match sources::agents::copy_skill(dir, agent, name) {
-                Ok(p) => { println!("copied {name} -> {p}"); 0 }
-                Err(e) => { eprintln!("prelude: {e}"); 1 }
-            }
-        }
         // Deleting, without a terminal — and without the confirmation, which
         // is the launcher's job. This is how the guard that refuses anything
         // that is not a skill directory gets tested.
@@ -265,25 +257,6 @@ fn main() -> ExitCode {
             Ok(p) => { println!("moved to {}", p.display()); 0 }
             Err(e) => { eprintln!("prelude: {e}"); 1 }
         },
-        // Borrowing, without a terminal: print the command the ^K action
-        // would hand you, so what each agent is actually told can be diffed.
-        ["_lend-skill", agent, dir, name] => {
-            match lend::skill_flags(agent, std::path::Path::new(dir), name) {
-                Ok(f) => { println!("{}", lend::borrow_cmd(agent, &f, None, None)); 0 }
-                Err(e) => { eprintln!("prelude: {e}"); 1 }
-            }
-        }
-        ["_lend-mcp", agent, name] => {
-            let items = cache::gather_agents();
-            let hit = items.iter().find(|i| i.kind == item::Kind::Mcp && i.get("name") == *name);
-            match hit {
-                None => { eprintln!("prelude: no MCP server called {name}"); 1 }
-                Some(it) => match lend::resolve(it).and_then(|d| lend::mcp_flags(agent, &d)) {
-                    Ok(f) => { println!("{}", lend::borrow_cmd(agent, &f, None, None)); 0 }
-                    Err(e) => { eprintln!("prelude: {e}"); 1 }
-                },
-            }
-        }
         // The ^K panel as text. The panel is a second fzf, which a pty
         // harness cannot reliably capture, so this is how its contents get
         // checked.
@@ -750,7 +723,7 @@ fn copy_line(line: &str) -> i32 {
     let by_kind = match it.kind {
         Port | Proc => it.get("pid"),
         Ssh => it.get("host"),
-        Container | Mcp => it.get("name"),
+        Container => it.get("name"),
         Link => it.get("url"),
         File | Find | Dir => it.get("path"),
         Clip => it.get("full"),
@@ -1059,7 +1032,6 @@ mod tests {
         let mut all = vec![
             Item::new("claude", Kind::Agent).put("agent", "claude"),
             Item::new("/review", Kind::Skill),
-            Item::new("gmail", Kind::Mcp),
             Item::new("kill 42", Kind::Run),
             Item::new("old", Kind::Session),
             Item::new("cargo", Kind::Path),
@@ -1068,11 +1040,10 @@ mod tests {
         ];
         all.extend(crate::compute::scope_commands());
         let home = home_items(&all);
-        assert_eq!(home.len(), 5);
-        assert!(home.iter().all(|i| matches!(
-            i.kind,
-            Kind::Agent | Kind::Skill | Kind::Mcp | Kind::Run | Kind::Session
-        )));
+        // Skills and Sessions only. The Agent, Run and MCP rows are readouts
+        // with no Enter behind them; they stay in root search and their scopes.
+        assert_eq!(home.len(), 2);
+        assert!(home.iter().all(|i| matches!(i.kind, Kind::Skill | Kind::Session)));
         let root = root_items(&all);
         assert!(root.iter().any(|i| i.title == "Files & Folders"));
         assert!(root.iter().all(|i| !matches!(i.kind, Kind::Session | Kind::Path | Kind::Clip | Kind::History)));
@@ -1626,7 +1597,7 @@ mod tests {
         // `f` was written to the file and was unreachable forever.
         assert!(quicklink_conflict("f").is_some(), "f: is the file scope");
         assert!(quicklink_conflict("s").is_some());
-        assert!(quicklink_conflict("mcp").is_some());
+        assert!(quicklink_conflict("skill").is_some());
         assert!(quicklink_conflict("design").is_none());
         assert!(append_quicklink(String::new(), "f", &QuicklinkDraft {
             name: "Figma".into(), kind: "url", target: "https://figma.com".into(),
@@ -2095,7 +2066,7 @@ mod tests {
     /// as the launcher being broken.
     #[test]
     fn copying_commands_never_swallows_an_object() {
-        use crate::defaults::{enter_with, goes_to_launch_services, Default_, Verb};
+        use crate::defaults::{enter_with, goes_to_launch_services, Default_, Text, Verb};
         use crate::item::{Item, Kind::*};
 
         let link = Item::new("https://example.com", Link).put("url", "https://example.com");
@@ -2122,10 +2093,35 @@ mod tests {
 
         // The preference still has to *do* something, or it is a row that
         // changes nothing: every other row that would act hands its text over.
-        for k in [Msg, Skill, Run, Mcp, Session] {
+        for k in [Msg, Run, Session] {
             let it = Item::new("x", k);
             assert!(matches!(enter_with(&it, false), Default_::Act(_)), "{k:?}");
             assert_eq!(enter_with(&it, true), Default_::Insert, "{k:?}");
+        }
+
+        // A Skill is deliberately not in that list any more, and it is the
+        // third exclusion for a third reason. A Setting is a control; an
+        // object goes to Launch Services; a Skill *already* hands text over,
+        // so the preference's question is settled before it is asked and the
+        // only thing left for it to change is which text — which is not what
+        // the row claims to do.
+        //
+        // What it would have changed it to is the point: Enter gives the
+        // portable invocation, naming the Skill and the absolute path to its
+        // `SKILL.md`, which is the one form that works in an Agent you already
+        // have open and did not install the Skill into. `Insert` gives
+        // `/review`, which in that same Agent is a line of prose that does
+        // nothing, silently. Turning on `copy commands` must not quietly
+        // remove the ability to use a Skill outside the Agent that owns it.
+        let skill = Item::new("/review", Skill)
+            .put("name", "review")
+            .put("file", "/tmp/skills/review/SKILL.md");
+        for classic in [false, true] {
+            assert_eq!(
+                enter_with(&skill, classic),
+                Default_::InsertText(Text::SkillFile),
+                "a Skill hands over the portable invocation under enter = {classic}",
+            );
         }
 
         // And the screen that turns it back off keeps working.
@@ -2135,7 +2131,7 @@ mod tests {
         // The immunity is the Launch Services set exactly — the same three
         // verbs `link.rs` lets a web page reach, and no fourth.
         for v in [
-            Verb::CopyResult, Verb::RunSkill, Verb::ResumeSession, Verb::Answer,
+            Verb::CopyResult, Verb::ResumeSession, Verb::Answer,
             Verb::RunHere, Verb::RunInShell, Verb::Inspect, Verb::CdThere,
             Verb::EditSetting,
         ] {
@@ -2144,102 +2140,6 @@ mod tests {
         for v in [Verb::Open, Verb::Launch, Verb::OpenUrl] {
             assert!(goes_to_launch_services(Default_::Act(v)), "{v:?}");
         }
-    }
-
-    /// A borrowed server has to arrive in the borrower's own dialect, not
-    /// the lender's. These are the two translations, pinned.
-    #[test]
-    fn borrowed_mcp_is_translated_per_agent() {
-        use crate::lend::Mcp;
-        let stdio = Mcp::Stdio {
-            name: "node_repl".into(),
-            command: "/bin/node_repl".into(),
-            args: vec!["--serve".into()],
-            env: Vec::new(),
-        };
-        let j = stdio.to_claude_json();
-        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
-        assert_eq!(v["mcpServers"]["node_repl"]["command"], "/bin/node_repl");
-        assert_eq!(v["mcpServers"]["node_repl"]["args"][0], "--serve");
-
-        let http = Mcp::Http {
-            name: "chatcut".into(),
-            url: "https://example.test/mcp".into(),
-            headers: Vec::new(),
-        };
-        let v: serde_json::Value = serde_json::from_str(&http.to_claude_json()).unwrap();
-        assert_eq!(v["mcpServers"]["chatcut"]["type"], "http");
-        assert_eq!(v["mcpServers"]["chatcut"]["url"], "https://example.test/mcp");
-
-        // codex takes dotted overrides whose value half is TOML, so the
-        // string has to arrive quoted or a path with a slash in it parses
-        // as something else entirely.
-        let f = stdio.to_codex_flags();
-        assert_eq!(f[0], "-c");
-        assert!(f.contains(&r#"mcp_servers.node_repl.command="/bin/node_repl""#.to_string()), "{f:?}");
-        assert!(f.contains(&r#"mcp_servers.node_repl.args=["--serve"]"#.to_string()), "{f:?}");
-    }
-
-    /// The variadic-flag trap: `--mcp-config <path>` keeps eating bare words,
-    /// so a prompt typed after the borrowed command becomes a config file.
-    /// The `=` form is what stops it, and nothing may quietly undo that.
-    #[test]
-    fn borrowed_claude_flag_cannot_swallow_a_prompt() {
-        let m = crate::lend::Mcp::Http {
-            name: "x".into(),
-            url: "https://example.test/mcp".into(),
-            headers: Vec::new(),
-        };
-        let flags = crate::lend::mcp_flags("claude", &m).unwrap();
-        assert_eq!(flags.len(), 1, "must be one token, not flag-then-value: {flags:?}");
-        assert!(flags[0].starts_with("--mcp-config="), "{flags:?}");
-    }
-
-    /// Borrowing must never put a credential on the command line, because
-    /// the command goes to the shell prompt and from there into the history
-    /// this launcher reads back.
-    #[test]
-    fn borrowing_refuses_to_put_a_secret_on_the_command_line() {
-        use crate::lend::{mcp_flags, Mcp};
-        let secret = Mcp::Stdio {
-            name: "paid".into(),
-            command: "server".into(),
-            args: Vec::new(),
-            env: vec![("API_KEY".into(), "abc123".into())],
-        };
-        // codex can only be handed a server inline, so it must decline.
-        let e = mcp_flags("codex", &secret).unwrap_err();
-        assert!(e.contains("API_KEY"), "{e}");
-        // Whatever claude is given, the key itself is not in it.
-        for tok in mcp_flags("claude", &secret).unwrap() {
-            assert!(!tok.contains("abc123"), "secret leaked into {tok}");
-        }
-        let unrecognised = Mcp::Http {
-            name: "private".into(),
-            url: "https://example.test/mcp".into(),
-            headers: vec![("X-Custom".into(), "opaque-value".into())],
-        };
-        assert!(mcp_flags("codex", &unrecognised).unwrap_err().contains("private fields"));
-    }
-
-    /// Every agent has a different door, and three of the eight pairings
-    /// have none at all. Offering one that does not exist would produce a
-    /// command that fails after the launcher has already closed.
-    #[test]
-    fn borrowing_is_offered_only_where_it_exists() {
-        use crate::lend::{can_borrow_mcp, can_borrow_skill, skill_flags, Mcp};
-        assert!(can_borrow_mcp("claude") && can_borrow_mcp("codex"));
-        assert!(!can_borrow_mcp("pi") && !can_borrow_mcp("opencode"));
-        assert!(can_borrow_skill("pi") && can_borrow_skill("claude"));
-        assert!(!can_borrow_skill("codex") && !can_borrow_skill("opencode"));
-        let d = std::path::Path::new("/tmp/whatever");
-        assert!(skill_flags("pi", d, "demo").is_ok());
-        assert!(skill_flags("codex", d, "demo").is_err());
-
-        // claude.ai-hosted servers carry no definition to lend; that has to
-        // read as a refusal rather than an empty command.
-        assert!(Mcp::from_claude_get("claude.ai Gmail",
-            "claude.ai Gmail:\n  Scope: claude.ai config\n  Status: ✔ Connected").is_none());
     }
 
     /// Enter is already named in the main footer and in the action panel's
@@ -2365,12 +2265,7 @@ mod tests {
                 .map(|(id, ..)| id.to_string())
                 .collect()
         };
-        for item in [
-            Item::new("/review", Kind::Skill).put("name", "review"),
-            Item::new("codex mcp get node", Kind::Mcp)
-                .put("name", "node")
-                .put("capability_id", "mcp:node"),
-        ] {
+        for item in [Item::new("/review", Kind::Skill).put("name", "review")] {
             assert!(ids(&item).contains(&"capability-archive".to_string()));
             let archived = item.put("archived", "true");
             let archived_ids = ids(&archived);
@@ -2390,23 +2285,66 @@ mod tests {
         for item in [
             Item::new("claude", Kind::Agent).put("agent", "claude"),
             Item::new("/review", Kind::Skill).put("name", "review"),
-            Item::new("codex mcp get node", Kind::Mcp).put("name", "node"),
         ] {
             assert!(ids(&item).contains(&"favorite".to_string()));
             assert!(ids(&item.clone().put("favorite", "true")).contains(&"unfavorite".to_string()));
         }
     }
 
-    /// A skill's two bare forms are both offered, named, rather than one of
-    /// them being chosen for you.
+    /// The Skill-root table is a list of conventions, and what has to hold is
+    /// its shape rather than its contents.
     ///
-    /// Prelude used to pick: it asked tmux which agent was running in the pane
-    /// underneath the popup, gave that agent `/name`, and gave everyone else
-    /// the instruction to read the skill's file. The guess is unavailable now,
-    /// and the failure it was avoiding is still real — `/name` at an agent
+    /// Asserting the entries would only restate them. What can actually go
+    /// wrong is structural: a path that escapes `$HOME` and walks somewhere
+    /// nobody chose, the same directory listed twice so every Skill in it
+    /// arrives as two copies of itself, a label too wide for the column it is
+    /// rendered in — and, the one with visible behaviour behind it, a
+    /// vendor-specific root sorting above the neutral ones. `dir` and `file`
+    /// are the *first* copy discovered, and they are what Enter hands over, so
+    /// that order decides whether a Skill living in several places is offered
+    /// as somebody's private copy or as the one that keeps working after you
+    /// change Agent.
+    #[test]
+    fn every_skill_root_is_under_home_distinct_and_neutral_first() {
+        let roots = crate::sources::agents::skill_dirs();
+        let home = crate::paths::home();
+        assert!(roots.len() > 20, "the point of the table is breadth: {}", roots.len());
+        let mut seen = std::collections::HashSet::new();
+        for (path, label) in &roots {
+            assert!(path.starts_with(&home), "{} escapes home", path.display());
+            // Contains rather than equals: Antigravity's global root is
+            // genuinely `global_skills`, so an exact match would have to be
+            // relaxed by whoever added it — and relaxing an assertion to admit
+            // a new entry is how the assertion stops meaning anything.
+            assert!(
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("skills")),
+                "{} is not a skills directory",
+                path.display()
+            );
+            assert!(!label.is_empty() && label.len() <= 12, "{label} does not fit the column");
+            assert!(seen.insert(path.clone()), "{} is listed twice", path.display());
+        }
+        // The vendor-neutral roots lead, so a Skill in several places is
+        // handed over by the path that is not owned by one CLI.
+        let first_specific = roots.iter().position(|(_, label)| *label != "shared");
+        assert_eq!(first_specific, Some(2), "the two shared roots come first");
+    }
+
+    /// A skill's handover forms are all reachable and named, rather than one
+    /// of them being chosen for you — but the *general* one is on Enter.
+    ///
+    /// Prelude used to pick between them by asking tmux which agent was
+    /// running in the pane underneath the popup. That guess is unavailable
+    /// now, and the failure it was avoiding is still real: `/name` at an agent
     /// that does not have the skill is a line of prose that does nothing, and
-    /// does nothing *silently* — so both rows are present and say which is
-    /// which.
+    /// does nothing *silently*.
+    ///
+    /// So the ordering is by how conditional each form is. The portable
+    /// invocation works in any agent and needs nothing installed, and it is
+    /// Enter. `/name` needs that agent to own the skill, and `Start … with it`
+    /// needs you not to have an agent open already; both are conditional on
+    /// where you happen to be standing, and both are in `^K`.
     #[test]
     fn a_skill_offers_both_of_its_handover_forms() {
         use crate::item::{Item, Kind};
@@ -2415,35 +2353,31 @@ mod tests {
             .put("agent", "claude")
             .put("file", "/tmp/skills/review/SKILL.md")
             .put("missing", "codex");
+        // Enter is the form that needs no installation and no guess.
+        assert_eq!(
+            crate::defaults::by_kind(&skill),
+            crate::defaults::Default_::InsertText(crate::defaults::Text::SkillFile),
+        );
         let acts = crate::actions::actions_for(&skill, crate::defaults::Surface::Prompt);
         let ids: Vec<&str> = acts.iter().map(|(i, ..)| *i).collect();
-        assert!(ids.contains(&"skillcmd"), "{ids:?}");
-        assert!(ids.contains(&"skillfile"), "{ids:?}");
-        // And they are two different things to hand over, not one thing
-        // twice: the file form is an instruction, not a bare path.
+        assert!(ids.contains(&"skillcmd"), "the slash command stays reachable: {ids:?}");
+        assert!(
+            ids.iter().any(|id| id.starts_with("run")),
+            "so does starting a new agent with it: {ids:?}",
+        );
+        // …and the panel must not repeat Enter. `^K` is the opposite of the
+        // primary action, so the form Enter already hands over does not
+        // deserve a row of its own two keystrokes away.
+        assert!(!ids.contains(&"skillfile"), "^K repeats Enter: {ids:?}");
+        // The forms are genuinely different text, not one thing twice: the
+        // portable one is an instruction carrying the name *and* the absolute
+        // path, because the path is what makes it work without installing
+        // anything and what tells two skills sharing a name apart.
         let file = crate::defaults::text_for(&skill, crate::defaults::Text::SkillFile);
-        assert!(file.starts_with("Read ") && file.ends_with(" and follow it."), "{file}");
+        assert!(file.contains("review"), "{file}");
+        assert!(file.contains("/tmp/skills/review/SKILL.md"), "{file}");
+        assert!(file.ends_with(" and follow it."), "{file}");
         assert_ne!(file, skill.cmd);
-    }
-
-    /// What the ^K panel actually offers, without standing up an fzf to
-    /// look at it. The row is built exactly as the mcp source builds one.
-    #[test]
-    fn panel_offers_the_loan_only_to_other_agents() {
-        use crate::item::{Item, Kind};
-        let it = Item::new("codex mcp get node_repl", Kind::Mcp)
-            .title("node_repl")
-            .put("agent", "codex")
-            .put("name", "node_repl");
-        let ids: Vec<&str> = crate::actions::actions_for(&it, crate::defaults::Surface::Prompt).iter().map(|(i, ..)| *i).collect();
-        // Never back to the agent that already has it.
-        assert!(!ids.contains(&"lend:codex"), "{ids:?}");
-        // pi and opencode have no way to take one, so they are not offered
-        // however many of them are installed.
-        assert!(!ids.contains(&"lend:pi") && !ids.contains(&"lend:opencode"), "{ids:?}");
-        if crate::agent::installed().contains(&"claude") {
-            assert!(ids.contains(&"lend:claude"), "{ids:?}");
-        }
     }
 
     /// The loan that needs no flag and no restart: a skill handed to an
@@ -2488,47 +2422,6 @@ mod tests {
         for k in [File, Find, Config, Dir] {
             assert_eq!(on_enter(&Item::new("x", k)), Default_::Act(Verb::Open), "{k:?}");
         }
-    }
-
-    /// Resuming with a borrowed capability exists only where the Agent has a
-    /// one-run flag for it. Three of the eight pairings have none, and a
-    /// command assembled for one of those fails after the launcher has
-    /// already closed — the same rule `fork_cmd` follows.
-    #[test]
-    fn resuming_with_a_capability_is_absent_where_the_agent_cannot() {
-        use crate::item::{Item, Kind};
-        let session = |agent: &str| {
-            Item::new(format!("{agent} --resume abc"), Kind::Session)
-                .title("a conversation")
-                .put("agent", agent)
-                .put("id", "abc")
-                .put("session_id", format!("{agent}:abc"))
-        };
-        let ids = |agent: &str| -> Vec<String> {
-            crate::actions::actions_for(&session(agent), crate::defaults::Surface::Prompt)
-                .iter().map(|(id, ..)| id.to_string()).collect()
-        };
-        // claude can take both; codex has no skill flag; pi has no MCP flag;
-        // opencode has neither.
-        assert!(ids("claude").contains(&"session-skill".to_string()));
-        assert!(ids("claude").contains(&"session-mcp".to_string()));
-        assert!(!ids("codex").contains(&"session-skill".to_string()), "{:?}", ids("codex"));
-        assert!(ids("codex").contains(&"session-mcp".to_string()));
-        assert!(ids("pi").contains(&"session-skill".to_string()));
-        assert!(!ids("pi").contains(&"session-mcp".to_string()), "{:?}", ids("pi"));
-        assert!(!ids("opencode").contains(&"session-skill".to_string()));
-        assert!(!ids("opencode").contains(&"session-mcp".to_string()));
-        // Never against a live Run: that is the competing resume the whole
-        // active-Session rule exists to stop.
-        let active: Vec<String> = crate::actions::actions_for(&session("claude").put("active_run", "claude:7:1"), crate::defaults::Surface::Prompt)
-            .iter().map(|(id, ..)| id.to_string()).collect();
-        assert!(!active.contains(&"session-skill".to_string()), "{active:?}");
-        assert!(!active.contains(&"session-mcp".to_string()), "{active:?}");
-        // The readable export sits beside the authoritative raw one.
-        let with_file: Vec<String> = crate::actions::actions_for(&session("claude").put("file", "/tmp/abc.jsonl"), crate::defaults::Surface::Prompt)
-            .iter().map(|(id, ..)| id.to_string()).collect();
-        assert!(with_file.contains(&"session-export".to_string()));
-        assert!(with_file.contains(&"session-export-md".to_string()));
     }
 
     /// "Open all copies" is only a distinct action when there is more than
@@ -3068,59 +2961,20 @@ mod tests {
         let ap = Item::new("open -a Zed", Kind::App).put("path", "/Applications/Zed.app");
         assert!(ids(&ap).contains(&"reveal-finder".to_string()), "{:?}", ids(&ap));
         assert!(ids(&ap).contains(&"trash".to_string()), "{:?}", ids(&ap));
-        // MCP inspection is the default; auth, installation and removal are alternatives.
-        let m = Item::new("codex mcp get n", Kind::Mcp)
-            .put("name", "n")
-            .put("agent", "codex")
-            .put("health", "needsauth");
-        let mi = ids(&m);
+        // A Skill is reachable by the one form that works anywhere, and its
+        // copy is removable — those are the two management actions it has.
+        let sk = Item::new("/review", Kind::Skill)
+            .put("name", "review")
+            .put("agent", "claude")
+            .put("dir", "/tmp/skills/review")
+            .put("file", "/tmp/skills/review/SKILL.md")
+            .put("copies", r#"[["claude","/tmp/skills/review"]]"#);
+        let si = ids(&sk);
         assert_eq!(
-            crate::defaults::describe(&m, crate::defaults::Surface::Prompt),
-            "Show what it exposes",
-            "inspection is the MCP default, not another action row"
+            crate::defaults::describe(&sk, crate::defaults::Surface::Clipboard),
+            "Copy it for any agent",
         );
-        assert!(mi.contains(&"mcplogin".to_string()), "not logged in, no way in: {mi:?}");
-        assert!(mi.contains(&"mcpremove".to_string()), "{mi:?}");
-        let has_install_target = crate::agent::installed().into_iter().any(|name| {
-            name != "codex"
-                && crate::agent::get(name).is_some_and(|spec| spec.capabilities.install_mcp)
-        });
-        assert_eq!(
-            mi.iter().any(|i| i.starts_with("install:") || i == "menu:install"),
-            has_install_target,
-            "an install action is honest only when another installed agent can receive it: {mi:?}"
-        );
-        // A healthy server is not nagged about logging in.
-        let ok = Item::new("codex mcp get n", Kind::Mcp)
-            .put("name", "n").put("agent", "codex").put("health", "ok");
-        assert!(!ids(&ok).contains(&"mcplogin".to_string()), "{:?}", ids(&ok));
-    }
-
-    /// Installing a server for good puts its definition on the command line,
-    /// so unlike lending there is no form of it that keeps a credential off
-    /// the shell history this launcher reads back. Both agents must refuse.
-    #[test]
-    fn installing_a_server_for_good_refuses_to_carry_a_secret() {
-        use crate::lend::{install_cmd, Mcp};
-        let secret = Mcp::Stdio {
-            name: "paid".into(),
-            command: "server".into(),
-            args: Vec::new(),
-            env: vec![("API_KEY".into(), "abc123".into())],
-        };
-        for agent in ["claude", "codex"] {
-            let e = install_cmd(agent, &secret).unwrap_err();
-            assert!(e.contains("API_KEY"), "{agent}: {e}");
-        }
-        // Without one, both get a command in their own dialect.
-        let plain = Mcp::Http {
-            name: "chatcut".into(),
-            url: "https://example.test/mcp".into(),
-            headers: Vec::new(),
-        };
-        assert!(install_cmd("claude", &plain).unwrap().starts_with("claude mcp add-json "));
-        let c = install_cmd("codex", &plain).unwrap();
-        assert!(c.starts_with("codex mcp add ") && c.contains("--url"), "{c}");
+        assert!(si.iter().any(|i| i.starts_with("rm")), "{si:?}");
     }
 
     /// Deleting is the only destructive thing Prelude does to a user's
@@ -3155,6 +3009,7 @@ mod tests {
         // And traversal cannot dress something up as a skill.
         assert!(!is_skill_dir(&home.join(".claude/skills/../../Documents")));
     }
+
 
     /// A skill merged across four agents is four directories behind one row.
     /// Deleting has to name which, so the panel offers one entry per copy —
@@ -3532,39 +3387,6 @@ mod tests {
     }
 
     #[test]
-    fn mcp_fingerprints_omit_private_definition_values() {
-        use crate::lend::Mcp;
-        let one = Mcp::Stdio {
-            name: "server".into(), command: "node".into(), args: vec!["run.js".into()],
-            env: vec![("API_KEY".into(), "first-secret-value".into())],
-        };
-        let two = Mcp::Stdio {
-            name: "server".into(), command: "node".into(), args: vec!["run.js".into()],
-            env: vec![("OTHER_KEY".into(), "another-secret-value".into())],
-        };
-        assert_eq!(one.public_fingerprint(), two.public_fingerprint());
-        assert!(one.has_sensitive_fields());
-        assert!(!one.public_fingerprint().contains("secret"));
-        let credential_url = Mcp::Http {
-            name: "remote".into(),
-            url: "https://user:pass@example.test/mcp".into(),
-            headers: vec![],
-        };
-        assert!(credential_url.has_sensitive_fields());
-        assert_eq!(credential_url.secret_field().as_deref(), Some("URL credential"));
-        assert_eq!(
-            crate::sources::agents::safe_mcp_detail("https://user:pass@example.test/mcp"),
-            "private target omitted",
-        );
-        let hosted = crate::item::Item::new("claude mcp get hosted", crate::item::Kind::Mcp)
-            .put("agent", "claude")
-            .put("name", "hosted")
-            .put("portable", "false");
-        assert!(crate::actions::agent_options(&hosted, "lend").is_empty());
-        assert!(crate::actions::agent_options(&hosted, "install").is_empty());
-    }
-
-    #[test]
     fn control_snapshot_exposes_edges_instead_of_flat_rows() {
         use crate::item::{Item, Kind};
         let run = Item::new("claude prompt-that-must-not-enter-the-graph", Kind::Run)
@@ -3584,13 +3406,8 @@ mod tests {
             .put("name", "review")
             .put("agent", "claude")
             .put("archived", "true");
-        let mcp = Item::new("claude mcp get node", Kind::Mcp)
-            .put("name", "node")
-            .put("agent", "claude")
-            .put("capability_id", "mcp:node")
-            .put("archived", "true");
         let graph = crate::control::Snapshot::from_items(
-            &[run], &[session], &[skill], &[mcp], &[],
+            &[run], &[session], &[skill], &[],
         );
         assert_eq!(graph.schema, 4);
         let claude = graph.agents.iter().find(|agent| agent.id == "claude").unwrap();
@@ -3600,136 +3417,8 @@ mod tests {
         assert_eq!(graph.sessions[0].active_run.as_deref(), Some("claude:7:1"));
         assert_eq!(graph.sessions[0].native_title.as_deref(), Some("native"));
         assert!(graph.sessions[0].pinned && graph.sessions[0].archived);
-        assert!(graph.skills[0].archived && graph.mcp[0].archived);
+        assert!(graph.skills[0].archived);
         assert!(!serde_json::to_string(&graph).unwrap().contains("prompt-that-must-not-enter-the-graph"));
-    }
-
-    /// A confirmed MCP name is read off a command line, and what is written
-    /// there is the sanitised key — never the display name.
-    #[test]
-    fn a_hosted_server_finds_the_run_that_borrowed_it_under_its_sanitised_key() {
-        use crate::item::{Item, Kind};
-        let run = Item::new("kill 7", Kind::Run)
-            .put("agent", "claude")
-            .put("run_id", "claude:7:1")
-            .put("pid", "7")
-            // `lend::Mcp::key` — the staged file's name and codex's dotted
-            // path segment. This is the only spelling a process ever carries.
-            .put("run_mcp", "claude_ai_Gmail");
-        let server = Item::new("claude mcp get gmail", Kind::Mcp)
-            .put("agent", "claude")
-            .put("name", "claude.ai Gmail")
-            .put("capability_id", "mcp:claude.ai gmail")
-            .put("portable", "true");
-        let graph = crate::control::Snapshot::from_items(&[run], &[], &[], &[server], &[]);
-        assert_eq!(
-            graph.mcp[0].runs, ["claude:7:1"],
-            "a display name and a key are the same server"
-        );
-    }
-
-    /// "Resume with a skill…" means one the Agent does not have.
-    #[test]
-    fn the_resume_with_pickers_offer_only_what_the_agent_does_not_own() {
-        use crate::actions::{borrowable_servers, borrowable_skills};
-        use crate::item::{Item, Kind};
-        let skill = |name: &str, owners: &str| {
-            Item::new(format!("/{name}"), Kind::Skill)
-                .put("name", name)
-                .put("agent", owners)
-                .put("dir", format!("/skills/{name}"))
-        };
-        let skills = [
-            skill("deploy", "claude"),
-            skill("review", "codex, pi"),
-            skill("notes", "shared"),
-            skill("retired", "codex").put("archived", "true"),
-        ];
-        let offered = |agent: &str| -> Vec<String> {
-            borrowable_skills(&skills, agent).into_iter().map(|(_, name, _)| name).collect()
-        };
-        assert_eq!(offered("claude"), ["review", "notes"], "owned and archived skills stay out");
-        assert_eq!(offered("codex"), ["deploy", "notes"]);
-        // `~/.agents/skills` is a location, not an Agent — `missing_agents`
-        // reports a Skill that lives only there as missing from every one of
-        // them — so a shared Skill stays borrowable for all of them.
-        assert!(offered("pi").contains(&"notes".to_string()));
-        // Nothing known about the host means nothing is excluded.
-        assert_eq!(offered("").len(), skills.len() - 1, "archive puts it away everywhere");
-
-        let server = |name: &str, owner: &str, portable: &str| {
-            Item::new(format!("{owner} mcp get {name}"), Kind::Mcp)
-                .put("name", name)
-                .put("agent", owner)
-                .put("portable", portable)
-        };
-        let servers = [
-            server("node_repl", "claude", "true"),
-            server("chatcut", "codex", "true"),
-            server("retired", "codex", "true").put("archived", "true"),
-            server("claude.ai Gmail", "claude", "false"),
-        ];
-        let names: Vec<String> =
-            borrowable_servers(&servers, "claude").into_iter().map(|(_, name, _)| name).collect();
-        assert_eq!(names, ["chatcut"], "its own server, and an unlendable one, are not choices");
-    }
-
-    #[test]
-    fn mcp_tool_inventory_keeps_only_safe_bounded_metadata() {
-        assert_eq!(crate::sources::agents::normalize_transport("streamable_http"), "http");
-        assert_eq!(crate::sources::agents::normalize_transport("stdio"), "stdio");
-        assert_eq!(crate::sources::agents::normalize_transport("hosted"), "hosted");
-        let response = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2,
-            "result": {"tools": [
-                {"name": "search", "description": "Search the public index"},
-                {"name": "API_KEY_exfiltrate", "description": "must disappear"},
-                {"name": "login", "description": "Use password=abcdefghijklmnop"}
-            ]}
-        });
-        let tools = crate::mcp_tools::parse_tools_response(&response);
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].name, "search");
-        assert_eq!(tools[0].description, "Search the public index");
-        assert_eq!(tools[1].name, "login");
-        assert!(tools[1].description.is_empty());
-        let json = serde_json::to_string(&tools).unwrap();
-        assert!(!json.contains("abcdefghijklmnop") && !json.contains("exfiltrate"));
-        let failed = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2,
-            "error": {"message": "startup failed with API_KEY=do-not-retain"}
-        });
-        assert!(crate::mcp_tools::parse_tools_response(&failed).is_empty());
-        assert!(!serde_json::to_string(&crate::mcp_tools::parse_tools_response(&failed))
-            .unwrap().contains("do-not-retain"));
-    }
-
-    #[test]
-    fn control_snapshot_groups_mcp_variants_without_private_definitions() {
-        use crate::capability::McpVariant;
-        use crate::item::{Item, Kind};
-        let variants = vec![
-            McpVariant { agent: "claude".into(), health: "ok".into(), summary: "node a.js".into(), fingerprint: "a".into(), source: "semantic".into(), public_definition: serde_json::json!({"type":"stdio","command":"node","args":["a.js"],"private_fields":0}), sensitive: false, portable: true, ..Default::default() },
-            McpVariant { agent: "codex".into(), health: "auth".into(), summary: "node b.js".into(), fingerprint: "b".into(), source: "semantic".into(), public_definition: serde_json::json!({"type":"stdio","command":"node","args":["b.js"],"private_fields":1}), sensitive: true, portable: true, ..Default::default() },
-        ];
-        let common = serde_json::to_string(&variants).unwrap();
-        let claude = Item::new("claude mcp get shared", Kind::Mcp)
-            .put("agent", "claude").put("name", "shared").put("capability_id", "mcp:shared")
-            .put("comparison", "divergent").put("variants", &common);
-        let codex = Item::new("codex mcp get shared", Kind::Mcp)
-            .put("agent", "codex").put("name", "shared").put("capability_id", "mcp:shared")
-            .put("comparison", "divergent").put("variants", common)
-            .put("def", "private-definition-must-not-be-in-control");
-        let diff = crate::capability::mcp_definition_diff(&claude);
-        assert!(diff.iter().any(|line| line == "args[0]"));
-        assert!(diff.iter().any(|line| line.contains("a.js")));
-        assert!(diff.iter().any(|line| line.contains("b.js")));
-        let graph = crate::control::Snapshot::from_items(&[], &[], &[], &[claude, codex], &[]);
-        assert_eq!(graph.mcp.len(), 1);
-        assert_eq!(graph.mcp[0].owners, ["claude", "codex"]);
-        assert_eq!(graph.mcp[0].comparison, "divergent");
-        let json = serde_json::to_string(&graph).unwrap();
-        assert!(!json.contains("private-definition-must-not-be-in-control"));
     }
 
     #[test]

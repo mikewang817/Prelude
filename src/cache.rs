@@ -189,7 +189,6 @@ pub fn privacy_migrations() {
     }
     let marker = paths::cache().join("capability-privacy-v1");
     if !marker.exists() {
-        let _ = read_cached("mcp"); // rewrites the MCP cache without `def`
         for name in ["search-items.json", "list.txt", "home.txt"] {
             let _ = std::fs::remove_file(paths::cache().join(name));
         }
@@ -208,27 +207,8 @@ pub fn read_cached(name: &str) -> Vec<Item> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    let mut scrubbed = false;
     for it in &mut items {
-        // Older MCP caches retained complete definitions for fast lending.
-        // Purge every one while reading so an upgrade stops exposing private
-        // arguments before the background refresh lands.
-        if name == "mcp" && !it.get("def").is_empty() {
-            it.data.remove("def");
-            // Old caches did not distinguish why a definition was private.
-            // Conservatively mark it until the authoritative CLI refreshes.
-            it.data.insert("sensitive".into(), "true".into());
-            scrubbed = true;
-        }
         it.score = it.band() as f64 + it.get("rank").parse::<f64>().unwrap_or(0.0);
-    }
-    if scrubbed {
-        if let Ok(json) = serde_json::to_vec(&items) {
-            let _ = write_atomic(&cache_file(name), &json);
-        }
-        for derived in ["search-items.json", "list.txt", "home.txt"] {
-            let _ = std::fs::remove_file(paths::cache().join(derived));
-        }
     }
     items
 }
@@ -542,7 +522,6 @@ fn resting(name: &str) -> bool {
 
 fn refresh_ttl(name: &str) -> u64 {
     match name {
-        "mcp-tools" => 300,
         // Five minutes, and the number is bounded from both ends. A TTL is a
         // *minimum* gap between checks, so this is a ceiling of twelve
         // requests an hour against GitHub's sixty unauthenticated ones — and
@@ -555,7 +534,6 @@ fn refresh_ttl(name: &str) -> u64 {
         // outrun GitHub's own propagation. It was six hours, which spent none
         // of the headroom and cost most of a day of not being told.
         "update" => 300,
-        "mcp" => 60,
         "skill-hashes" => 30,
         _ => 5,
     }
@@ -630,13 +608,11 @@ const SLOW: &[Source] = &[
     // Hundreds of session files, each needing its head parsed.
     ("sessions", crate::sources::sessions::all),
     // `claude mcp list` runs a network health check on every server.
-    ("mcp", crate::sources::agents::mcp),
     // Full Skill trees can contain scripts and references. Hash them away
     // from the launch path; gather reads only the small fingerprint cache.
     ("skill-hashes", crate::sources::agents::skill_hashes),
     // MCP initialize + tools/list can start local server processes. It is a
     // background inventory, never part of health gather or a keypress.
-    ("mcp-tools", crate::mcp_tools::inventory),
     // One request to GitHub, at most twelve times an hour, and only when the
     // `update` setting is anything but `off`. Degrades to nothing like every
     // other source here.
@@ -752,7 +728,6 @@ pub fn gather() -> Vec<Item> {
     // the MCP list is wanted twice — between them they were most of the
     // local half of a gather, spent parsing the same two files over.
     let sessions = timed("read sessions", || read_cached("sessions"));
-    let mcp = timed("read mcp", || read_cached("mcp"));
     let runs = timed("running::live", || crate::sources::running::live_with_sessions(&sessions));
     let sessions = timed("annotate", || crate::sources::running::annotate_sessions(sessions, &runs));
     timed("write sessions-linked", || write_cached_if_changed("sessions-linked", &sessions));
@@ -785,7 +760,6 @@ pub fn gather() -> Vec<Item> {
             .take(crate::sources::sessions::IN_MAIN_LIST)
             .cloned(),
     );
-    items.extend(mcp.iter().cloned());
     // The `fleet` cache is deliberately *not* extended here, unlike its three
     // neighbours. It records who is running, not what they are doing, and
     // `running::live` below is what turns it into rows. Both went in, the
@@ -816,7 +790,7 @@ pub fn gather() -> Vec<Item> {
     items.extend(timed("apps", crate::sources::machine::apps));
     items.extend(timed("system", crate::sources::machine::system));
     items.extend(timed("configs", crate::sources::agents::configs));
-    items.extend(timed("summary", || crate::sources::agents::summary(&skills, &mcp, &sessions, &runs)));
+    items.extend(timed("summary", || crate::sources::agents::summary(&skills, &sessions, &runs)));
     // Prelude's own preferences. A handful of files under two kilobytes and
     // two `stat`s; `root_items` does not admit the kind, so they are reachable
     // through `set:` and nowhere else.
@@ -864,7 +838,7 @@ pub fn gather_agents() -> Vec<Item> {
     write_cached_if_changed("sessions-linked", &sessions);
     let skills = crate::sources::agents::skills_with(&sessions);
     let mut items = crate::bus::items();
-    items.extend(crate::sources::agents::summary(&skills, &mcp, &sessions, &runs));
+    items.extend(crate::sources::agents::summary(&skills, &sessions, &runs));
     items.extend(runs);
     items.extend(skills);
     items.extend(mcp);
@@ -1034,7 +1008,7 @@ mod tests {
     #[test]
     fn a_partition_that_could_not_be_asked_keeps_the_rows_it_had() {
         let mcp = |agent: &str, name: &str| {
-            Item::new(format!("{agent}:{name}"), crate::item::Kind::Mcp).put("agent", agent)
+            Item::new(format!("{agent}:{name}"), crate::item::Kind::Skill).put("agent", agent)
         };
         let cached = vec![
             mcp("claude", "drive"),

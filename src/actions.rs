@@ -29,7 +29,6 @@ fn a(id: &'static str, label: impl Into<String>, sub: impl Into<String>) -> Act 
 /// choice of agent. Raycast's answer is a submenu, and it is the right one:
 /// the verb is the decision, the agent is a parameter of it.
 pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
-    let missing: Vec<&str> = it.get("missing").split(',').filter(|s| !s.is_empty()).collect();
     let has: Vec<&str> = it
         .get("agent")
         .split(',')
@@ -38,70 +37,6 @@ pub fn agent_options(it: &Item, verb: &str) -> Vec<(String, String, String)> {
         .collect();
     match verb {
         "run" => has.iter().map(|n| (format!("run:{n}"), (*n).to_string(), String::new())).collect(),
-        "lend" => match it.kind {
-            // A skill can only be borrowed by an agent that lacks it.
-            Kind::Skill if it.get("source_sensitive") == "true" => Vec::new(),
-            Kind::Skill => missing
-                .iter()
-                .filter(|n| **n != "shared" && crate::lend::can_borrow_skill(n))
-                .filter(|n| crate::agent::installed().contains(*n))
-                .map(|n| (format!("lend:{n}"), (*n).to_string(), String::new()))
-                .collect(),
-            // An MCP server can go to any other agent that has a flag for it.
-            _ if it.get("portable") == "false" => Vec::new(),
-            _ => {
-                let mut owners: Vec<String> = serde_json::from_str(it.get("owners")).unwrap_or_default();
-                if owners.is_empty() { owners.push(it.get("agent").to_string()); }
-                crate::agent::installed()
-                    .into_iter()
-                    .filter(|n| !owners.iter().any(|owner| owner == n) && crate::lend::can_borrow_mcp(n))
-                    .map(|n| (format!("lend:{n}"), n.to_string(), String::new()))
-                    .collect()
-            }
-        },
-        "cp" if it.kind == Kind::Skill && it.get("source_sensitive") == "true" => Vec::new(),
-        "cp" => {
-            let mut v: Vec<(String, String, String)> = missing
-                .iter()
-                .filter(|name| {
-                    crate::agent::get(name).is_some_and(|spec| spec.capabilities.install_skill)
-                })
-                .map(|n| (format!("cp:{n}"), (*n).to_string(), String::new()))
-                .collect();
-            if v.len() > 1 {
-                v.push(("cp:*".into(), "all of them".into(), format!("{} agents", v.len())));
-            }
-            v
-        }
-        // Every other installed agent that has an `mcp add` of its own.
-        "install" if it.kind == Kind::Mcp
-            && (it.get("portable") == "false" || it.get("sensitive") == "true") => Vec::new(),
-        "install" => {
-            let mut owners: Vec<String> = serde_json::from_str(it.get("owners")).unwrap_or_default();
-            if owners.is_empty() { owners.push(it.get("agent").to_string()); }
-            crate::agent::installed()
-                .into_iter()
-                .filter(|name| {
-                    !owners.iter().any(|owner| owner == name)
-                        && crate::agent::get(name).is_some_and(|spec| spec.capabilities.install_mcp)
-                })
-                .map(|n| (format!("install:{n}"), n.to_string(), String::new()))
-                .collect()
-        }
-        "mcpsync" if it.get("portable") == "false" || it.get("sensitive") == "true" => Vec::new(),
-        "mcpsync" => {
-            let variants = crate::capability::mcp_variants(it);
-            let owner = it.get("agent");
-            let source_hash = it.get("definition_hash");
-            variants.into_iter()
-                .filter(|variant| variant.agent != owner && variant.fingerprint != source_hash)
-                .map(|variant| (
-                    format!("mcp-sync:{}", variant.agent),
-                    variant.agent.clone(),
-                    format!("replace {} with {owner}'s definition", variant.agent),
-                ))
-                .collect()
-        }
         "diff" | "sync" => {
             let copies = crate::capability::copies(it);
             let mut options = Vec::new();
@@ -171,20 +106,6 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             }
             if crate::sources::sessions::fork_cmd(it.get("agent"), it.get("id")).is_some() {
                 v.push(a("session-fork", "Fork conversation", "new Session with this context"));
-            }
-            // Resuming with something the Agent does not own, for one run.
-            // Absent for the agents with no one-run syntax, on exactly the
-            // rule `fork_cmd` follows above: a command assembled for those
-            // would look right on the prompt and fail after the launcher had
-            // closed. And never against a live Run, for the same reason
-            // `Resume now` is not offered there — it would start a competitor.
-            if it.get("active_run").is_empty() && !it.get("id").is_empty() {
-                if crate::lend::can_borrow_skill(it.get("agent")) {
-                    v.push(a("session-skill", "Resume with a skill…", "for this run only"));
-                }
-                if crate::lend::can_borrow_mcp(it.get("agent")) {
-                    v.push(a("session-mcp", "Resume with an MCP server…", "for this run only"));
-                }
             }
             if it.get("pinned") == "true" {
                 v.push(a("session-unpin", "Unpin conversation", "return to recency order"));
@@ -347,25 +268,26 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
         Kind::Skill => {
             let target = first_nonempty(it, &["file", "dir"]);
             let mut v = Vec::new();
-            with_options(&mut v, it, "run", "Run with {}", "Run with…", "");
-            // The two bare forms of the same skill, for a conversation that
-            // is already open somewhere else. `/name` works only for an agent
-            // that has it — to any other it is a line of prose that means
-            // nothing, silently — so the file pointer sits beside it rather
-            // than behind a guess about who you are talking to. Prelude used
-            // to make that guess by asking tmux what the pane underneath was
-            // running; with no pane underneath, the choice is yours.
+            // Enter is the portable invocation, so the panel carries the two
+            // *narrower* forms instead — each useful, neither general.
+            //
+            // `/name` is the shortest thing to type and works only in an Agent
+            // that owns this Skill; to any other it is a line of prose that
+            // does nothing, silently. `Run with…` starts a new Agent, which is
+            // the right answer only when you do not already have one. Both
+            // used to be ahead of the general form, which meant the panel led
+            // with the two answers that are conditional on where you happen to
+            // be standing.
             if !target.is_empty() {
                 v.push(a("skillcmd", "Copy the slash command", &it.cmd));
-                v.push(a("skillfile", "Point an agent at its file", &target));
             }
+            with_options(&mut v, it, "run", "Start {} with it", "Start an agent with it…", "");
             // Borrowing comes before copying: it is the lighter of the two,
             // and the one that is nearly always what was meant. Copying puts
             // a second copy of the skill on disk, to be maintained forever;
             // borrowing lasts exactly one run and leaves nothing behind.
             with_options(&mut v, it, "lend", "Prepare one-off run with {}",
                          "Prepare one-off run with…", "copies command · nothing installed");
-            with_options(&mut v, it, "cp", "Install in {}", "Install into…", "");
             if it.get("integrity") == "divergent" {
                 with_options(&mut v, it, "diff", "Compare {}", "Compare copies…",
                              "before replacing either copy");
@@ -392,56 +314,6 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             // on a number the row only hints at.
             with_options(&mut v, it, "rm", "Delete {} copy…", "Delete a copy…",
                          "moves it to the Trash");
-            v
-        }
-        Kind::Mcp => {
-            let target = first_nonempty(it, &["file", "dir", "config"]);
-            let owner = it.get("agent");
-            let mut v = Vec::new();
-            if !it.get("tools").is_empty() && it.get("tools") != "[]" {
-                let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(it.get("tools"))
-                    .map(|tools| tools.len()).unwrap_or(0);
-                v.push(a("mcp-tools", "Show cached tools", format!("{count} tools")));
-            }
-            v.push(a("mcprefresh", if owner == "claude" {
-                "Test connection now"
-            } else {
-                "Refresh status now"
-            }, owner));
-            if it.get("transport") == "stdio" && it.get("health") != "disabled" {
-                v.push(a("mcp-tools-refresh", "Refresh tool inventory", "explicit protocol handshake"));
-            }
-            // Only offered to agents that can take one for a single run, and
-            // never back to the one that already has it. Whether *this*
-            // particular server can be lent at all takes a subprocess to
-            // find out, so that answer arrives when the action runs rather
-            // than being guessed at here.
-            with_options(&mut v, it, "lend", "Prepare one-off use with {}",
-                         "Prepare one-off use with…", &format!("copies command · from {owner}"));
-            // Slot 7. Lending lasts one run; this is the other half, and it
-            // uses the agent's own `mcp add` rather than editing anyone's
-            // config file — the CLI knows the format and we do not have to.
-            with_options(&mut v, it, "install", "Copy install command for {}",
-                         "Copy install command…", "review before running");
-            if crate::capability::mcp_variants(it).len() > 1 {
-                v.push(a("mcpcompare", "Compare Agent definitions", "redacted capability matrix"));
-            }
-            if it.get("comparison") == "divergent" {
-                with_options(&mut v, it, "mcpsync", "Prepare replacement for {}",
-                             "Prepare definition replacement…", "shows redacted comparison first");
-            }
-            // Inspection is Enter at a shell and is stated in the header, so
-            // it is not repeated as a selectable action here.
-            // A row that says `⚠ not logged in` must offer a route forward.
-            if matches!(it.get("health"), "auth" | "needsauth" | "failed") {
-                v.push(a("mcplogin", "Copy login command", format!("{owner} mcp login")));
-            }
-            // Configuration changes are copied for review rather than run.
-            if !target.is_empty() {
-                v.push(a("open", "Open owner configuration", &target));
-            }
-            v.push(a("copy", "Copy server name", ""));
-            v.push(a("mcpremove", "Copy remove command…", format!("{owner} mcp remove")));
             v
         }
         Kind::Find if it.get("index_kind") == "folder" => folder_actions(it),
@@ -555,7 +427,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
         let action = if it.get("archived") == "true" {
             a("capability-unarchive", "Restore from archive", "return to normal inventory")
         } else {
-            let scope = if it.kind == Kind::Skill { "skill:is:archived" } else { "mcp:is:archived" };
+            let scope = "skill:is:archived";
             a("capability-archive", "Archive in Prelude", format!("find later with {scope}"))
         };
         if it.get("archived") == "true" {
@@ -595,7 +467,6 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             | Kind::Session
             | Kind::App
             | Kind::Skill
-            | Kind::Mcp
             | Kind::Setting
             | Kind::File
             | Kind::Find
@@ -667,7 +538,6 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
                 | Default_::Act(
                     Verb::CopyResult
                         | Verb::ResumeSession
-                        | Verb::RunSkill
                         | Verb::Inspect
                         | Verb::CdThere
                 )
@@ -709,7 +579,7 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
 pub fn is_destructive(kind: Kind, id: &str) -> bool {
     matches!(
         id,
-        "killrun" | "stop" | "trash" | "session-trash" | "mcpremove" | "quicklink-remove"
+        "killrun" | "stop" | "trash" | "session-trash" | "quicklink-remove"
     )
         || id.starts_with("rm:")
         || id.starts_with("sync:")
@@ -778,103 +648,6 @@ fn open_actions(
         v.push(a("trash", "Move it to the Trash…", "recoverable from Finder"));
     }
     v
-}
-
-fn mcp_tool_lines(it: &Item) -> Vec<String> {
-    let tools: Vec<crate::mcp_tools::Tool> = serde_json::from_str(it.get("tools")).unwrap_or_default();
-    if tools.is_empty() {
-        return vec![format!("tool inventory: {}", it.get("tools_status"))];
-    }
-    tools.into_iter().map(|tool| {
-        if tool.description.is_empty() { tool.name } else { format!("{} · {}", tool.name, tool.description) }
-    }).collect()
-}
-
-fn mcp_matrix_lines(it: &Item) -> Vec<String> {
-    let mut lines: Vec<String> = crate::capability::mcp_variants(it).into_iter().map(|variant| {
-        let hash = variant.fingerprint.strip_prefix("fnv1a64-v1:").unwrap_or(&variant.fingerprint);
-        format!(
-            "{:<10} {:<10} {} · {}{}",
-            variant.agent,
-            variant.health,
-            variant.summary,
-            hash,
-            if !variant.portable {
-                " · owner-account only"
-            } else if variant.sensitive {
-                " · private fields omitted"
-            } else {
-                ""
-            },
-        )
-    }).collect();
-    lines.push(String::new());
-    lines.push("public definition diff".into());
-    lines.extend(crate::capability::mcp_definition_diff(it));
-    lines
-}
-
-/// One choice out of a list, as its own picker rather than a `menu:` submenu.
-///
-/// The `menu:` mechanism builds its options while the panel is being drawn,
-/// which is right when the options are already on the row and wrong when
-/// finding them means reading every skill directory on the machine. These are
-/// built only once somebody has chosen the verb.
-///
-/// `(key, name, detail)`, and the key comes back. Padded by display width,
-/// because a skill named in CJK is twice as wide as its character count.
-/// The Skills a Session's Agent could be handed for one run — which is every
-/// Skill it does not already have.
-///
-/// Borrowing is defined as taking a capability the Agent does not own, and the
-/// picker used to filter on nothing but "has a directory and a name": a claude
-/// Session was offered a one-run borrow of claude's own nine Skills, which is
-/// a nine-row question with no answer in it. The row it would have chosen does
-/// nothing that typing `/name` into the conversation would not.
-pub(crate) fn borrowable_skills(skills: &[Item], agent: &str) -> Vec<(String, String, String)> {
-    skills
-        .iter()
-        .filter(|skill| crate::archive::visible(skill))
-        .filter(|skill| !skill.get("dir").is_empty() && !skill.get("name").is_empty())
-        .filter(|skill| !owned_by(skill.get("agent"), agent))
-        .map(|skill| {
-            (
-                skill.get("dir").to_string(),
-                skill.get("name").to_string(),
-                skill.get("agent").to_string(),
-            )
-        })
-        .collect()
-}
-
-/// The same rule for MCP servers, plus the one it already had: a server with
-/// no transferable local definition — an account-hosted one — has nothing to
-/// lend, so it is not a choice either.
-pub(crate) fn borrowable_servers(servers: &[Item], agent: &str) -> Vec<(String, String, String)> {
-    servers
-        .iter()
-        .filter(|server| crate::archive::visible(server))
-        .filter(|server| !server.get("name").is_empty() && server.get("portable") != "false")
-        .filter(|server| !owned_by(server.get("agent"), agent))
-        .map(|server| {
-            (
-                format!("{}\u{1}{}", server.get("agent"), server.get("name")),
-                server.get("name").to_string(),
-                server.get("agent").to_string(),
-            )
-        })
-        .collect()
-}
-
-/// Does `agent` already own a capability whose owner list is `owners`?
-///
-/// `owners` is the comma-joined `agent` field a Skill or MCP row carries.
-/// `shared` is not an answer to this: `~/.agents/skills` is a location rather
-/// than an agent, and `missing_agents` says as much by reporting a skill that
-/// lives only there as missing from every one of them — so a shared skill is
-/// still something claude may be handed for one run.
-fn owned_by(owners: &str, agent: &str) -> bool {
-    !agent.is_empty() && owners.split(',').map(str::trim).any(|owner| owner == agent)
 }
 
 pub fn pick_one(title: &str, choices: &[(String, String, String)]) -> Option<String> {
@@ -990,8 +763,7 @@ pub fn panel(it: &Item) -> i32 {
 fn stays_in_panel(id: &str) -> bool {
     matches!(
         id,
-        "copy" | "copyabs" | "copy-file" | "desc" | "details" | "mcptools" | "mcp-tools"
-            | "mcpcompare"
+        "copy" | "copyabs" | "copy-file" | "desc" | "details"
     ) || id.starts_with("diff:")
 }
 
@@ -1301,43 +1073,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         // start. The picker is here rather than in `agent_options` because
         // building it means reading every skill directory or the MCP cache,
         // and the panel must not pay that to draw a row nobody chose.
-        "session-skill" => {
-            let skills = crate::sources::agents::skills();
-            let choices = borrowable_skills(&skills, it.get("agent"));
-            if choices.is_empty() {
-                ui::note(&format!("{} already has every skill on this machine", it.get("agent")));
-                return 0;
-            }
-            let Some(dir) = pick_one(" resume with which skill ", &choices) else { return 130 };
-            let Some((_, name, _)) = choices.iter().find(|(d, ..)| *d == dir) else { return 2 };
-            match crate::sources::sessions::resume_with_skill_cmd(
-                it.get("agent"), it.get("id"), std::path::Path::new(&dir), name,
-            ) {
-                Ok(command) => ui::emit("RUN", &command),
-                Err(e) => { ui::note(&e); return 2; }
-            }
-        }
-        "session-mcp" => {
-            let mut servers = crate::cache::read_cached("mcp");
-            crate::archive::decorate(&mut servers);
-            let choices = borrowable_servers(&servers, it.get("agent"));
-            if choices.is_empty() {
-                ui::note(
-                    &format!("{} already owns every portable MCP server here", it.get("agent")),
-                );
-                return 0;
-            }
-            let Some(key) = pick_one(" resume with which MCP server ", &choices) else { return 130 };
-            let Some(server) = servers.iter().find(|server| {
-                format!("{}\u{1}{}", server.get("agent"), server.get("name")) == key
-            }) else {
-                return 2;
-            };
-            match crate::sources::sessions::resume_with_mcp_cmd(it.get("agent"), it.get("id"), server) {
-                Ok(command) => ui::emit("RUN", &command),
-                Err(e) => { ui::note(&e); return 2; }
-            }
-        }
         // The readable half of the export pair. The raw JSONL beside it is
         // the authoritative one and is what goes back to an agent; this is
         // what goes to a person.
@@ -1434,11 +1169,7 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             let archived = id == "capability-archive";
             match crate::archive::set(it, archived) {
                 Ok(()) => ui::note(if archived {
-                    if it.kind == Kind::Skill {
-                        "archived · find it with skill:is:archived"
-                    } else {
-                        "archived · find it with mcp:is:archived"
-                    }
+                    "archived · find it with skill:is:archived"
                 } else {
                     "restored to normal inventory"
                 }),
@@ -1562,34 +1293,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
                 return 2;
             }
         }
-        "mcpcompare" => return crate::runhere::show_text(
-            &format!("MCP definitions · {}", it.get("name")),
-            &mcp_matrix_lines(it),
-        ),
-        _ if id.starts_with("mcp-sync:") => {
-            let target_agent = &id[9..];
-            let _ = crate::runhere::show_text(
-                &format!("MCP definitions · {}", it.get("name")),
-                &mcp_matrix_lines(it),
-            );
-            if !ui::confirm(
-                &format!("prepare replacement for {target_agent}?"),
-                "Prepare command",
-                "the command is copied for review, not run",
-            ) {
-                return 130;
-            }
-            let definition = match crate::lend::resolve(it) {
-                Ok(definition) => definition,
-                Err(error) => { ui::note(&error); return 2; }
-            };
-            let install = match crate::lend::install_cmd(target_agent, &definition) {
-                Ok(command) => command,
-                Err(error) => { ui::note(&error); return 2; }
-            };
-            let remove = format!("{target_agent} mcp remove {}", shq(it.get("name")));
-            ui::emit("INSERT", &format!("{remove} && {install}"));
-        }
         _ if id.starts_with("diff:") || id.starts_with("sync:") => {
             let mut parts = id.split(':');
             let verb = parts.next().unwrap_or("");
@@ -1646,50 +1349,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         // else's capability attached, and hand it over unrun. Nothing is
         // installed, nothing is written to either agent's directories, and
         // the loan ends when that process does.
-        _ if id.starts_with("lend:") => {
-            let agent = &id[5..];
-            let cmd = match it.kind {
-                Kind::Skill => {
-                    let dir = it.get("dir");
-                    let name = it.get("name");
-                    if dir.is_empty() || name.is_empty() {
-                        ui::note("that skill has no directory to lend");
-                        return 2;
-                    }
-                    match crate::lend::skill_flags(agent, std::path::Path::new(dir), name) {
-                        // No `/skill-name` prefilled: claude's synopsis takes
-                        // a single `[prompt]`, so anything typed after the
-                        // quoted one becomes a second positional argument and
-                        // is silently dropped. Invoking the skill inside the
-                        // agent, where the slash command has completion, is
-                        // both safer and one keystroke away.
-                        Ok(f) => crate::lend::borrow_cmd(agent, &f, None, None),
-                        Err(e) => {
-                            ui::note(&e);
-                            return 2;
-                        }
-                    }
-                }
-                Kind::Mcp => {
-                    let def = match crate::lend::resolve(it) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            ui::note(&e);
-                            return 2;
-                        }
-                    };
-                    match crate::lend::mcp_flags(agent, &def) {
-                        Ok(f) => crate::lend::borrow_cmd(agent, &f, None, None),
-                        Err(e) => {
-                            ui::note(&e);
-                            return 2;
-                        }
-                    }
-                }
-                _ => return 2,
-            };
-            ui::emit("INSERT", &cmd);
-        }
         // Slot 9 for anything on disk. The path is named in the
         // confirmation, it goes to the Trash rather than being unlinked, and
         // `paths::trash` refuses $HOME, the root and the system directories
@@ -1711,69 +1370,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
                 Ok(d) => ui::note(
                     &format!("moved to {}", crate::paths::tilde(&d.to_string_lossy())),
                 ),
-                Err(e) => {
-                    ui::note(&e);
-                    return 2;
-                }
-            }
-        }
-        // The MCP verbs are the agent's own CLI, handed over rather than run.
-        // Each of these edits the agent's configuration or opens a browser
-        // for OAuth, and both are things to read before agreeing to.
-        "mcp-tools" => return crate::runhere::show_text(
-            &format!("MCP tools · {} · {}", it.get("agent"), it.get("name")),
-            &mcp_tool_lines(it),
-        ),
-        "mcprefresh" => {
-            if !crate::cache::refresh_named("mcp") {
-                ui::note("could not refresh MCP status");
-                return 2;
-            }
-            let refreshed = crate::cache::read_cached("mcp");
-            let current = refreshed.iter().find(|server| {
-                server.get("agent") == it.get("agent") && server.get("name") == it.get("name")
-            });
-            match current {
-                Some(server) => ui::note(
-                    &format!("{} status: {}", server.get("agent"), server.get("health")),
-                ),
-                None => ui::note("the owner no longer reports that MCP server"),
-            }
-        }
-        "mcp-tools-refresh" => {
-            if !crate::cache::refresh_named("mcp-tools") {
-                ui::note("could not refresh MCP tools");
-                return 2;
-            }
-            let refreshed = crate::cache::read_cached("mcp-tools");
-            let current = refreshed.iter().find(|server| {
-                server.get("agent") == it.get("agent") && server.get("name") == it.get("name")
-            });
-            match current {
-                Some(server) => {
-                    let count = serde_json::from_str::<Vec<crate::mcp_tools::Tool>>(server.get("tools"))
-                        .map(|tools| tools.len()).unwrap_or(0);
-                    ui::note(&format!("tool inventory: {} · {count} tools", server.get("status")));
-                }
-                None => ui::note("no tool inventory was produced for that server"),
-            }
-        }
-        "mcptools" => {
-            let c = format!("{} mcp get {}", it.get("agent"), shq(it.get("name")));
-            return crate::runhere::run_cmd(&c);
-        }
-        "mcplogin" => ui::emit(
-            "INSERT",
-            &format!("{} mcp login {}", it.get("agent"), shq(it.get("name"))),
-        ),
-        "mcpremove" => ui::emit(
-            "INSERT",
-            &format!("{} mcp remove {}", it.get("agent"), shq(it.get("name"))),
-        ),
-        _ if id.starts_with("install:") => {
-            let target = &id[8..];
-            match crate::lend::resolve(it).and_then(|d| crate::lend::install_cmd(target, &d)) {
-                Ok(c) => ui::emit("INSERT", c.as_str()),
                 Err(e) => {
                     ui::note(&e);
                     return 2;
@@ -1809,30 +1405,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
                     ui::note(&e);
                     return 2;
                 }
-            }
-        }
-        _ if id.starts_with("cp:") => {
-            let want = &id[3..];
-            let targets: Vec<String> = if want == "*" {
-                it.get("missing").split(',').filter(|s| !s.is_empty()).map(str::to_string).collect()
-            } else {
-                vec![want.to_string()]
-            };
-            let name = it.get("name");
-            let dir = it.get("dir");
-            if dir.is_empty() || name.is_empty() {
-                ui::note("nothing to copy from");
-                return 2;
-            }
-            let mut changed = false;
-            for agent in targets {
-                match crate::sources::agents::copy_skill(dir, &agent, name) {
-                    Ok(p) => { changed = true; eprintln!("copied {name} -> {p}"); }
-                    Err(e) => ui::note(&e.to_string()),
-                }
-            }
-            if changed {
-                let _ = crate::cache::refresh_named("skill-hashes");
             }
         }
         _ => return 130,
@@ -1887,7 +1459,6 @@ fn copy_text(it: &Item) -> String {
         Kind::Port | Kind::Proc => it.get("pid"),
         Kind::Ssh => it.get("host"),
         Kind::Container => it.get("name"),
-        Kind::Mcp => it.get("name"),
         Kind::Link => it.get("url"),
         Kind::File | Kind::Find | Kind::App => it.get("path"),
         _ => "",

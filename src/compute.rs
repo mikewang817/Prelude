@@ -1626,7 +1626,6 @@ pub enum Scope {
     Processes,
     Containers,
     Skills,
-    Mcp,
     Config,
     Settings,
     /// The keywords the person saved. Everything else in this list is a source
@@ -1660,7 +1659,6 @@ const SCOPES: &[ScopeDef] = &[
     ScopeDef { scope: Scope::Ports, prefix: "port:", title: "Listening Ports", desc: "local TCP listeners" },
     ScopeDef { scope: Scope::Processes, prefix: "proc:", title: "Processes", desc: "CPU and memory consumers" },
     ScopeDef { scope: Scope::Containers, prefix: "docker:", title: "Containers", desc: "running Docker containers" },
-    ScopeDef { scope: Scope::Mcp, prefix: "mcp:", title: "MCP Servers", desc: "all agent integrations" },
     ScopeDef { scope: Scope::Config, prefix: "cfg:", title: "Agent Config", desc: "settings and instruction files" },
     ScopeDef { scope: Scope::Quicklinks, prefix: "ql:", title: "Quicklinks", desc: "keywords you saved yourself" },
     // Prelude's own, as opposed to the four agents' above it. It was the only
@@ -1785,23 +1783,37 @@ fn agent_prompt_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
 
 // ─── the agent home ──────────────────────────────────────────────────────
 
-/// The empty query: the things this launcher exists to manage.
+/// The empty query: the two things you open this to reach.
 ///
-/// Agents, what they are running, their Skills, their MCP servers and the
-/// conversations you have had with them — the inventory, on one screen,
-/// because looking at it *is* how you manage it.
+/// **Skills and Sessions**, and nothing else. Both are things you *act on* —
+/// a Skill's Enter hands you the sentence that runs it in whatever Agent you
+/// have open, and a Session's resumes a conversation. Everything that used to
+/// sit beside them was a *readout*: how many Skills `claude` has, that a Run is
+/// working, that an MCP server is connected. All true, none of it a reason to
+/// have opened a launcher.
 ///
-/// This was briefly an attention list instead: healthy Skills and servers were
-/// pushed into `/name` and `mcp:` so that only exceptions — a server that had
-/// stopped answering, a skill whose copies had drifted — reached the home. It
-/// reads well as a principle and was wrong in practice. A launcher you open to
-/// see what you have is not improved by hiding what you have; the panel went
-/// quiet exactly when nothing was broken, which is most of the time.
+/// The screen this replaces held five kinds and around thirty rows, of which
+/// thirteen were inventory counts and health states. Reading them was the whole
+/// interaction; there was nothing to press Enter on. So they are not deleted —
+/// `a:`, `r:` and `mcp:` still hold them and root search still matches an Agent
+/// or a server by name — they are just not what an empty query is for.
 ///
-/// Ordering is `cache::by_rank` like everywhere else, so the bands do the work:
-/// a question that is blocking somebody, then agents, what they are running,
-/// Skills, MCP, and the recent conversations underneath. There is deliberately
-/// no second ordering rule for this one screen — one of those was enough.
+/// A blocked question stays, and it is the one deliberate addition to that
+/// pair. `Kind::Msg` appears *only* while an Agent is sitting on `prelude ask`
+/// waiting for a person, so it costs nothing on an ordinary open and its
+/// absence would mean nobody ever sees it: the Agent then blocks for its whole
+/// timeout while the answer sits behind a scope prefix nobody had a reason to
+/// type. That is not an inventory row; it is an interruption, and it is the
+/// one thing here the person did not go looking for.
+///
+/// This screen was also briefly the opposite mistake — an attention list, where
+/// healthy Skills and servers were hidden so only exceptions reached it. That
+/// was wrong because it went quiet exactly when nothing was broken. The rule
+/// now is neither "everything" nor "only problems": it is *what has an action
+/// behind it*.
+///
+/// Ordering is `cache::by_rank` like everywhere else, so the bands do the work
+/// and this screen has no second ordering rule of its own.
 ///
 /// Sessions are the exception that has to be counted rather than filtered:
 /// there are hundreds of them, `gather` puts only the newest
@@ -1810,10 +1822,8 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
     items
         .iter()
         .filter(|it| {
-            (matches!(
-                it.kind,
-                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Session
-            ) && crate::archive::visible(it))
+            (matches!(it.kind, Kind::Msg | Kind::Skill | Kind::Session)
+                && crate::archive::visible(it))
                 // A newer release, on the rare day there is one. It is one row,
                 // it appears only while there is something to do about it, and
                 // it goes away when the update is taken — which is a different
@@ -1840,7 +1850,7 @@ pub fn root_items(items: &[Item]) -> Vec<Item> {
         .filter(|it| {
             (matches!(
                 it.kind,
-                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Mcp | Kind::Search
+                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Search
             ) && crate::archive::visible(it))
                 || it.is_quicklink()
                 || it.get("update") == "available"
@@ -2151,7 +2161,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         let (filters, needles) = parse_agent_filters(term);
         return static_items
             .iter()
-            .filter(|it| matches!(it.kind, Msg | Agent | Run | Skill | Mcp | Config))
+            .filter(|it| matches!(it.kind, Msg | Agent | Run | Skill | Config))
             .filter(|it| crate::archive::visible(it))
             .filter(|it| matches_agent_filters(it, &filters, &needles))
             .take(200)
@@ -2186,8 +2196,8 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
             })
             .collect();
     }
-    if matches!(scope, Scope::Skills | Scope::Mcp) {
-        let kind = if scope == Scope::Skills { Skill } else { Mcp };
+    if scope == Scope::Skills {
+        let kind = Skill;
         let (archive_view, needles) = capability_archive_filter(term);
         return static_items
             .iter()
@@ -2214,7 +2224,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         Scope::Ports => kind == Port,
         Scope::Processes => kind == Proc,
         Scope::Containers => kind == Container,
-        Scope::Skills | Scope::Mcp => false,
+        Scope::Skills => false,
         Scope::Config => kind == Config,
         Scope::Settings => kind == Setting,
         Scope::Quicklinks => false,
@@ -2482,10 +2492,28 @@ fn index_roots_from(text: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// The search folders, read once per process.
+///
+/// Memoised because `index_stale` now stats each of them and runs on the
+/// per-keystroke path, so without this the roots file would be opened and
+/// parsed several times per keystroke to answer a question whose answer cannot
+/// change inside one process — `_dynamic` is a fresh process every time, which
+/// is what makes that true. Same reasoning as `quicklinks_text`.
+///
+/// A mutation in *this* process — `add_root` — is safe against it for a reason
+/// worth stating rather than relying on: `index_stale` compares the roots
+/// file's own mtime first, so a just-edited list is reported stale before the
+/// memoised contents are ever consulted, and the rebuild happens in a new
+/// process that reads the file again.
 pub fn index_roots() -> Vec<String> {
-    let cfg = paths::config().join("roots.txt");
-    let text = std::fs::read_to_string(cfg).ok();
-    index_roots_from(text.as_deref())
+    static ROOTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ROOTS
+        .get_or_init(|| {
+            let cfg = paths::config().join("roots.txt");
+            let text = std::fs::read_to_string(cfg).ok();
+            index_roots_from(text.as_deref())
+        })
+        .clone()
 }
 
 #[cfg(target_os = "macos")]
@@ -3260,17 +3288,22 @@ mod tests {
             .put("project", project)
     }
 
-    /// The empty query is the inventory: the agents, what they are running,
-    /// their capabilities and the conversations you have had — plus a question
-    /// that is blocking somebody. Everything else on the machine is behind a
-    /// query, which is what stops the home being a list of two thousand files.
+    /// The empty query is Skills and Sessions — the two kinds with an action
+    /// behind them — plus a question that is blocking somebody.
+    ///
+    /// Agents, Runs and MCP servers are readouts. `claude · 0 skills · 3 mcp`
+    /// is true and there is nothing to press Enter on; the same for a Run that
+    /// is working and a server that is connected. They are still gathered,
+    /// still in `a:`/`r:`/`mcp:`, and still matched by name in root search —
+    /// they are simply not what an empty query is for. Everything else on the
+    /// machine remains behind a query, which is what stops the home being a
+    /// list of two thousand files.
     #[test]
-    fn the_home_is_the_agent_inventory_and_nothing_else() {
+    fn the_home_is_what_you_can_act_on_and_nothing_else() {
         let rows = vec![
             Item::new("agent", Kind::Agent).title("claude"),
             run("working", "api"),
             Item::new("/deploy", Kind::Skill).title("deploy"),
-            Item::new("codex mcp get n", Kind::Mcp).title("node_repl"),
             Item::new("old", Kind::Session).title("old"),
             Item::new("ask", Kind::Msg).title("claude asks"),
             Item::new("cargo", Kind::Path).title("cargo"),
@@ -3278,25 +3311,31 @@ mod tests {
             Item::new("git status", Kind::History).title("git status"),
         ];
         let shown: Vec<String> = home_items(&rows).into_iter().map(|it| it.title).collect();
-        assert_eq!(shown, ["claude", "claude", "deploy", "node_repl", "old", "claude asks"]);
-        // Healthy or not is not the question any more: a server that answers
-        // and a skill that agrees with its copies are things you own, and the
-        // home is where you look at what you own.
-        let unhealthy =
-            vec![Item::new("codex mcp get n", Kind::Mcp).title("gmail").put("health", "failed")];
-        assert_eq!(home_items(&unhealthy).len(), 1);
+        assert_eq!(shown, ["deploy", "old", "claude asks"]);
+        // A blocked question is the deliberate third kind: it appears only
+        // while an Agent is sitting on `prelude ask`, so it costs nothing on an
+        // ordinary open, and leaving it out would mean the Agent blocks for its
+        // whole timeout while the answer sits behind a prefix nobody typed.
+        assert!(shown.contains(&"claude asks".to_string()));
+        // An Agent row is a readout too, and equally absent: it is still in
+        // root search by name and in `a:`.
+        let agent = vec![Item::new("agent", Kind::Agent).title("claude")];
+        assert!(home_items(&agent).is_empty());
+        assert_eq!(root_items(&agent).len(), 1);
 
         // Ordering is `cache::by_rank`'s job, so this filter must leave the
         // order it was handed alone.
-        let pair = vec![run("waiting", "first"), run("waiting", "second")];
-        let projects: Vec<String> =
-            home_items(&pair).iter().map(|it| it.get("project").to_string()).collect();
-        assert_eq!(projects, ["first", "second"]);
+        let pair = vec![
+            Item::new("/first", Kind::Skill).title("first"),
+            Item::new("/second", Kind::Skill).title("second"),
+        ];
+        let order: Vec<String> = home_items(&pair).into_iter().map(|it| it.title).collect();
+        assert_eq!(order, ["first", "second"]);
 
         // A typed query searches the same inventory, minus the hundreds of
         // old conversations that `s:` owns.
         let root: Vec<String> = root_items(&rows).into_iter().map(|it| it.title).collect();
-        assert!(root.contains(&"node_repl".to_string()) && root.contains(&"deploy".to_string()));
+        assert!(root.contains(&"deploy".to_string()));
         assert!(!root.contains(&"old".to_string()), "sessions have their own s: scope");
     }
 
@@ -3310,7 +3349,6 @@ mod tests {
         assert_eq!(term, "review");
         let rows = vec![
             Item::new("one", Kind::Skill).title("review"),
-            Item::new("two", Kind::Mcp).title("review server"),
         ];
         assert_eq!(scoped_rows(scope, term, &rows).len(), 1);
     }
@@ -3323,15 +3361,12 @@ mod tests {
                 .title("retired")
                 .put("name", "retired")
                 .put("archived", "true"),
-            Item::new("codex mcp get live", Kind::Mcp).title("live").put("name", "live"),
-            Item::new("codex mcp get old", Kind::Mcp)
-                .title("old")
-                .put("name", "old")
-                .put("archived", "true"),
         ];
-        assert_eq!(home_items(&rows).len(), 2);
-        assert_eq!(root_items(&rows).len(), 2);
-        assert_eq!(scoped_rows(Scope::Agent, "", &rows).len(), 2);
+        // The archived Skill leaves every ordinary surface and stays
+        // reachable by asking for it.
+        assert_eq!(home_items(&rows).len(), 1);
+        assert_eq!(root_items(&rows).len(), 1);
+        assert_eq!(scoped_rows(Scope::Agent, "", &rows).len(), 1);
 
         let titles = |scope, term| {
             scoped_rows(scope, term, &rows)
@@ -3342,15 +3377,15 @@ mod tests {
         assert_eq!(titles(Scope::Skills, ""), ["current"]);
         assert_eq!(titles(Scope::Skills, "is:archived"), ["retired"]);
         assert_eq!(titles(Scope::Skills, "is:all"), ["current", "retired"]);
-        assert_eq!(titles(Scope::Mcp, ""), ["live"]);
-        assert_eq!(titles(Scope::Mcp, "is:archived"), ["old"]);
-        assert_eq!(titles(Scope::Mcp, "is:all"), ["live", "old"]);
+
+
         assert!(scoped_rows(Scope::Skills, "is:unknown", &rows).is_empty());
 
         let slash = dynamic_rows_with("/", &rows);
         assert_eq!(slash.into_iter().map(|item| item.title).collect::<Vec<_>>(), ["current"]);
         assert!(dynamic_rows_with("/retired", &rows).is_empty());
     }
+
 
     #[test]
     fn agent_filters_are_a_vocabulary_not_a_guess() {

@@ -5,7 +5,7 @@ behavior. The authority is the code in `src/agent.rs`, `src/control.rs`,
 `src/sources/{agents,running,sessions}.rs`, `src/bus.rs`, `src/lend.rs`, and
 `src/doctor.rs`.
 
-Before changing Agent, Run, Session, Skill, MCP, Config, Home, messaging, or
+Before changing Agent, Run, Session, Skill, Config, Home, messaging, or
 Agent Doctor behavior, update this document in the same change. Do not add a
 second built-in-Agent registry outside `src/agent.rs`.
 
@@ -18,11 +18,16 @@ protocol.
 It does four things:
 
 1. discovers installed Agent CLIs, native Sessions, and live processes
-2. relates Agents, Runs, Sessions, Skills, MCP servers, and Config files
+2. relates Agents, Runs, Sessions, Skills, and Config files
 3. exposes contextual launcher actions using only syntax the owning CLI is
    known to support
 4. provides a small file-backed message bus for questions, notices, and
    Agent-to-Agent inbox messages
+
+MCP servers are not covered at all. Inventory, health, tool scanning, the
+cross-agent definition matrix and one-run borrowing were all implemented and
+then removed: a Skill reached by its absolute path needs none of them, and
+nothing that remained justified the surface.
 
 Native Agent CLIs, process state, and native Session files remain authoritative.
 Prelude adds local names, pins, archive flags, Favorites, derived relationships,
@@ -40,10 +45,7 @@ settings paths, and capability flags.
 | discover native Sessions | yes | yes | yes | no |
 | native fork command | yes | yes | yes | no |
 | one-off non-interactive ask | yes | yes | yes | yes |
-| borrow a Skill for one Run | yes | no | yes | no |
-| borrow an MCP server for one Run | yes | yes | no | no |
-| install a Skill copy | yes | yes | yes | yes |
-| install an MCP definition | yes | yes | no | no |
+| use a Skill without installing it | yes | yes | yes | yes |
 | effective-config evidence | auto-mode subsystem only | resolved for current directory | none | resolved for current directory |
 
 Concrete command forms:
@@ -73,10 +75,9 @@ JSON includes all four registry entries with an `installed` boolean.
 Agent
  ├─ Run
  │   ├─ optional Session
- │   └─ explicitly named Skill/MCP capability
+ │   └─ explicitly named Skill
  ├─ Session
  ├─ Skill copies
- ├─ MCP owner variants
  └─ Config paths
 ```
 
@@ -86,20 +87,18 @@ Stable identities:
 - Run: `agent:pid:process-start-time`
 - Session: `agent:native-session-id`
 - Skill: `skill:<merged-name>`; copies retain Agent and canonical directory
-- MCP: normalized `mcp:<capability-name>` with per-owner semantic fingerprints
 
-The Snapshot contains Agents, Runs, Sessions, Skills, and MCP records. Run
+The Snapshot contains Agents, Runs, Sessions and Skills. Run
 records include PID, start time, live state, cwd/project, optional linked
 Session, batch flag, branch, structured model evidence, and capability names
 extracted from launch arguments. Session records include native/local title,
 pin/archive state, cwd, native file, update time, and optional active Run. Skill
-and MCP records include reverse Run edges.
+records include reverse Run edges.
 
 Control JSON intentionally contains local relationship paths such as Run cwd,
 native Session file, and Skill-copy directory. It is local machine data, not a
 redacted export format. A native Session title may come from its opening user
-text. The graph omits full process command lines, Run launch arguments, private
-MCP definitions, env/header values, and credential-bearing arguments.
+text. The graph omits full process command lines, Run launch arguments, credential-bearing arguments.
 
 ## Agent inventory and Home
 
@@ -109,16 +108,14 @@ MCP definitions, env/header values, and credential-bearing arguments.
 2. installed Agents
 3. live Runs
 4. visible Skills
-5. visible MCP servers
-6. the 15 newest visible Sessions
+5. the 15 newest visible Sessions
 
-`a:` contains questions, Agents, Runs, visible Skills, visible MCP servers, and
-Config rows. Sessions have their own `s:` scope. Of the rows in this scope,
-Favorites can promote Agent, Skill, and MCP ones, and only within their band.
+`a:` contains questions, Agents, Runs, visible Skills and Config rows. Sessions have their own `s:` scope. Of the rows in this scope,
+Favorites can promote Agent and Skill ones, and only within their band.
 Favorites are not an Agent feature and cover stable objects outside this
 document too; `favorites.rs` is the whole list.
 
-An Agent, Skill or MCP server can also be given a name in `aliases.txt`, which
+An Agent or Skill can also be given a name in `aliases.txt`, which
 stores that same object key, resolves it against the catalogue as it is typed,
 and shows the name on the row it belongs to. A built-in Agent's own name is
 refused as an alias, because an installed Agent already leads it and the alias
@@ -127,7 +124,7 @@ Agent's inventory; `aliases.rs` owns them and the Aliases settings row manages
 them.
 
 The named root commands—Agent Control Center, Running Agents, Past
-Conversations, Skills, MCP Servers, and Agent Config—make these views
+Conversations, Skills, and Agent Config—make these views
 reachable without knowing a prefix first.
 
 ## Runs and live state
@@ -136,13 +133,12 @@ reachable without knowing a prefix first.
 
 The fleet source is process-based, not terminal-based. It finds matching
 Claude Code, Codex, pi, and OpenCode processes wherever they run. Administrative
-subcommands used for auth, MCP, config, and diagnostics are filtered out so
+subcommands used for auth, config, and diagnostics are filtered out so
 Prelude does not report its own probes as conversations.
 
 Expensive identity discovery uses cached `ps` command lines plus one bulk `lsof`
 for working directories. The complete command and prompt are discarded after
-extracting bounded relationship hints and explicitly named borrowed
-capabilities.
+extracting bounded relationship hints and explicitly named capabilities.
 
 On every gather, Prelude performs only live syscalls per cached row:
 
@@ -190,8 +186,6 @@ Run Quick Look shows only available facts:
 - branch or detached commit read directly from Git metadata
 - linked Session and match quality
 - model only when a native structured field records it
-- explicitly named borrowed Skills/MCP servers, distinct from installed
-  inventory
 - last conversation evidence from a bounded tail read
 
 Claude Code records model in assistant messages, Codex in `turn_context`, and pi
@@ -257,13 +251,35 @@ its local name/pin/archive state.
 
 ### Discovery and identity
 
-Skill roots:
+Skill roots are a table of filesystem conventions in
+`sources/agents.rs::skill_dirs`, deliberately much longer than `agent::SPECS`.
+The two answer different questions: `SPECS` is about invoking a CLI and a name
+enters it only once Prelude can drive that CLI, while a Skill is a directory
+with a `SKILL.md` in it whoever put it there. Since Enter became the portable
+invocation, reading a root costs one `read_dir` and knowing how to launch the
+owning Agent stopped being a precondition for using its Skills. Nothing in this
+table confers a capability, so it is not a second Agent registry.
 
-- `~/.claude/skills` (`claude`)
-- `~/.agents/skills` (`shared`; a location, not an Agent)
-- `~/.codex/skills` (`codex`)
-- `~/.pi/agent/skills` (`pi`)
-- `~/.config/opencode/skills` (`opencode`)
+The vendor-neutral roots are listed first, because `dir`/`file` are the first
+copy discovered and that is what Enter hands over — a Skill in several places
+should be offered by the path that survives changing Agent.
+
+- `~/.agents/skills`, `~/.config/agents/skills` (`shared`; locations, not Agents)
+- `~/.claude/skills` (`claude`), `~/.codex/skills` (`codex`),
+  `~/.pi/agent/skills` (`pi`), `~/.config/opencode/skills` (`opencode`)
+- discovery-only roots for Kimi, ZCode, OpenClaw, Gemini CLI, Antigravity,
+  Copilot, Cursor, Cline, Continue, Goose, Crush, Droid, Qwen, iFlow,
+  OpenHands, Roo, Kilo, Kiro, Kode, Junie, Augment, CodeBuddy, Command Code,
+  Cortex, Windsurf, Mistral Vibe, Mux, Qoder, Trae, Zencoder, Neovate, Pochi,
+  MCPJam and AdaL
+
+A root that does not exist is one failed `read_dir` and no rows; the whole table
+measures at about 0.25 ms over the five it replaced. Being wrong is equally
+cheap and therefore the real risk — an invented path never fails visibly, it
+just never matches — so entries trace to vendor documentation, the cross-agent
+survey tables, or a directory observed on a real machine. Where sources
+disagree both are listed. Project-level roots (`.claude/skills` and friends
+beside the working directory) are not discovered.
 
 Prelude reads `SKILL.md` or `skill.md`, uses frontmatter name/description when
 available, and merges rows by name while retaining every copy path. Usage rank
@@ -275,24 +291,40 @@ The `skill-hashes` background source fingerprints the effective complete tree,
 including scripts, references, and symlinks. It excludes VCS/cache metadata and
 uses recursive metadata stamps to avoid rehashing unchanged trees.
 
+A copy whose own root is a symlink is hashed as the tree it resolves to, not as
+its link text, and records `linked` plus the canonical path it resolves to.
+Prelude never creates such a link — it is how a person's own arrangement is read
+correctly rather than reported as a divergent copy.
+Symlinks *inside* a tree are unchanged: still hashed as link text, never
+followed. The stamp used by the reuse gate resolves the root for the same
+reason — a stamp taken at a link never moves when the tree behind it changes.
+
 Credential-like paths and lines contribute a redaction marker rather than their
 bytes. Integrity states are:
 
 - `single`: one known copy
-- `identical`: multiple complete public copies with one fingerprint
+- `linked`: exactly one real tree, with every other copy a link resolving to it
+- `identical`: multiple independent copies with one fingerprint
 - `divergent`: multiple different public fingerprints
 - `unknown`: a copy is unreadable or unhashed
 - `private-unknown`: redacted private material prevents an equality claim
 
+`linked` and `identical` are deliberately separate. `identical` describes
+today — several independent trees that currently agree, one edit away from not
+agreeing, with no rule saying which an Agent loads. `linked` describes what can
+happen next, because there is one tree to edit. Prelude creates neither
+arrangement; both are read off whatever the person has already built.
+
 Diagnostics also validate frontmatter, required entry files, same-root case/name
 collisions, broken symlinks, and symlinks that escape the Skill tree.
 
-### Copy, borrow, replace, and remove
+### Using, borrowing, replacing and removing
 
-- permanent copy supports all four registry Agents and never overwrites an
-  existing target
 - one-run Skill borrowing supports Claude Code and pi
-- every Agent can instead be handed `Read <SKILL.md> and follow it.`
+- Enter hands over the portable invocation — the Skill's name and the absolute
+  path to its `SKILL.md` — which needs no install, works in an Agent that is
+  already running, and is the only form all four Agents accept. Installing is
+  now only for wanting `/name` in a particular Agent
 - sensitive or incompletely read sources are not copied, lent, or synchronized
 - replacement displays `diff -ru`, rehashes source/target, confirms, trashes the
   old target, and refuses a source that changed or contains private material
@@ -308,56 +340,6 @@ key in private atomic `$XDG_DATA_HOME/prelude/capabilities.json`.
 Archive does not move a copy. It removes the Skill from Home, root search, `a:`,
 bare `skill:`, `/` browsing/invocation, and Session borrow pickers. Restore from
 `skill:is:archived`; `skill:is:all` includes both states. Favorites survive.
-
-## MCP servers
-
-### Inventory
-
-Current MCP inventory asks owner CLIs rather than reading guessed config files:
-
-- `claude mcp list` includes local and account-hosted Claude servers and their
-  owner-reported health
-- `codex mcp list --json` includes Codex servers and enabled/disabled status
-
-MCP status has a 60-second cache tier. Owner variants are grouped by normalized
-capability id and retain:
-
-- owner, health, transport, and health timestamp
-- bounded display summary
-- redacted public definition and semantic fingerprint
-- portability/sensitivity flags
-- cached tool status and timestamp
-
-Complete definitions do not survive in Items, ordinary caches, previews, or
-Control JSON. An explicit borrow/install/replace action asks the owner CLI again
-through `lend::resolve`.
-
-### Tool inventory
-
-`mcp-tools` has a five-minute TTL. For enabled stdio servers Prelude starts the
-server, sends MCP initialize and paginated `tools/list`, retains only bounded
-credential-filtered names/descriptions, drains but does not retain stderr, and
-kills the child.
-
-HTTP and hosted servers are `unsupported` when Prelude cannot reuse owner
-authentication. That is distinct from a successful empty tool list. Disabled
-and failed stdio inventories also remain distinct states.
-
-### Portability
-
-Claude Code and Codex have MCP borrow/install syntax. pi and OpenCode do not.
-Account-hosted servers without a transferable local definition expose no target.
-Definitions with private env/header fields are never inlined: Claude can use a
-private `0600` staged config; Codex's inline-only path is refused.
-
-Current Claude/Codex help exposes no verified server-level Enable/Disable verb,
-so no such action exists.
-
-### Archive and Favorites
-
-MCP Favorites and archive use the normalized capability id, so all owner
-variants share state. Archive does not disable or edit any native definition.
-Restore from `mcp:is:archived`; `mcp:is:all` includes both states.
 
 ## Message bus
 
@@ -419,18 +401,17 @@ prelude doctor
 prelude doctor agents [--json|--repair]
 prelude doctor sessions [--json|--repair]
 prelude doctor skills [--json|--repair]
-prelude doctor mcp [--json|--repair]
 ```
 
 The general report checks launcher/runtime dependencies. Specialized reports
 cover executable/version/login/config evidence, Session indexes and projects,
-Run relationships, Skill integrity, MCP health/tools/duplicates, bus orphans,
+Run relationships, Skill integrity, bus orphans,
 and Prelude's private borrow staging.
 
 Text and JSON are rendered from the same `Report` data. `--json` and `--repair`
 cannot be combined. Repair requires an interactive TTY, asks separately with
 Cancel first, and can only move Prelude-owned staging entries to Trash. It does
-not repair Agent configs, native Sessions, Skills, or MCP definitions. Each
+not repair Agent configs, native Sessions, or Skills. Each
 staging repair rechecks path ownership, mtime, and mode immediately before
 moving it.
 
@@ -441,15 +422,13 @@ moving it.
 | fleet identity (`ps` + bulk `lsof`) | slow background cache |
 | Run liveness/state | live syscalls on gather |
 | native Sessions | slow background cache |
-| MCP status | 60-second background cache |
 | Skill hashes | 30-second background cache with metadata reuse |
-| MCP tools | five-minute background cache |
 | relationship join | once per gather into `sessions-linked` |
 | `a:` / `s:` filtering | cached snapshot, no Agent CLI per key |
 
 Gather has a 40 ms deadline. A late fast source falls back to its previous cache
 and updates that cache in the background. Explicit commands such as Doctor,
-Control, MCP refresh, Diff, and export may do slower work because the user asked
+Control, Diff, and export may do slower work because the user asked
 for it directly.
 
 ## Privacy and authority rules
@@ -459,10 +438,7 @@ for it directly.
 - Full process command lines and Run launch arguments are transient parsing
   input and are not retained; native Session titles remain native conversation
   metadata and may reflect opening user text.
-- Complete MCP definitions, env/header values, and credential-bearing arguments
-  do not enter ordinary Items or caches.
-- Skill and MCP archive/Favorite files contain stable keys only.
-- Private staged MCP configuration uses `0600` files under Prelude's cache.
+- Skill archive/Favorite files contain stable keys only.
 - Destructive native-file operations canonicalize ownership boundaries, confirm
   with Cancel first, move to Trash, and recheck live state where relevant.
 - Capability replacement requires a visible comparison and fresh evidence.
@@ -473,10 +449,5 @@ for it directly.
 - Working/waiting is inferred from process liveness, Session-file silence, and
   the last structured turn; batch/no-clock Runs cannot be classified as waiting.
 - No installed Agent CLI reports the resolved config of another live process.
-- MCP owner inventory is currently Claude Code and Codex only.
-- HTTP/hosted MCP tool inventory is unsupported without reusable owner auth.
-- There is no verified MCP server Enable/Disable action.
-- One-run borrowing exists only for the capability pairs marked in the registry
-  table; unsupported pairs deliberately expose no action.
 - Two Agents in one cwd share one message inbox address, so `say` refuses the
   ambiguous live target rather than guessing.

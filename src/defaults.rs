@@ -18,10 +18,13 @@
 //! The two entry points must not produce two action vocabularies.
 //!
 //! The `enter` preference moves that line, and only along the command side of
-//! it: `copy commands` makes every row that could act hand its text over
-//! instead, except the three verbs that end at Launch Services. A preference
-//! that could take opening a file away from a launcher is not a preference,
-//! it is a fault report waiting to be filed.
+//! it: `copy commands` makes every row that would *act* hand its text over
+//! instead, except the three verbs that end at Launch Services. It has nothing
+//! to say to a row that already hands text over — there the question is
+//! settled, and the only thing left would be changing *which* text. A
+//! preference that could take opening a file away from a launcher, or take a
+//! Skill's portable invocation away from it, is not a preference; it is a
+//! fault report waiting to be filed.
 
 use crate::item::{Item, Kind};
 
@@ -46,10 +49,10 @@ pub enum Text {
     /// and every agent can read a file. It is the only way in for codex and
     /// opencode, which have no way to load a skill they do not own.
     ///
-    /// Prelude used to choose between this and `/name` by asking tmux which
-    /// agent the pane underneath was running. Nothing can answer that now, so
-    /// the choice belongs to the person: both are in `^K`, named for what
-    /// they are, and the one you want goes on the clipboard.
+    /// This is what Enter on a Skill hands over, because it is the only form
+    /// that is unconditional. `/name` needs the Agent in front of you to own
+    /// the Skill, and `claude /name` needs you not to have an Agent open
+    /// already; both are in `^K`, named for what they are.
     SkillFile,
 }
 
@@ -82,7 +85,6 @@ pub enum Verb {
     Launch,
     OpenUrl,
     CopyResult,
-    RunSkill,
     ResumeSession,
     /// Type an answer to a question an agent is blocked on.
     Answer,
@@ -128,7 +130,19 @@ pub fn enter_with(item: &Item, classic: bool) -> Default_ {
     // applications and links, and was reported as broken rather than as a
     // preference doing what it said — which is the correct reading. Whoever
     // turns this on is thinking about commands.
-    if classic && !goes_to_launch_services(chosen) {
+    // …and it has nothing to say to a row that already hands text over. The
+    // preference chooses between *acting* and *being given the text*, so on a
+    // row where Enter is already text the question is settled; all it could do
+    // is change **which** text, which is not what the row says it does.
+    //
+    // A Skill is the case that makes this concrete. Its Enter is the portable
+    // invocation — the name and the absolute path to its `SKILL.md` — which is
+    // the one form that works in an Agent you already have open. Converted to
+    // a bare `Insert` it becomes `/review`, which does nothing at all in an
+    // Agent that does not own the Skill. Turning on `copy commands` would then
+    // silently take away the ability to use a Skill outside the Agent it is
+    // installed in, and the row would still read `copy commands`.
+    if classic && matches!(chosen, Default_::Act(_)) && !goes_to_launch_services(chosen) {
         return Default_::Insert;
     }
     chosen
@@ -213,15 +227,27 @@ pub fn by_kind(item: &Item) -> Default_ {
 
         Calc | Translate => Act(Verb::CopyResult),
 
-        // An MCP server exists for the tools it exposes, not for the config
-        // file that happens to describe it. Details are therefore the useful
-        // default; configuration remains an explicit action.
-        Mcp => Act(Verb::RunHere),
 
-        // A skill name is meaningless on its own, so it is handed over
-        // attached to an agent that has it. `^K` carries the two bare forms:
-        // the slash command, and the instruction to read its file.
-        Skill => Act(Verb::RunSkill),
+        // The one form of a Skill that works in an Agent you already have
+        // open, whichever Agent it is and wherever the Skill is installed.
+        //
+        // Enter used to hand over `claude /name` — a shell command that
+        // *starts* an Agent. That answers a question nobody with a
+        // conversation already running is asking, and it is the common case:
+        // you are in Claude Code, you want a Skill that lives in
+        // `~/.agents/skills`, and `/name` does nothing there because that root
+        // is not Claude's. The old answer to that was to install a copy or
+        // arrange a one-run loan, which is a lot of machinery for "read this
+        // file".
+        //
+        // So Enter is the portable invocation: the Skill's name and the
+        // absolute path to its `SKILL.md`, as an instruction. It needs no
+        // installation, works in all four Agents identically, and — because
+        // the path is what identifies it — two Skills sharing a name are
+        // simply two different sentences. `^K` keeps the narrower forms: the
+        // slash command for an Agent that does own it, and the shell command
+        // for starting a new one.
+        Skill => InsertText(Text::SkillFile),
 
         // A running agent. Nothing can put the cursor in somebody else's
         // terminal any more, so the useful thing left is where it is working.
@@ -285,7 +311,7 @@ pub fn on_secondary(item: &Item, surface: Surface) -> Option<Default_> {
         Port | Proc => Act(Verb::Inspect),
         // Primary does something to the object, so the secondary yields text.
         File | Find | Config => InsertText(Text::AbsolutePath),
-        App | Mcp | Skill => InsertText(Text::Name),
+        App | Skill => InsertText(Text::Name),
         Link => InsertText(Text::Name),
         // These were text-vs-clipboard opposites on the prompt surface.
         Calc | Translate => Insert,
@@ -380,9 +406,6 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
     if d == Default_::Act(Verb::RunHere) && item.get("update") == "available" {
         return "Update now";
     }
-    if d == Default_::Act(Verb::RunHere) && item.kind == Kind::Mcp {
-        return "Show what it exposes";
-    }
     if d == Default_::Act(Verb::RunInShell) && item.kind == Kind::Agent {
         return "Start now";
     }
@@ -425,9 +448,9 @@ fn describe_action(d: Default_, surface: Surface) -> &'static str {
         Default_::Insert if clip => "Copy the command",
         Default_::InsertText(Text::AbsolutePath) if clip => "Copy the full path",
         Default_::InsertText(Text::Name) if clip => "Copy its name",
+        Default_::InsertText(Text::SkillFile) if clip => "Copy it for any agent",
         Default_::Act(Verb::CdThere) if clip => "Copy the cd command",
         Default_::Act(Verb::ResumeSession) if clip => "Copy the resume command",
-        Default_::Act(Verb::RunSkill) if clip => "Copy it as an agent command",
         Default_::Act(Verb::Inspect) if clip => "Copy the command that shows it",
 
         Default_::Insert => "Insert into prompt",
@@ -439,7 +462,6 @@ fn describe_action(d: Default_, surface: Surface) -> &'static str {
         Default_::Act(Verb::Launch) => "Launch it",
         Default_::Act(Verb::OpenUrl) => "Open in browser",
         Default_::Act(Verb::CopyResult) => "Copy the result",
-        Default_::Act(Verb::RunSkill) => "Hand it to an agent",
         Default_::Act(Verb::ResumeSession) => "Resume this session",
         Default_::Act(Verb::RunHere) => "Run it here and show the output",
         Default_::Act(Verb::RunInShell) => "Run it in the shell",
@@ -464,16 +486,28 @@ pub fn text_for(it: &Item, what: Text) -> String {
         Text::Name => match it.kind {
             Kind::App => it.title.clone(),
             Kind::Link => it.get("url").to_string(),
-            Kind::Mcp => it.get("name").to_string(),
             _ => it.cmd.clone(),
         },
         // An instruction rather than a bare path: the point is for the
         // agent to follow the skill, and a path on its own invites it to
         // summarise the file instead.
+        //
+        // The name is in it as well as the path, and both are load-bearing.
+        // The path is what makes this work at all — it is the whole reason
+        // nothing has to be installed, and it is what tells two Skills sharing
+        // a name apart. The name is what makes the pasted line readable: an
+        // absolute path to somebody's home directory says nothing about what
+        // is about to happen, either to the person who pasted it or in the
+        // transcript they read back later.
         Text::SkillFile => {
             let p = it.get("file");
             let p = if p.is_empty() { it.get("dir") } else { p };
-            if p.is_empty() { it.cmd.clone() } else { format!("Read {p} and follow it.") }
+            if p.is_empty() {
+                return it.cmd.clone();
+            }
+            let name = it.get("name");
+            let name = if name.is_empty() { it.title.as_str() } else { name };
+            format!("Use the skill \"{name}\": read {p} and follow it.")
         }
     }
 }

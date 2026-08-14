@@ -8,15 +8,87 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Every place an Agent keeps Skills, as a table of conventions.
+///
+/// This is deliberately much longer than `agent::SPECS`, and the two answer
+/// different questions. `SPECS` is about *invocation* — resume syntax, one-off
+/// ask, borrow flags — and a name may only be in it once Prelude knows how to
+/// drive that CLI. This is about *discovery*, and a Skill is a directory with a
+/// `SKILL.md` in it whoever put it there. Since Enter became the portable
+/// invocation — the Skill's name and the absolute path to its file — reading a
+/// root costs nothing beyond a `read_dir`, and knowing how to launch the Agent
+/// that owns it stopped being a precondition for using its Skills. That is why
+/// this list can be forty entries while `SPECS` stays at four, and it is not a
+/// second Agent registry: nothing here confers a capability.
+///
+/// A directory that does not exist is one failed `read_dir` and no rows, so
+/// being generous is close to free. Being *wrong* is close to free too, which
+/// is the trap: an invented path never fails visibly, it just never matches.
+/// So each line traces to something — the vendor's own documentation, the
+/// cross-agent tables that survey them, or this machine.
+///
+/// The universal roots come first because ordering decides which copy Enter
+/// hands over when a Skill is in several: the vendor-neutral location is the
+/// one that keeps working when you change Agent.
+///
+/// Sources: `opencode.ai/docs/skills`, `zcode.z.ai/en/docs/skill`, the Skills
+/// CLI supported-agent table (vercel-labs-skills.mintlify.app), and
+/// mcp.directory's cross-agent survey. Where they disagree, both are listed:
+/// that table puts Kimi's Skills at `~/.config/agents/skills` while the machine
+/// this was written on has them at `~/.kimi-code/skills`, and a root that is
+/// not there costs nothing.
 pub(crate) fn skill_dirs() -> Vec<(std::path::PathBuf, &'static str)> {
     let h = paths::home();
-    vec![
-        (h.join(".claude/skills"), "claude"),
-        (h.join(".agents/skills"), "shared"),
-        (h.join(".codex/skills"), "codex"),
-        (h.join(".pi/agent/skills"), "pi"),
-        (h.join(".config/opencode/skills"), "opencode"),
+    [
+        // Vendor-neutral, and the reason a Skill need not belong to anybody.
+        (".agents/skills", "shared"),
+        (".config/agents/skills", "shared"),
+        // The Agents with invocation support in `agent::SPECS`.
+        (".claude/skills", "claude"),
+        (".codex/skills", "codex"),
+        (".pi/agent/skills", "pi"),
+        (".config/opencode/skills", "opencode"),
+        // Everything else, by discovery only.
+        (".kimi-code/skills", "kimi"),
+        (".zcode/skills", "zcode"),
+        (".openclaw/skills", "openclaw"),
+        (".gemini/skills", "gemini"),
+        (".gemini/antigravity/skills", "antigravity"),
+        (".gemini/antigravity/global_skills", "antigravity"),
+        (".copilot/skills", "copilot"),
+        (".cursor/skills", "cursor"),
+        (".cline/skills", "cline"),
+        (".continue/skills", "continue"),
+        (".config/goose/skills", "goose"),
+        (".config/crush/skills", "crush"),
+        (".factory/skills", "droid"),
+        (".qwen/skills", "qwen"),
+        (".iflow/skills", "iflow"),
+        (".openhands/skills", "openhands"),
+        (".roo/skills", "roo"),
+        (".kilocode/skills", "kilocode"),
+        (".kiro/skills", "kiro"),
+        (".kode/skills", "kode"),
+        (".junie/skills", "junie"),
+        (".augment/skills", "augment"),
+        (".codebuddy/skills", "codebuddy"),
+        (".commandcode/skills", "commandcode"),
+        (".snowflake/cortex/skills", "cortex"),
+        (".codeium/windsurf/skills", "windsurf"),
+        (".vibe/skills", "vibe"),
+        (".mux/skills", "mux"),
+        (".qoder/skills", "qoder"),
+        (".trae/skills", "trae"),
+        (".trae-cn/skills", "trae-cn"),
+        (".zencoder/skills", "zencoder"),
+        (".neovate/skills", "neovate"),
+        (".pochi/skills", "pochi"),
+        (".mcpjam/skills", "mcpjam"),
+        (".adal/skills", "adal"),
     ]
+    .into_iter()
+    .map(|(rel, label)| (h.join(rel), label))
+    .collect()
 }
 
 #[derive(Default)]
@@ -427,364 +499,6 @@ fn frontmatter(p: &std::path::Path, fallback: &str) -> (String, String) {
     )
 }
 
-/// MCP servers, with the status each agent actually reports.
-///
-/// Reading the config files was wrong: it missed every claude.ai-hosted
-/// server (they are not in `mcpServers`) and every HTTP server codex keeps
-/// elsewhere, and it could not tell you the one thing that matters — whether
-/// the server works. A panel that lists an MCP server without saying it is
-/// disabled or logged out is worse than no panel.
-///
-/// `claude mcp list` performs a network health check, so this is slow and
-/// always runs behind the cache.
-pub fn mcp() -> Vec<Item> {
-    let checked_at = crate::frecency::now() as u64;
-    let mut items = Vec::new();
-    mcp_claude(&mut items, checked_at);
-    mcp_codex(&mut items, checked_at);
-    crate::mcp_tools::attach_cached(&mut items);
-    enrich_mcp_matrix(&mut items);
-    items
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum Health {
-    Ok,
-    Disabled,
-    NeedsAuth,
-    Failed,
-    Unknown,
-}
-
-impl Health {
-    fn label(self) -> &'static str {
-        match self {
-            Health::Ok => "✔ connected",
-            Health::Disabled => "⏸ disabled",
-            Health::NeedsAuth => "⚠ not logged in",
-            Health::Failed => "✘ failed",
-            Health::Unknown => "· unknown",
-        }
-    }
-    fn key(self) -> &'static str {
-        match self {
-            Health::Ok => "ok",
-            Health::Disabled => "disabled",
-            Health::NeedsAuth => "auth",
-            Health::Failed => "failed",
-            Health::Unknown => "unknown",
-        }
-    }
-}
-
-pub(crate) fn safe_mcp_detail(detail: &str) -> String {
-    let credential_url = detail.split_once("://").is_some_and(|(_, rest)| {
-        rest.split('/').next().is_some_and(|authority| authority.contains('@'))
-    });
-    if credential_url || crate::secrets::looks_secret(detail) {
-        "private target omitted".into()
-    } else {
-        detail.to_string()
-    }
-}
-
-pub(crate) fn normalize_transport(raw: &str) -> &str {
-    let low = raw.to_ascii_lowercase();
-    if low.contains("stdio") { "stdio" }
-    else if low.contains("sse") { "sse" }
-    else if low.contains("http") { "http" }
-    else if low.contains("hosted") { "hosted" }
-    else { "unknown" }
-}
-
-fn mcp_item(
-    agent: &str,
-    name: &str,
-    detail: &str,
-    health: Health,
-    transport: &str,
-    checked_at: u64,
-) -> Item {
-    let detail = safe_mcp_detail(detail);
-    let public_definition = serde_json::json!({
-        "type": normalize_transport(transport),
-        "display_target": detail.clone(),
-    });
-    Item::new(format!("{agent} mcp get {}", shq(name)), Kind::Mcp)
-        .title(name)
-        .fields([agent.to_string(), health.label().to_string(), detail.clone()])
-        .put("agent", agent)
-        .put("name", name)
-        .put("health", health.key())
-        .put("transport", normalize_transport(transport))
-        .put("health_checked_at", checked_at.to_string())
-        .put("portable", "false")
-        .put("definition_hash", crate::capability::fingerprint(public_definition.to_string().as_bytes()))
-        .put("definition_source", "display")
-        .put("definition_public", public_definition.to_string())
-}
-
-/// `claude mcp list` prints `<name>: <target> - <status>` per server.
-/// May this agent's answer replace what is already cached for it?
-///
-/// The question can only be settled *after* parsing, because the decisive
-/// case is a command that succeeded in the shell's sense and said nothing an
-/// inventory could be read out of. Three outcomes, and the middle one is what
-/// an earlier version of this got wrong by asking too early:
-///
-/// * **exit 0, zero records** — an authoritative empty. An agent whose last
-///   server was removed has to be able to say so, or the launcher shows it
-///   forever.
-/// * **non-zero exit, records parsed** — accept the records. Several of these
-///   CLIs report a warning through their status while still printing a
-///   perfectly good list.
-/// * **non-zero exit, zero records** — not an answer. This is the shape of
-///   `Error: authentication required`: a refusal, printed on either stream,
-///   which read as "this agent now has no servers" and took every cached row
-///   with it. Checking `stdout` for emptiness was not enough — the error text
-///   *is* stdout, and it is not an inventory.
-///
-/// A run that never started or had to be killed is never an answer, whatever
-/// it managed to print: a partial list must not replace a complete one.
-pub(crate) fn trusted(probe: &crate::exec::Output, agent: &str, parsed: usize) -> bool {
-    // Never finished. Whatever it printed is a fragment, and a fragment must
-    // not replace a complete answer — which is the rule the two middle cases
-    // here were quietly outside of. `truncated` and a `None` status both make
-    // `ok()` false, so a run that hit the output cap or was killed by a
-    // signal fell through to `refused` and passed it the moment it had parsed
-    // one record. Four conditions, one meaning: we do not know what the rest
-    // of the answer was.
-    let unfinished =
-        probe.spawn_failed || probe.timed_out || probe.truncated || probe.status.is_none();
-    // Finished, and said no: exited non-zero with nothing convincing.
-    let refused = !probe.ok() && parsed == 0;
-    if unfinished || refused {
-        crate::exec::note_incomplete(agent);
-        return false;
-    }
-    true
-}
-
-/// One line of `claude mcp list`, read once for every caller that needs it.
-///
-/// There were two readings of this output — the inventory's and the tool
-/// scanner's — and two readings of one format is one too many: they filtered
-/// differently, counted differently, and only one of them had been taught
-/// that an error message parses as a server. `Error: authentication required`
-/// splits on `": "` exactly as an entry does, so the other reading not only
-/// trusted it, it went on to run `claude mcp get Error` against a server
-/// nobody has.
-pub(crate) struct ClaudeServer<'a> {
-    pub name: &'a str,
-    pub target: &'a str,
-    /// The health `claude mcp list` prints after ` - `, or empty when the
-    /// line carried none.
-    pub status: &'a str,
-}
-
-pub(crate) fn parse_claude_list(text: &str) -> Vec<ClaudeServer<'_>> {
-    text.lines()
-        .filter_map(|line| {
-            let (name, rest) = line.trim().split_once(": ")?;
-            if name.is_empty() || name.contains("Checking") || crate::secrets::looks_secret(name) {
-                return None;
-            }
-            let (target, status) = match rest.rsplit_once(" - ") {
-                Some((target, status)) => (target.trim(), status.trim()),
-                None => (rest.trim(), ""),
-            };
-            Some(ClaudeServer { name, target, status })
-        })
-        .collect()
-}
-
-/// How much of that answer counts as evidence that it *is* an answer.
-///
-/// A clean exit is taken at its word, including an empty list — an agent
-/// whose last server was removed has to be able to say so. A non-zero exit
-/// has to show a health status, which is the part of the format an error
-/// message cannot produce by accident. Rows without one are still displayed;
-/// only the decision to replace the cache needs the stronger evidence, so a
-/// format that stops printing statuses degrades to showing rows rather than
-/// to erasing them.
-pub(crate) fn claude_evidence(probe: &crate::exec::Output, servers: &[ClaudeServer]) -> usize {
-    if probe.ok() {
-        servers.len()
-    } else {
-        servers.iter().filter(|server| !server.status.is_empty()).count()
-    }
-}
-
-fn mcp_claude(into: &mut Vec<Item>, checked_at: u64) {
-    if crate::exec::require("claude").is_none() {
-        return;
-    }
-    let probe = crate::exec::capture(&["claude", "mcp", "list"], Duration::from_secs(30));
-    let text = probe.stdout_text();
-    let servers = parse_claude_list(&text);
-    if !trusted(&probe, "claude", claude_evidence(&probe, &servers)) {
-        return;
-    }
-    let mut rows = Vec::new();
-    for server in &servers {
-        let low = server.status.to_lowercase();
-        let health = if low.contains("connect") && !low.contains("fail") {
-            Health::Ok
-        } else if low.contains("pending") || low.contains("approve") {
-            Health::NeedsAuth
-        } else if low.is_empty() {
-            Health::Unknown
-        } else {
-            Health::Failed
-        };
-        // claude.ai-hosted servers expose a display URL but their account
-        // credentials are not a transferable local definition.
-        let portable = !server.name.starts_with("claude.ai ");
-        let transport = if !portable {
-            "hosted"
-        } else if server.target.starts_with("http://") || server.target.starts_with("https://") {
-            "http"
-        } else {
-            "stdio"
-        };
-        rows.push(
-            mcp_item("claude", server.name, server.target, health, transport, checked_at)
-                .put("portable", portable.to_string()),
-        );
-    }
-    into.extend(rows);
-}
-
-/// codex has --json, which also reports auth_status and why it is disabled.
-fn mcp_codex(into: &mut Vec<Item>, checked_at: u64) {
-    if crate::exec::require("codex").is_none() {
-        return;
-    }
-    let probe = crate::exec::capture(&["codex", "mcp", "list", "--json"], Duration::from_secs(20));
-    let text = probe.stdout_text();
-    let mut rows = Vec::new();
-    let out = &mut rows;
-    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
-        // Bytes we cannot read are not "no servers". Something answered, and
-        // we do not know what it said — the previous answer is still better
-        // than replacing it with nothing.
-        crate::exec::note_incomplete("codex");
-        return;
-    };
-    for s in list {
-        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if name.is_empty() || crate::secrets::looks_secret(name) {
-            continue;
-        }
-        let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        let auth = s.get("auth_status").and_then(|v| v.as_str()).unwrap_or("");
-        let health = if !enabled {
-            Health::Disabled
-        // codex reports this as `not_logged_in`, underscores and all.
-        } else if auth.replace('_', " ").to_lowercase().contains("not logged") {
-            Health::NeedsAuth
-        } else {
-            Health::Ok
-        };
-        let tr = s.get("transport");
-        let detail = tr
-            .and_then(|t| t.get("url").and_then(|u| u.as_str()).map(str::to_string))
-            .or_else(|| tr.and_then(|t| t.get("command").and_then(|c| c.as_str()).map(str::to_string)))
-            .or_else(|| tr.and_then(|t| t.get("type").and_then(|c| c.as_str()).map(str::to_string)))
-            .unwrap_or_default();
-        let detail = detail.rsplit('/').next().unwrap_or(&detail).to_string();
-        let transport = tr.and_then(|transport| transport.get("type"))
-            .and_then(|kind| kind.as_str()).unwrap_or("unknown");
-        let mut it = mcp_item("codex", name, &detail, health, transport, checked_at);
-        if let Some(r) = s.get("disabled_reason").and_then(|v| v.as_str()) {
-            it = it.put("reason", r);
-        }
-        // Keep the definition itself, not just how it looks. It is the one
-        // thing needed to lend the server to another agent, and it is free
-        // here — the alternative is a second `mcp get` per server at the
-        // moment someone asks, on a path that has to feel instant.
-        if let Some(def) = tr.and_then(|t| crate::lend::Mcp::from_codex(name, t)) {
-            let sensitive = def.has_sensitive_fields();
-            it = it
-                .put("portable", "true")
-                .put("definition_hash", def.public_fingerprint())
-                .put("definition_public", def.public_definition().to_string())
-                .put("definition_source", "semantic")
-                .put("sensitive", sensitive.to_string());
-            // Complete definitions never enter an Item or cache. Even a
-            // currently plain argument can become a credential after an
-            // Agent upgrade; resolve from the owner CLI on explicit action.
-        }
-        out.push(it);
-    }
-    into.extend(rows);
-}
-
-fn enrich_mcp_matrix(items: &mut [Item]) {
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, item) in items.iter().enumerate() {
-        groups.entry(item.get("name").to_lowercase()).or_default().push(index);
-    }
-    let installed: Vec<&str> = crate::agent::installed()
-        .into_iter()
-        .filter(|agent| {
-            crate::agent::get(agent).is_some_and(|spec| spec.capabilities.install_mcp)
-        })
-        .collect();
-    for (name, indexes) in groups {
-        let variants: Vec<crate::capability::McpVariant> = indexes.iter().map(|index| {
-            let item = &items[*index];
-            crate::capability::McpVariant {
-                agent: item.get("agent").to_string(),
-                health: item.get("health").to_string(),
-                transport: item.get("transport").to_string(),
-                health_checked_at: item.get("health_checked_at").parse().unwrap_or(0),
-                summary: item.fields.get(2).cloned().unwrap_or_default(),
-                fingerprint: item.get("definition_hash").to_string(),
-                source: item.get("definition_source").to_string(),
-                public_definition: serde_json::from_str(item.get("definition_public"))
-                    .unwrap_or(serde_json::Value::Null),
-                sensitive: item.get("sensitive") == "true",
-                portable: item.get("portable") == "true",
-                tools_status: item.get("tools_status").to_string(),
-                tools_checked_at: item.get("tools_checked_at").parse().unwrap_or(0),
-                tools: serde_json::from_str(item.get("tools")).unwrap_or_default(),
-            }
-        }).collect();
-        let owners: Vec<String> = variants.iter().map(|variant| variant.agent.clone()).collect();
-        let missing: Vec<&str> = installed.iter().copied()
-            .filter(|agent| !owners.iter().any(|owner| owner == agent))
-            .collect();
-        let sources: std::collections::BTreeSet<&str> = variants.iter()
-            .map(|variant| variant.source.as_str()).filter(|source| !source.is_empty()).collect();
-        let hashes: std::collections::BTreeSet<&str> = variants.iter()
-            .map(|variant| variant.fingerprint.as_str()).filter(|hash| !hash.is_empty()).collect();
-        let known = variants.iter().filter(|variant| !variant.fingerprint.is_empty()).count();
-        let comparison = if variants.len() == 1 {
-            "single"
-        } else if known != variants.len() {
-            "unknown"
-        } else if sources.len() != 1 {
-            "incomparable"
-        } else if hashes.len() == 1 && variants.iter().any(|variant| variant.sensitive) {
-            "private-unknown"
-        } else if hashes.len() == 1 {
-            "identical"
-        } else {
-            "divergent"
-        };
-        let variants_json = serde_json::to_string(&variants).unwrap_or_default();
-        let owners_json = serde_json::to_string(&owners).unwrap_or_default();
-        let missing_json = serde_json::to_string(&missing).unwrap_or_default();
-        for index in indexes {
-            items[index].data.insert("capability_id".into(), format!("mcp:{name}"));
-            items[index].data.insert("owners".into(), owners_json.clone());
-            items[index].data.insert("missing_agents".into(), missing_json.clone());
-            items[index].data.insert("variants".into(), variants_json.clone());
-            items[index].data.insert("comparison".into(), comparison.into());
-        }
-    }
-}
 
 /// Which agents are *missing* a skill — the other half of "who has it".
 ///
@@ -799,32 +513,6 @@ pub fn missing_agents(have: &str) -> Vec<&'static str> {
         .filter(|(dir, agent)| dir.parent().is_some_and(|p| p.exists()) && !have.contains(agent))
         .map(|(_, agent)| agent)
         .collect()
-}
-
-pub fn skill_dir_for(agent: &str) -> Option<std::path::PathBuf> {
-    skill_dirs().into_iter().find(|(_, a)| *a == agent).map(|(d, _)| d)
-}
-
-/// Copy a skill directory into another agent. Never overwrites.
-pub fn copy_skill(from_dir: &str, agent: &str, name: &str) -> Result<String, String> {
-    let Some(dest_root) = skill_dir_for(agent) else {
-        return Err(format!("unknown agent {agent}"));
-    };
-    let dest = dest_root.join(name);
-    if dest.exists() {
-        return Err(format!("{agent} already has {name}"));
-    }
-    let source = std::path::Path::new(from_dir);
-    let scan = crate::capability::hash_skill("source", source);
-    if scan.fingerprint.is_empty() {
-        return Err("the Skill could not be read completely".into());
-    }
-    if scan.sensitive_files > 0 {
-        return Err("the Skill contains credential-like material; refusing to copy it".into());
-    }
-    std::fs::create_dir_all(&dest_root).map_err(|e| e.to_string())?;
-    copy_tree(source, &dest).map_err(|e| e.to_string())?;
-    Ok(crate::paths::tilde(&dest.to_string_lossy()))
 }
 
 pub fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
@@ -1294,7 +982,7 @@ pub fn evidence_lines(evidence: &ConfigEvidence) -> Vec<String> {
 /// again: this is a tally of the three sources above it, and computing them
 /// a second time to count them made a summary cost more than the thing it
 /// summarises.
-pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) -> Vec<Item> {
+pub fn summary(skills: &[Item], sessions: &[Item], runs: &[Item]) -> Vec<Item> {
     use std::collections::BTreeMap;
     let mut per: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut tally = |it: &Item| {
@@ -1302,13 +990,12 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
             let e = per.entry(a.to_string()).or_default();
             match it.kind {
                 Kind::Skill => e.0 += 1,
-                Kind::Mcp => e.1 += 1,
                 Kind::Session => e.2 += 1,
                 _ => {}
             }
         }
     };
-    for it in skills.iter().chain(mcp).chain(sessions) {
+    for it in skills.iter().chain(sessions) {
         tally(it);
     }
     crate::agent::installed()
@@ -1367,120 +1054,7 @@ pub fn summary(skills: &[Item], mcp: &[Item], sessions: &[Item], runs: &[Item]) 
 
 #[cfg(test)]
 mod tests {
-
-    /// The three cases, and the middle one is the whole reason this decision
-    /// happens after parsing rather than before it.
-    #[test]
-    fn an_agents_answer_is_trusted_only_when_it_is_one() {
-        use crate::exec::Output;
-        let ok = |code: i32| Output { status: Some(code), ..Output::default() };
-
-        // Exit 0 with nothing: an authoritative empty. The last server was
-        // removed and the row has to go, or the launcher shows it forever.
-        assert!(trusted(&ok(0), "claude", 0));
-        assert!(trusted(&ok(0), "claude", 3));
-
-        // Non-zero but it printed a usable list: take the list. These CLIs
-        // report warnings through their status while answering perfectly.
-        assert!(trusted(&ok(1), "claude", 3));
-
-        // Non-zero and nothing parseable — `Error: authentication required`.
-        // Checking stdout for emptiness could not see this: the error text
-        // *is* stdout, and it is not an inventory.
-        let auth_error = Output {
-            status: Some(1),
-            stdout: b"Error: authentication required\n".to_vec(),
-            ..Output::default()
-        };
-        assert!(!trusted(&auth_error, "claude", 0));
-
-        // And the count it is given has to be evidence, not merely a number.
-        // That error line splits on `": "` exactly as a server line does, so
-        // the parser read a server *named* "Error", and "a record was parsed"
-        // was true while three real rows were replaced by one imaginary one.
-        let refused = parse_claude_list("Error: authentication required");
-        assert_eq!(refused.len(), 1, "it does parse — that is the whole trap");
-        assert_eq!(refused[0].name, "Error");
-        assert_eq!(claude_evidence(&ok(1), &refused), 0, "and it is not evidence");
-        assert!(!trusted(&ok(1), "claude", claude_evidence(&ok(1), &refused)));
-
-        // A real listing carries a health status on every entry, which is
-        // what an error message cannot produce by accident.
-        let real = parse_claude_list(
-            "Checking MCP server health...\n\nnode_repl: /bin/x - ✓ Connected\ndrive: /bin/y - ✘ Failed",
-        );
-        assert_eq!(real.len(), 2);
-        assert_eq!(real[0].name, "node_repl");
-        assert_eq!(real[0].target, "/bin/x");
-        assert_eq!(real[0].status, "✓ Connected");
-        assert_eq!(claude_evidence(&ok(1), &real), 2);
-        assert!(trusted(&ok(1), "claude", claude_evidence(&ok(1), &real)));
-
-        // A clean exit is taken at its word, statuses or not — so a format
-        // that stops printing them degrades to showing rows, never to
-        // erasing them.
-        let statusless = parse_claude_list("node_repl: /bin/x");
-        assert_eq!(statusless.len(), 1);
-        assert_eq!(claude_evidence(&ok(0), &statusless), 1);
-        assert_eq!(claude_evidence(&ok(1), &statusless), 0);
-
-        // Never started, or killed part-way: never an answer, whatever it
-        // managed to print. A partial list must not replace a complete one.
-        let killed = Output { timed_out: true, status: None, ..Output::default() };
-        assert!(!trusted(&killed, "claude", 0));
-        assert!(!trusted(&killed, "claude", 7), "a partial list is not an answer");
-        let missing = Output { spawn_failed: true, ..Output::default() };
-        assert!(!trusted(&missing, "claude", 0));
-
-        // The two that used to slip through, because both make `ok()` false
-        // and neither was named — so having parsed one record was enough to
-        // reach the `refused` test and pass it.
-        let cut_off = Output { status: Some(0), truncated: true, ..Output::default() };
-        assert!(!trusted(&cut_off, "claude", 7), "output that hit the cap is a fragment");
-        let signalled = Output { status: None, ..Output::default() };
-        assert!(!trusted(&signalled, "claude", 7), "a process killed by a signal never finished");
-
-        // …and each refusal names the partition, which is what keeps its
-        // cached rows through `cache::carry_over`.
-        assert!(crate::exec::incomplete_partitions().iter().any(|p| p == "claude"));
-    }
     use super::*;
-    use crate::capability::SkillCopy;
-
-    #[test]
-    fn every_copy_of_a_merged_skill_is_reachable_from_the_row() {
-        let copies = vec![
-            ("claude", "/s/claude/deploy"),
-            ("shared", "/s/shared/deploy"),
-            ("claude", "/s/claude/deploy"),
-        ];
-        let copy_info = vec![
-            SkillCopy { agent: "shared".into(), dir: "/s/shared/deploy".into(), ..Default::default() },
-            SkillCopy { agent: "codex".into(), dir: "/s/codex/deploy".into(), ..Default::default() },
-        ];
-        let row = Item::new("/deploy", Kind::Skill)
-            .put("agent", "claude, shared, codex")
-            .put("dir", "/s/claude/deploy")
-            .put("copies", serde_json::to_string(&copies).unwrap())
-            .put("copy_info", serde_json::to_string(&copy_info).unwrap());
-        assert_eq!(
-            copy_paths(&row),
-            vec![
-                ("claude".to_string(), "/s/claude/deploy".to_string()),
-                ("shared".to_string(), "/s/shared/deploy".to_string()),
-                ("codex".to_string(), "/s/codex/deploy".to_string()),
-            ],
-            "one entry per directory, in discovery order, and the hashed copies fill any gap",
-        );
-
-        // A row from before either list existed still opens its one copy —
-        // and never with the comma-joined agent column as an agent name.
-        let bare = Item::new("/solo", Kind::Skill)
-            .put("agent", "claude, codex")
-            .put("dir", "/s/claude/solo");
-        assert_eq!(copy_paths(&bare), vec![("claude".to_string(), "/s/claude/solo".to_string())]);
-        assert!(copy_paths(&Item::new("/none", Kind::Skill)).is_empty());
-    }
 
     #[test]
     fn one_parser_answers_both_the_row_and_the_diagnostic() {

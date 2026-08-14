@@ -14,10 +14,18 @@ const FNV_PRIME: u64 = 0x100000001b3;
 /// builds will compare hashes that mean different things and call divergent
 /// copies identical.
 ///
-/// Unchanged by the fault detection below: a broken or escaping symlink is
-/// still hashed as its link text and never as its target. Resolving a target
-/// decides whether to *report* it, and contributes nothing to identity.
-const SKILL_POLICY: &[u8] = b"skill-tree-v4-vcs-ignored-field-secrets";
+/// Unchanged by the fault detection below: a broken or escaping symlink *in
+/// the tree* is still hashed as its link text and never as its target.
+/// Resolving a target decides whether to *report* it, and contributes nothing
+/// to identity.
+///
+/// The Skill's **own root** is the deliberate exception, and v5 is that change.
+/// A root that is a symlink is not a second copy of the Skill; it is a second
+/// *name* for one, which is exactly what consolidating a duplicate produces.
+/// Hashed as link text it fingerprinted differently from the directory it
+/// points at, so the one arrangement that makes divergence impossible was
+/// reported as `divergent` — the fix reported as the fault it fixes.
+const SKILL_POLICY: &[u8] = b"skill-tree-v5-linked-root-resolved";
 
 /// A Skill's `description` is read by every agent on every load, and Claude's
 /// own format caps it near a kilobyte. Past that it is a manual pasted into a
@@ -40,7 +48,7 @@ const MAX_LINK_FAULTS: usize = 32;
 /// ever. A derived value cannot be a sentinel. Bump this whenever a field is
 /// added that an older record would report as zero or empty; every record
 /// written before it existed reads as `""` and is recomputed exactly once.
-pub const RECORD: &str = "2";
+pub const RECORD: &str = "3";
 
 struct Fnv(u64);
 
@@ -115,6 +123,27 @@ pub struct SkillCopy {
     /// because the link text matched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escaping_links: Vec<String>,
+    /// This copy's own root is a symlink rather than a directory of its own.
+    ///
+    /// It is the difference between two things that happen to match today and
+    /// one thing under two names, which is the whole question a duplicate
+    /// manager exists to answer. Fingerprints cannot carry it: after
+    /// consolidation both are the same tree, so `identical` is true of the
+    /// arrangement that still has two independent copies to drift *and* of the
+    /// one where drifting is impossible.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
+    /// Where this copy's root actually resolves to, canonicalized.
+    ///
+    /// Recorded rather than derived because `integrity` must stay a pure
+    /// function over records — it runs wherever a Skill row is rendered, and a
+    /// `canonicalize` per copy per row is a filesystem call on a path this
+    /// module exists to keep off. It is set for every copy, not only linked
+    /// ones: `dir` differs from the resolved path whenever `$HOME` itself is
+    /// reached through a link, so linkedness cannot be inferred by comparing
+    /// the two.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub real: String,
 }
 
 fn relative<'a>(root: &'a Path, path: &'a Path) -> &'a Path {
@@ -279,25 +308,50 @@ fn stamp_walk(root: &Path, path: &Path, hash: &mut Fnv) -> bool {
         .all(|child| stamp_walk(root, &child, hash))
 }
 
+/// The cheap "has anything moved" stamp, which must be taken through a linked
+/// root for the same reason the fingerprint is.
+///
+/// A stamp taken *at* a symlink is the link's own metadata, and a link does
+/// not change when the tree it points at does — so a consolidated copy would
+/// report unchanged for ever, keep a fingerprint from before the canonical
+/// tree was edited, and be reported `divergent` against the very directory it
+/// resolves to. The reuse gate would never re-open to correct it.
 pub fn skill_stamp(dir: &Path) -> String {
     let mut hash = Fnv::new();
     hash.bytes(SKILL_POLICY);
-    if stamp_walk(dir, dir, &mut hash) { hash.finish() } else { String::new() }
+    let root = resolved_root(dir);
+    if stamp_walk(&root, &root, &mut hash) { hash.finish() } else { String::new() }
+}
+
+/// Where a Skill copy's contents actually are.
+///
+/// `canonicalize` on a path that does not resolve answers `Err`, and the
+/// caller wants the original back rather than a panic: a copy that is a
+/// dangling link is a real state, and it is reported as unreadable by the
+/// walk that follows rather than by this function guessing.
+fn resolved_root(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
 }
 
 pub fn hash_skill(agent: &str, dir: &Path) -> SkillCopy {
+    // Resolved once: the escape test compares canonical paths, and the root
+    // itself is routinely reached through a symlinked home directory, which
+    // would make every link in the tree look like it escaped.
+    let real_root = resolved_root(dir);
     let mut result = SkillCopy {
         agent: agent.to_string(),
         dir: dir.to_string_lossy().into_owned(),
+        real: real_root.to_string_lossy().into_owned(),
+        linked: std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink()),
         ..SkillCopy::default()
     };
     let mut hash = Fnv::new();
     hash.bytes(SKILL_POLICY);
-    // Resolved once: the escape test compares canonical paths, and the root
-    // itself is routinely reached through a symlinked home directory, which
-    // would make every link in the tree look like it escaped.
-    let real_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    walk(dir, &real_root, dir, &mut hash, &mut result);
+    // Started at the resolved root rather than at `dir`, which is what makes a
+    // linked copy hash as the tree it names. For an ordinary directory the two
+    // are the same walk: every path in the hash is relative to the root it was
+    // started from, so the bytes are unchanged.
+    walk(&real_root, &real_root, &real_root, &mut hash, &mut result);
     if result.unreadable == 0 {
         result.fingerprint = hash.finish();
     }
@@ -318,6 +372,8 @@ pub fn cache_item(copy: &SkillCopy) -> Item {
         .put("modified", copy.modified.to_string())
         .put("broken_links", serde_json::to_string(&copy.broken_links).unwrap_or_default())
         .put("escaping_links", serde_json::to_string(&copy.escaping_links).unwrap_or_default())
+        .put("linked", if copy.linked { "1" } else { "" })
+        .put("real", &copy.real)
 }
 
 pub fn copy_from_item(item: &Item) -> SkillCopy {
@@ -333,6 +389,8 @@ pub fn copy_from_item(item: &Item) -> SkillCopy {
         modified: item.get("modified").parse().unwrap_or(0),
         broken_links: serde_json::from_str(item.get("broken_links")).unwrap_or_default(),
         escaping_links: serde_json::from_str(item.get("escaping_links")).unwrap_or_default(),
+        linked: !item.get("linked").is_empty(),
+        real: item.get("real").to_string(),
     }
 }
 
@@ -349,16 +407,45 @@ pub fn copies(item: &Item) -> Vec<SkillCopy> {
     serde_json::from_str(item.get("copy_info")).unwrap_or_default()
 }
 
-/// What a set of copies of one Skill amounts to: `single`, `identical`,
-/// `divergent`, `unknown` or `private-unknown`.
+/// Is this set one directory under several names, rather than several
+/// directories that happen to agree?
+///
+/// Exactly one copy owns a real tree and every other copy is a link resolving
+/// to it. "Exactly" is the whole predicate: two real copies with a third
+/// linking to one of them still have two things that can drift, which is the
+/// state this is meant to distinguish itself from, so it is not consolidated
+/// and must not be reported as though it were.
+///
+/// Fingerprints are checked by the caller, not here. A link whose target has
+/// been swapped for a different tree is a genuinely divergent set that happens
+/// to be shaped like a consolidated one, and this predicate is about shape.
+pub fn consolidated(copies: &[SkillCopy]) -> bool {
+    let mut real = copies.iter().filter(|copy| !copy.linked);
+    let Some(canonical) = real.next() else { return false };
+    if real.next().is_some() || canonical.real.is_empty() {
+        return false;
+    }
+    copies.iter().filter(|copy| copy.linked).all(|copy| copy.real == canonical.real)
+}
+
+/// What a set of copies of one Skill amounts to: `single`, `linked`,
+/// `identical`, `divergent`, `unknown` or `private-unknown`.
 ///
 /// One implementation because the launcher row, the Quick Look matrix and
 /// `doctor skills` are answering the same question, and three copies of these
-/// five rules would eventually give three answers about the same skill.
+/// six rules would eventually give three answers about the same skill.
 ///
 /// A copy with redacted private lines can only ever be `private-unknown`:
 /// equal fingerprints there mean the *public* parts match, and the parts that
 /// were not compared are exactly the ones worth being careful about.
+///
+/// `linked` sits below matching fingerprints and above `identical`, and the
+/// order is the point. `identical` is a statement about today — several
+/// independent trees that currently agree, one edit away from not agreeing —
+/// while `linked` is a statement about what can happen next, because there is
+/// only one tree to edit. Collapsing them would make the manager unable to
+/// report its own work: consolidating a duplicate would leave the row saying
+/// exactly what it said before.
 pub fn integrity(copies: &[SkillCopy]) -> &'static str {
     let known = copies.iter().filter(|copy| !copy.fingerprint.is_empty()).count();
     let unique: std::collections::BTreeSet<&str> =
@@ -369,10 +456,12 @@ pub fn integrity(copies: &[SkillCopy]) -> &'static str {
         "single"
     } else if copies.iter().any(|copy| copy.sensitive_files > 0) {
         "private-unknown"
-    } else if unique.len() == 1 {
-        "identical"
-    } else {
+    } else if unique.len() != 1 {
         "divergent"
+    } else if consolidated(copies) {
+        "linked"
+    } else {
+        "identical"
     }
 }
 
@@ -687,99 +776,6 @@ fn diagnose(found: &[DiscoveredSkill]) -> SkillReport {
     }
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-pub struct McpVariant {
-    pub agent: String,
-    pub health: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub transport: String,
-    #[serde(default)]
-    pub health_checked_at: u64,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub fingerprint: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub source: String,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub public_definition: serde_json::Value,
-    #[serde(default)]
-    pub sensitive: bool,
-    #[serde(default)]
-    pub portable: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tools_status: String,
-    #[serde(default)]
-    pub tools_checked_at: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<crate::mcp_tools::Tool>,
-}
-
-pub fn mcp_variants(item: &Item) -> Vec<McpVariant> {
-    serde_json::from_str(item.get("variants")).unwrap_or_default()
-}
-
-fn flatten_json(prefix: &str, value: &serde_json::Value, out: &mut std::collections::BTreeMap<String, String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, value) in map {
-                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
-                flatten_json(&path, value, out);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for (index, value) in values.iter().enumerate() {
-                flatten_json(&format!("{prefix}[{index}]"), value, out);
-            }
-        }
-        _ => {
-            out.insert(prefix.to_string(), value.to_string());
-        }
-    }
-}
-
-pub fn mcp_definition_diff(item: &Item) -> Vec<String> {
-    let variants = mcp_variants(item);
-    if variants.len() < 2 {
-        return vec!["only one owner definition is available".into()];
-    }
-    let mut flattened = Vec::new();
-    let mut paths = std::collections::BTreeSet::new();
-    for variant in &variants {
-        let mut fields = std::collections::BTreeMap::new();
-        flatten_json("", &variant.public_definition, &mut fields);
-        paths.extend(fields.keys().cloned());
-        flattened.push(fields);
-    }
-    let mut lines = Vec::new();
-    for path in paths {
-        let values: Vec<Option<&String>> = flattened.iter().map(|fields| fields.get(&path)).collect();
-        if values.windows(2).all(|pair| pair[0] == pair[1]) {
-            continue;
-        }
-        lines.push(path.clone());
-        for (variant, value) in variants.iter().zip(values) {
-            lines.push(format!(
-                "  {:<10} {}",
-                variant.agent,
-                value.map(String::as_str).unwrap_or("<absent>")
-            ));
-        }
-        if lines.len() >= 100 {
-            lines.push("… diff truncated".into());
-            break;
-        }
-    }
-    if lines.is_empty() {
-        lines.push(if variants.iter().any(|variant| variant.sensitive) {
-            "public structures match; private values were not compared".into()
-        } else {
-            "public structures match".into()
-        });
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,10 +866,17 @@ mod tests {
             modified: 1_754_600_000,
             broken_links: vec!["scripts/gone".into()],
             escaping_links: vec!["ref".into()],
+            linked: true,
+            real: "/tmp/skills/canonical".into(),
         };
         let back = copy_from_item(&cache_item(&copy));
         assert_eq!(back.modified, copy.modified);
         assert_eq!(back.broken_links, copy.broken_links);
+        // Without these two a consolidated Skill reads back as two independent
+        // copies on the very next gather, and the manager offers to consolidate
+        // what it has already consolidated.
+        assert!(back.linked);
+        assert_eq!(back.real, copy.real);
         assert_eq!(back.escaping_links, copy.escaping_links);
         assert_eq!(back.fingerprint, copy.fingerprint);
     }
@@ -1130,5 +1133,89 @@ mod tests {
         assert_eq!(integrity(&[hashed("a", 0), hashed("b", 0)]), "divergent");
         assert_eq!(integrity(&[hashed("a", 0), hashed("", 0)]), "unknown");
         assert_eq!(integrity(&[hashed("a", 1), hashed("a", 0)]), "private-unknown");
+    }
+
+    /// The whole basis of consolidating a duplicate: a Skill root that is a
+    /// symlink must fingerprint as the tree it names.
+    ///
+    /// Hashed as link text — which is what every symlink *inside* a tree still
+    /// gets, deliberately — the linked copy carried a fingerprint derived from
+    /// a path, so the one arrangement in which two copies can never drift was
+    /// reported `divergent`. The manager would have described its own output
+    /// as the fault it had just removed, and `doctor skills` would have agreed
+    /// with it.
+    #[test]
+    fn a_linked_root_hashes_as_the_tree_it_points_at() {
+        use std::os::unix::fs::symlink;
+        let root = fixture("skill-linked-root");
+        let canonical = root.join("shared/demo");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("SKILL.md"), "---\nname: demo\ndescription: d\n---\nbody\n")
+            .unwrap();
+        std::fs::create_dir_all(root.join("claude")).unwrap();
+        let link = root.join("claude/demo");
+        symlink(&canonical, &link).unwrap();
+
+        let kept = hash_skill("shared", &canonical);
+        let linked = hash_skill("claude", &link);
+        assert_eq!(
+            kept.fingerprint, linked.fingerprint,
+            "one tree under two names is one fingerprint",
+        );
+        assert!(!kept.linked, "the directory is the copy");
+        assert!(linked.linked, "and the link says so about itself");
+        assert_eq!(linked.real, kept.real, "both resolve to the same place");
+        assert!(
+            linked.escaping_links.is_empty(),
+            "a root that links to another root is the arrangement, not an escape",
+        );
+        assert_eq!(linked.files, kept.files, "a link counts the tree it names");
+
+        // The state the manager reports, and the reason it is not `identical`:
+        // there is one tree, so there is nothing left that can drift.
+        assert_eq!(integrity(&[kept.clone(), linked.clone()]), "linked");
+        assert!(consolidated(&[kept.clone(), linked.clone()]));
+
+        // Two real directories that merely agree today are not that, however
+        // equal their fingerprints are.
+        let second = root.join("codex/demo");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("SKILL.md"), "---\nname: demo\ndescription: d\n---\nbody\n")
+            .unwrap();
+        let other = hash_skill("codex", &second);
+        assert_eq!(other.fingerprint, kept.fingerprint);
+        assert!(!consolidated(&[kept.clone(), other.clone()]));
+        assert_eq!(integrity(&[kept.clone(), other.clone()]), "identical");
+        // …and a link beside two real copies leaves the two real ones to sort
+        // out, which is the case a "one is a link, so we are done" shortcut
+        // would have got wrong.
+        assert!(!consolidated(&[kept.clone(), other.clone(), linked.clone()]));
+        assert_eq!(integrity(&[kept, other, linked]), "identical");
+    }
+
+    /// A stamp taken at a link never moves when the tree behind it does, so
+    /// the reuse gate would hold a stale fingerprint open for ever.
+    #[test]
+    fn a_linked_copys_stamp_follows_the_tree_rather_than_the_link() {
+        use std::os::unix::fs::symlink;
+        let root = fixture("skill-linked-stamp");
+        let canonical = root.join("shared/demo");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("SKILL.md"), "---\nname: demo\ndescription: d\n---\none\n")
+            .unwrap();
+        std::fs::create_dir_all(root.join("claude")).unwrap();
+        let link = root.join("claude/demo");
+        symlink(&canonical, &link).unwrap();
+
+        let before = skill_stamp(&link);
+        assert!(!before.is_empty());
+        assert_eq!(before, skill_stamp(&canonical), "the same tree, the same stamp");
+        std::fs::write(canonical.join("SKILL.md"), "---\nname: demo\ndescription: d\n---\ntwo\n")
+            .unwrap();
+        assert_ne!(
+            before,
+            skill_stamp(&link),
+            "editing the one tree has to make every name for it look changed",
+        );
     }
 }
