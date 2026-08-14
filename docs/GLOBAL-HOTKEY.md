@@ -45,7 +45,8 @@ login
                            ├─ quick-terminal marker == 1 → prelude _panel loop
                            │    └─ child prelude → fzf
                            │         └─ refresh thread → fzf --listen socket
-                           └─ no marker → open -n exact Ghostty.app and exit
+                           └─ no marker → tab in an ordinary instance, else
+                                          open -n exact Ghostty.app, and exit
 ```
 
 ## Keeping the list current
@@ -122,8 +123,18 @@ the resulting ordinary window would also become Prelude.
 Every generated surface therefore passes through `prelude _surface`:
 
 - only the exact environment value `GHOSTTY_QUICK_TERMINAL=1` enters the panel
-- an unmarked surface launches the exact installed Ghostty app with `open -n`
-  and exits cleanly
+- an unmarked surface is a launch macOS delivered to the wrong instance. It
+  asks an ordinary Ghostty for a tab standing in **this surface's own cwd**,
+  which is where the `--working-directory` it was handed was applied — and
+  falls back to launching the exact installed app with `open -n` only when
+  there is no window anywhere to put a tab in. It then exits cleanly.
+
+The cwd is the load-bearing part. This path re-launched Ghostty with no
+directory at all, so a `Open terminal in containing folder` that was rerouted
+here arrived in `~` — and when the second launch was coalesced as well, the
+chord appeared to do nothing. The re-launch is still deliberately
+directory-less: it runs only after the tab attempt has failed, and passing the
+request on again is how a reroute becomes a loop.
 
 This special instance behavior applies only to Ghostty. Other applications use
 normal macOS instance reuse.

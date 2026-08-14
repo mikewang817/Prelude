@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 235 tests
+cargo test                 # 237 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # p95 gather must stay under 40ms; non-zero when it does not
 ./target/release/prelude bench --json   # the same distribution, for a gate to record
@@ -523,11 +523,50 @@ idempotent block in Ghostty's ordinary config containing exactly the two text
 translations, reloads it with `SIGUSR2`, and removes it on `global uninstall`;
 everything outside the markers remains the person's. This is the deliberate
 cost of making the terminal launcher and Quick Terminal literally one surface.
-The new window is opened through Launch Services with `-n`, for the reasons
-`global.rs` already documents: executing
-the binary directly makes it a foreground application, and without a new
-instance macOS can deliver the launch to the hidden panel, which shares
-Ghostty's bundle identity.
+**Ctrl+Shift+Enter opens a tab, and getting it into the right Ghostty is the
+whole of `open_directory`.** It was a new instance, through Launch Services
+with `-n`, and the `-n` was there because without a new instance macOS can
+deliver the launch to the hidden panel, which shares Ghostty's bundle
+identity. That happened anyway, and the reroute is where the directory was
+lost: the panel answers by running `_surface`, which re-launched Ghostty
+asking for no directory at all, so the window arrived in `~`. Reported as "it
+opens a terminal in the wrong place", and — when the second launch was
+coalesced too — as the same chord doing nothing. Both are one bug, and the
+instance was never what the chord meant: somebody asking a launcher for a
+terminal in a folder already has a terminal, and a second copy of the
+application leaves them to find the new window among their own.
+
+Ghostty 1.3 answers `new tab` over AppleScript, but an Apple Event is addressed
+to a **bundle** and macOS then picks the instance — measured picking the hidden
+panel, which has no window and is the one instance a tab must never land in.
+Activating the intended instance first does not change that choice, and neither
+does asking for its front window. So `NEW_TAB_JS` builds the event by hand and
+addresses it with `descriptorWithProcessIdentifier`, the only form that says
+*which* Ghostty; the path travels as `argv` and is never spliced into the
+script, for the reason `bus::post` already stands as. `NWin` is the second
+attempt rather than a separate feature: `NTab` answers `errAEEventNotHandled`
+when the instance has no window to put a tab in, which is indistinguishable
+from the command being unimplemented. `AcWn` raises the window inside Ghostty
+and does *not* make Ghostty active, so the application is activated separately
+— without that the tab is created correctly and stays behind whatever the
+person was looking at, which is the same "did nothing" this path exists to end.
+
+Picking the pid is `ordinary_pids`: every Ghostty except the panel, which is
+named by the `--config-file` it was started with, exactly as `instance_pids`
+names it for supervision. **`pgrep` excludes the calling process and all of its
+ancestors unless given `-a`**, and both lists are ancestors of Prelude
+somewhere: the panel is, whenever the launcher was revealed with the chord, and
+the ordinary instance is, whenever it was opened with Ctrl+R. Without the flag
+each list is empty precisely where it matters, and an unnamed panel is a tab
+opened in the hidden launcher.
+
+The instance is still the fallback, and there it keeps `-n` for the reasons
+`global.rs` documents: executing the binary directly makes it a foreground
+application. `run_surface` no longer drops the directory either — Ghostty
+applied the `--working-directory` it was handed to that surface, so what was
+asked for is the process's own cwd. Its own re-launch stays directory-less on
+purpose: it runs only when there is no window anywhere to put a tab in, and
+passing the request on again is how a reroute becomes a loop.
 
 **The line is not danger, it is whether there is anything to edit.** A
 command line goes to the clipboard — including agents, skills and sessions,

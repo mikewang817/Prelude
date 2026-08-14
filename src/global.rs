@@ -297,24 +297,43 @@ fn ghostty_executable() -> Option<PathBuf> {
     ghostty_app().map(|app| app.join("Contents/MacOS/ghostty"))
 }
 
-/// Open a new Ghostty window standing in `directory`.
+/// Open a terminal standing in `directory` — a tab where there is a window to
+/// put one in, a new instance only when there is not.
 ///
-/// Through Launch Services with `-n`, for the two reasons this file already
-/// documents. Executing `Contents/MacOS/ghostty` directly leaves the process
-/// a foreground application even under `macos-hidden = always`; and `-n`
-/// forces a *new* instance, so macOS cannot deliver this launch to the hidden
-/// panel — which shares Ghostty's bundle identity and would answer it by
-/// routing through `_surface`.
+/// A tab, because a new instance is not what the chord means. `Open terminal
+/// in containing folder` is asked of a launcher by somebody who already has a
+/// terminal open; answering it with a second copy of the application leaves
+/// them to find the new window among their own, and leaves a process behind
+/// that outlives the question. It also compounds: every press was another
+/// instance, and instances are exactly what makes the rest of this file hard —
+/// they all share Ghostty's bundle identity.
 ///
-/// The new instance reads the person's own Ghostty configuration, not the
-/// panel's: nothing on this path passes `--config-file`, so the window is the
-/// one they normally work in, standing somewhere else.
+/// **A tab has to be asked for by pid, and that is the whole difficulty.**
+/// Ghostty 1.3 answers `new tab` over AppleScript, but an Apple Event is
+/// addressed to a *bundle*, and macOS then picks an instance — measured here
+/// picking the hidden panel, which has no windows and is the one instance a
+/// tab must never land in. Neither activating the intended instance first nor
+/// asking for its front window changes that choice. So the event is built by
+/// hand and addressed with `descriptorWithProcessIdentifier`, which is the
+/// only form that says *which* Ghostty.
+///
+/// Which leaves picking the pid, and that is `ordinary_pids`: every Ghostty
+/// except the panel, named the way `instance_pids` already names it.
+///
+/// The fallback below is the old behaviour and stays exactly as it was,
+/// because it is also the recovery path: `-n` forces a new instance so macOS
+/// cannot deliver the launch to the panel, and nothing here passes
+/// `--config-file`, so the window reads the person's own configuration rather
+/// than the panel's.
 pub fn open_directory(directory: &Path) -> Result<(), String> {
     let Some(app) = ghostty_app() else {
         return Err("Ghostty is not installed in /Applications or ~/Applications".into());
     };
     if !directory.is_dir() {
         return Err(format!("{} is not a folder any more", crate::paths::tilde(&directory.to_string_lossy())));
+    }
+    if open_tab(directory) {
+        return Ok(());
     }
     let status = std::process::Command::new("/usr/bin/open")
         .arg("-n")
@@ -335,6 +354,112 @@ pub fn open_directory(directory: &Path) -> Result<(), String> {
         Err("macOS could not open Ghostty there".into())
     }
 }
+
+/// Ask each ordinary Ghostty for a tab, and stop at the first that answers.
+///
+/// False means there was nobody to ask, or nobody who could — never that the
+/// person now has a tab somewhere they were not told about.
+fn open_tab(directory: &Path) -> bool {
+    let panel = instance_pids();
+    // `-a` again, and here it is the *ordinary* instance it would hide: the
+    // zsh widget runs inside the terminal the person is working in, so the one
+    // Ghostty this is looking for is Prelude's own ancestor exactly when the
+    // launcher was opened with Ctrl+R.
+    let all = crate::exec::run(&["/usr/bin/pgrep", "-a", "-x", "ghostty"], Duration::from_secs(2));
+    ordinary_pids(&all, &panel)
+        .into_iter()
+        .any(|pid| tab_in(pid, directory))
+}
+
+/// The Ghostty instances a person actually works in: all of them, minus the
+/// dedicated panel.
+///
+/// Split out from the two subprocesses that feed it so the one rule worth
+/// getting wrong — *never the panel* — is testable without a machine that
+/// happens to be running Ghostty.
+fn ordinary_pids(pgrep_output: &str, panel: &[u32]) -> Vec<u32> {
+    pgrep_output
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| !panel.contains(pid))
+        .collect()
+}
+
+/// One `new tab`, addressed to one process.
+///
+/// `NWin` is the second attempt rather than a different feature: `NTab`
+/// answers `errAEEventNotHandled` when the instance has no window to put a tab
+/// into, which is indistinguishable from the command being unimplemented and
+/// is why the first version of this looked like Ghostty refusing pid-addressed
+/// events altogether.
+///
+/// The path travels as an argument, never inside the script. Everything Prelude
+/// hands to AppleScript has to survive being a quotation mark or a newline, and
+/// a folder name may hold either.
+fn tab_in(pid: u32, directory: &Path) -> bool {
+    let pid = pid.to_string();
+    let directory = directory.to_string_lossy();
+    let out = crate::exec::capture(
+        &["/usr/bin/osascript", "-l", "JavaScript", "-e", NEW_TAB_JS, "--", &pid, &directory],
+        Duration::from_secs(10),
+    );
+    out.status == Some(0) && String::from_utf8_lossy(&out.stdout).trim() == "ok"
+}
+
+/// `new tab in window 1 with configuration {initial working directory: …}`,
+/// addressed to one pid, then that window brought to the front.
+///
+/// The four-character codes are Ghostty's own, from its scripting dictionary:
+/// `Ghst` is the suite, `NTab`/`NWin`/`AcWn` the three commands, `GNtW` the
+/// window a tab goes in, `GNtS`/`GNwS` the surface configuration and `GScD`
+/// the directory inside it.
+///
+/// Activation is asked for twice on purpose. `AcWn` raises the window within
+/// Ghostty; it does not make Ghostty the active application, so on its own the
+/// new tab is created correctly and stays behind whatever the person was
+/// looking at — which is the same "did nothing" this whole path exists to stop.
+const NEW_TAB_JS: &str = r#"
+ObjC.import('Foundation'); ObjC.import('AppKit');
+var A = $.NSAppleEventDescriptor;
+function fcc(s) {
+  return ((s.charCodeAt(0) << 24) >>> 0) + (s.charCodeAt(1) << 16) + (s.charCodeAt(2) << 8) + s.charCodeAt(3);
+}
+function spec(cls, index) {
+  var r = A.recordDescriptor;
+  r.setDescriptorForKeyword(A.descriptorWithTypeCode(fcc(cls)), fcc('want'));
+  r.setDescriptorForKeyword(A.descriptorWithEnumCode(fcc('indx')), fcc('form'));
+  r.setDescriptorForKeyword(A.descriptorWithInt32(index), fcc('seld'));
+  r.setDescriptorForKeyword(A.nullDescriptor, fcc('from'));
+  return r.coerceToDescriptorType(fcc('obj '));
+}
+function config(dir) {
+  var r = A.recordDescriptor;
+  r.setDescriptorForKeyword(A.descriptorWithString(dir), fcc('GScD'));
+  var c = r.coerceToDescriptorType(fcc('GScf'));
+  return c.isNil() ? r : c;
+}
+function send(pid, id, params) {
+  var e = A.appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(
+    fcc('Ghst'), fcc(id), A.descriptorWithProcessIdentifier(pid), -1, 0);
+  for (var k in params) e.setParamDescriptorForKeyword(params[k], fcc(k));
+  var err = Ref();
+  var reply = e.sendEventWithOptionsTimeoutError(3, 30, err);
+  if (reply.isNil()) return -1;
+  var n = reply.paramDescriptorForKeyword(fcc('errn'));
+  return n.isNil() ? 0 : n.int32Value;
+}
+function run(argv) {
+  var pid = parseInt(argv[0], 10), dir = argv[1];
+  if (!pid || !dir) return 'no';
+  var code = send(pid, 'NTab', { 'GNtW': spec('Gwnd', 1), 'GNtS': config(dir) });
+  if (code != 0) code = send(pid, 'NWin', { 'GNwS': config(dir) });
+  if (code != 0) return 'no';
+  send(pid, 'AcWn', { '----': spec('Gwnd', 1) });
+  var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
+  if (!app.isNil()) app.activateWithOptions(0);
+  return 'ok';
+}
+"#;
 
 fn quick_config_path() -> PathBuf {
     crate::paths::config().join(QUICK_CONFIG)
@@ -663,9 +788,30 @@ fn is_quick_terminal(marker: Option<&OsStr>) -> bool {
 /// The quick terminal owns Prelude. Any ordinary window was delivered to the
 /// wrong Ghostty instance by Launch Services; replace it with a fresh,
 /// default-configured Ghostty application and let this transient surface close.
+///
+/// **The directory has to be carried across that reroute, and it was not.**
+/// This is the path a `Open terminal in containing folder` takes when macOS
+/// hands its launch to the panel instead of making a new instance, and the
+/// re-launch below asks for no directory at all — so the window arrived in
+/// Ghostty's default one. Reported as "it opens a terminal in `~`", which
+/// names neither Prelude nor Launch Services and is a different sentence from
+/// the "it did nothing" the same path produces when the second launch is
+/// coalesced too. Ghostty applied the `--working-directory` it was given to
+/// *this* surface, so the directory that was asked for is this process's own
+/// cwd, and a tab in an ordinary instance both preserves it and cannot be
+/// re-delivered here — `open` is not involved.
+///
+/// The re-launch stays directory-less on purpose. It runs only when there is
+/// no window anywhere to put a tab in, and passing the request on again is how
+/// a reroute becomes a loop.
 pub fn run_surface() -> i32 {
     if is_quick_terminal(std::env::var_os("GHOSTTY_QUICK_TERMINAL").as_deref()) {
         return crate::panel::run();
+    }
+    if let Ok(directory) = std::env::current_dir() {
+        if open_tab(&directory) {
+            return 0;
+        }
     }
     let Some(app) = ghostty_app() else {
         eprintln!("prelude: Ghostty is no longer installed");
@@ -993,9 +1139,18 @@ fn launchctl(args: &[&str]) -> bool {
 
 /// The dedicated Ghostty pids. One is healthy; two means two event taps
 /// fighting over the same chord.
+///
+/// `-a` is load-bearing and easy to leave out. `pgrep` excludes the calling
+/// process **and all of its ancestors** unless asked not to — and the panel is
+/// the ancestor of everything Prelude runs inside it, so without the flag this
+/// answers "no panel" from the one place that is certainly wrong. It reads as
+/// correct for as long as nobody asks from in there, which is most of the time
+/// and none of the times that matter: `open_tab` subtracts this list to decide
+/// which Ghostty may be handed a tab, and an unnamed panel is a tab opened in
+/// the hidden launcher.
 fn instance_pids() -> Vec<u32> {
     let marker = format!("config-file={}", quick_config_path().display());
-    crate::exec::run(&["/usr/bin/pgrep", "-f", &marker], Duration::from_secs(2))
+    crate::exec::run(&["/usr/bin/pgrep", "-a", "-f", &marker], Duration::from_secs(2))
         .lines()
         .filter_map(|line| line.trim().parse().ok())
         .collect()
@@ -1816,6 +1971,44 @@ mod tests {
         assert!(!link_handler_wanted(true, true), "one that is there is not rebuilt");
         assert!(!link_handler_wanted(false, false), "no panel means no URL scheme");
         assert!(!link_handler_wanted(false, true));
+    }
+
+    /// The panel is the one instance a tab must never be put in: it has no
+    /// window, its surfaces run `_surface` rather than a shell, and it is
+    /// hidden — so a tab delivered there is a terminal the person cannot see,
+    /// which is the failure `open_directory` exists to end rather than move.
+    #[test]
+    fn a_tab_is_never_offered_to_the_panel() {
+        let pgrep = "92202\n32859\n33251\n";
+        assert_eq!(ordinary_pids(pgrep, &[92202]), vec![32859, 33251]);
+        // Two panels is the state `instances()` calls unhealthy. It must still
+        // subtract both rather than only the first.
+        assert_eq!(ordinary_pids(pgrep, &[92202, 33251]), vec![32859]);
+        // Nothing but the panel is running: no tab, and the caller falls back
+        // to making an instance rather than being told a tab was opened.
+        assert!(ordinary_pids("92202\n", &[92202]).is_empty());
+        // A panel that is not running takes nothing away.
+        assert_eq!(ordinary_pids(pgrep, &[]), vec![92202, 32859, 33251]);
+        // `pgrep` prints nothing at all when it matches nothing, and its exit
+        // status is dropped by `exec::run`.
+        assert!(ordinary_pids("", &[92202]).is_empty());
+        assert!(ordinary_pids("\n \n", &[]).is_empty());
+    }
+
+    /// Every code the script sends is four bytes, and a typo in one is a
+    /// silently unhandled event rather than a compile error.
+    #[test]
+    fn the_tab_script_names_ghosttys_own_four_character_codes() {
+        for code in ["Ghst", "NTab", "NWin", "AcWn", "GNtW", "GNtS", "GNwS", "GScD", "GScf", "Gwnd"] {
+            assert!(NEW_TAB_JS.contains(&format!("'{code}'")), "{code}");
+        }
+        // The path arrives as `argv`, never spliced into the source: a folder
+        // may hold a quotation mark or a newline, and `bus::post` is already
+        // the standing reminder of what the second of those costs.
+        assert!(NEW_TAB_JS.contains("function run(argv)"));
+        // `-e` takes one argument. A raw string that ends up holding the
+        // delimiter would be a runtime syntax error in another language.
+        assert!(!NEW_TAB_JS.contains("\"#"));
     }
 
     use super::*;
