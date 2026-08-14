@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 234 tests
+cargo test                 # 235 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # p95 gather must stay under 40ms; non-zero when it does not
 ./target/release/prelude bench --json   # the same distribution, for a gate to record
@@ -547,6 +547,30 @@ inventing its own storage format.
 to read the file is a step backwards; opening a file is harmless in a way that
 `kill $(lsof -ti tcp:3000)` is not. A file opens identically from either entry
 point because Launch Services is the destination. `^K` still offers the text.
+
+**And no preference may take that away.** `classic_enter` — the `enter` setting,
+shown as `copy commands` — turned *every* row into a handover, which meant a
+person who had it on pressed Enter on Chrome, on a folder, on a URL, and got
+text on the clipboard. It was reported the way it should have been: the
+launcher does not open things. Both halves of the preference's own argument
+fail on an object — there is nothing to read (`open -na
+/Applications/Safari.app` is not a command anybody proofreads) and nothing is
+averted (opening a file is the harmless case, by the paragraph above). So it
+now stops at `defaults::goes_to_launch_services`: `Open`, `Launch` and
+`OpenUrl` act under either value, and everything that would otherwise run,
+resume, answer or hand a skill to an agent still copies — which is what the
+preference is *for*, and it must go on doing something or the row is a control
+that changes nothing.
+
+Those are the same three verbs `link.rs` lets a `prelude://` URL reach, and the
+predicate is deliberately shared: both callers want the property "ends at
+Launch Services, touches nothing of the person's own state". Adding a fourth
+verb to it is a claim about that verb, and one of the two readers is a security
+boundary, so make the claim there or not at all. The label moved with the
+behaviour — a value column reading `copy everything` about a rule with an
+exception in it is the sort of setting somebody changes twice and then stops
+believing — while `set enter "copy everything"` is still accepted, because what
+a person typed once has to keep working.
 
 **A container is not a project, and `$HOME` is the one that bites.**
 `project::root` walks up for a marker and, finding none, used to take the

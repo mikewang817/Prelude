@@ -148,15 +148,22 @@ fn validate_pref(key: &str, value: &str) -> Result<String, String> {
             _ => Err("update is off, notify, download or apply".into()),
         },
         // `set` has to accept what `get` printed, and `get` prints the row's
-        // value column. This one row says "per kind" and "copy everything"
+        // value column. This one row says "per kind" and "copy commands"
         // rather than off and on, because on/off says nothing about what the
         // preference does — so those two words are values too. Every other
         // scalar already round-trips; this was the one that did not.
+        //
+        // It printed "copy everything" until the preference stopped reaching
+        // objects. The old words are still accepted, and only accepted: what a
+        // person typed once has to keep working, but a value column that goes
+        // on saying "everything" about a rule with an exception in it is the
+        // kind of setting somebody changes twice and then stops trusting.
         "classic_enter" => match value.trim().to_ascii_lowercase().as_str() {
             "per kind" | "per-kind" => Ok("false".into()),
+            "copy commands" | "copy-commands" => Ok("true".into()),
             "copy everything" | "copy-everything" => Ok("true".into()),
             _ => parse_bool(value).map(|v| v.to_string()).ok_or_else(|| {
-                "enter is per kind or copy everything (also on/off, true/false, yes/no or 1/0)"
+                "enter is per kind or copy commands (also on/off, true/false, yes/no or 1/0)"
                     .to_string()
             }),
         },
@@ -884,8 +891,8 @@ pub fn items() -> Vec<Item> {
     v.push(preference_row(
         "enter",
         "What Enter does",
-        if classic_enter() { "copy everything".into() } else { "per kind".into() },
-        "open objects directly; keep commands reviewable",
+        if classic_enter() { "copy commands".into() } else { "per kind".into() },
+        "objects always open; the rest acts or copies",
         EDIT_TOGGLE,
         ("classic_enter", "per kind", "PRELUDE_CLASSIC_ENTER"),
     ));
@@ -1037,8 +1044,9 @@ pub fn detail(it: &Item) -> Vec<String> {
         }
         "enter" => {
             out.push("Per kind opens objects and keeps commands reviewable.".into());
-            out.push("Copy everything applies only to payload rows; Settings remains operable.".into());
-            out.push("Left chooses per kind; right chooses copy everything; Enter toggles.".into());
+            out.push("Copy commands hands over every payload row that would otherwise act.".into());
+            out.push("Files, folders, applications and links open under both; Settings stays operable.".into());
+            out.push("Left chooses per kind; right chooses copy commands; Enter toggles.".into());
             setting_origin(it, &mut out);
         }
         "update" => {
@@ -1263,7 +1271,7 @@ pub fn direction_label(it: &Item, direction: &str) -> &'static str {
         "index" => if left { "Show status" } else { "Rebuild now" },
         "hotkey" | "paneldir" | "key" | "fallbacks" => if left { "Reset default" } else { "Change…" },
         "preview" => if left { "Set off" } else { "Set on" },
-        "enter" => if left { "Per kind" } else { "Copy everything" },
+        "enter" => if left { "Per kind" } else { "Copy commands" },
         "update" => if left { "Previous mode" } else { "Next mode" },
         "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             if left { "Remove one…" } else { "Add one…" }
@@ -1743,7 +1751,7 @@ fn toggle(it: &Item) -> i32 {
     // `→` followed by Enter cannot write the same value twice or flip backward.
     let (key, now) = match it.get("setting") {
         "preview" => ("preview", it.fields.first().map(String::as_str) != Some("on")),
-        "enter" => ("classic_enter", it.fields.first().map(String::as_str) != Some("copy everything")),
+        "enter" => ("classic_enter", it.fields.first().map(String::as_str) != Some("copy commands")),
         _ => return 2,
     };
     // The environment variable, where it is set, is what the launcher will
@@ -1760,7 +1768,7 @@ fn toggle(it: &Item) -> i32 {
     let said = match (key, now) {
         ("preview", true) => "Quick Look on".to_string(),
         ("preview", false) => "Quick Look off".to_string(),
-        (_, true) => "Enter copies everything".to_string(),
+        (_, true) => "Enter copies commands".to_string(),
         (_, false) => "Enter acts per kind".to_string(),
     };
     crate::ui::note(&if overridden {
@@ -1821,7 +1829,7 @@ fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
             let shown = match (key, value.as_str()) {
                 ("preview", "true") => "preview = on".into(),
                 ("preview", "false") => "preview = off".into(),
-                ("classic_enter", "true") => "enter = copy everything".into(),
+                ("classic_enter", "true") => "enter = copy commands".into(),
                 ("classic_enter", "false") => "enter = per kind".into(),
                 ("key", value) => format!("key = {value} — bound in the next shell you open"),
                 (key, value) => format!("{key} = {value}"),
@@ -2310,7 +2318,7 @@ mod tests {
             ("paneldir", "Reset default", "Change…", false, true),
             ("key", "Reset default", "Change…", false, true),
             ("preview", "Set off", "Set on", false, false),
-            ("enter", "Per kind", "Copy everything", false, false),
+            ("enter", "Per kind", "Copy commands", false, false),
             ("update", "Previous mode", "Next mode", false, false),
             ("fallbacks", "Reset default", "Change…", false, true),
             ("openwith", "Remove one…", "Add one…", true, true),

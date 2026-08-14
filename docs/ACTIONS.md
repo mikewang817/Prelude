@@ -30,9 +30,15 @@ and URLs go to macOS Launch Services on both surfaces. Actions that explicitly
 run inside Prelude, such as MCP inspection or `Run and show output`, also behave
 the same on both surfaces.
 
-`PRELUDE_CLASSIC_ENTER`, or the corresponding `set:` setting, is the exception:
-when enabled, every default becomes a command/text insertion instead of the
-per-Kind behavior below.
+`PRELUDE_CLASSIC_ENTER`, or the corresponding `set:` setting (**copy
+commands**), narrows that: every default that would act becomes a command/text
+insertion instead of the per-Kind behavior below. It stops at two places. A
+Setting row is a control rather than a payload and still opens its editor, or
+the screen that turns the preference off would be unreachable. And a row whose
+default is `Open`, `Launch` or `OpenUrl` — a file, folder, application, config
+or URL — still goes to Launch Services: those are the three verbs that hand an
+object to macOS, they carry no text worth reviewing, and a launcher that has
+stopped opening files reads as broken rather than as configured.
 
 ## Default behavior
 
@@ -290,7 +296,7 @@ the selected row.
 | Search index | show status | rebuild | rebuild |
 | hotkey / panel directory / shell key | reset | change | change |
 | Quick Look | off | on | toggle |
-| Enter behavior | per kind | copy everything | toggle |
+| Enter behavior | per kind | copy commands | toggle |
 | Updates | previous mode | next mode | choose all four modes |
 | Open-with / Snippets / Quicklinks / Favorites | remove one | add one | manage all |
 

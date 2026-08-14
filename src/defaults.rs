@@ -16,6 +16,12 @@
 //! read and edit it before it runs, whether Prelude was opened from a shell or
 //! from the global chord. An object is handed to the application that owns it.
 //! The two entry points must not produce two action vocabularies.
+//!
+//! The `enter` preference moves that line, and only along the command side of
+//! it: `copy commands` makes every row that could act hand its text over
+//! instead, except the three verbs that end at Launch Services. A preference
+//! that could take opening a file away from a launcher is not a preference,
+//! it is a fault report waiting to be filed.
 
 use crate::item::{Item, Kind};
 
@@ -94,16 +100,53 @@ pub enum Verb {
 
 /// The one place that decides what Enter means.
 pub fn on_enter(item: &Item) -> Default_ {
-    // Settings are controls, not payload. Making `copy everything` copy
+    enter_with(item, crate::settings::classic_enter())
+}
+
+/// The rule, with the preference handed in.
+///
+/// Process state stays at the edge for the reason `surface()` gives: a rule
+/// that reads a file to decide cannot be walked kind by kind in a test, and
+/// this one has two exceptions that are only visible when it is.
+pub fn enter_with(item: &Item, classic: bool) -> Default_ {
+    let chosen = by_kind(item);
+    // Settings are controls, not payload. Making `copy commands` copy
     // `set:roots` instead of opening its manager made the very screen that can
     // turn the preference off unusable. Control-plane rows always act.
     if item.kind == Kind::Setting {
-        return Default_::Act(Verb::EditSetting);
+        return chosen;
     }
-    if crate::settings::classic_enter() {
+    // The preference is about **commands**: the rows whose being handed over
+    // is the point, because a command is worth reading before it runs.
+    //
+    // It used to convert every row, and neither half of that argument
+    // survives the trip to an object. There is nothing to review — the text a
+    // File row would hand you is a path, and an App row's is `open -na
+    // /Applications/Safari.app`, which nobody proofreads. And nothing is
+    // averted: opening a file is not `kill $(lsof -ti tcp:3000)`. What
+    // actually happened is that the launcher stopped opening files, folders,
+    // applications and links, and was reported as broken rather than as a
+    // preference doing what it said — which is the correct reading. Whoever
+    // turns this on is thinking about commands.
+    if classic && !goes_to_launch_services(chosen) {
         return Default_::Insert;
     }
-    by_kind(item)
+    chosen
+}
+
+/// The verbs that end at Launch Services, and the reason two very different
+/// rules can share one predicate.
+///
+/// `Open`, `Launch` and `OpenUrl` hand an object to macOS and can do nothing
+/// else: no clipboard is written, no agent starts, no question is answered and
+/// no command runs. `link.rs` needs exactly that property because a web page
+/// can navigate to `prelude://`; the Enter preference needs exactly that
+/// property because it is the one class of row where "hand it over instead"
+/// answers nothing. Anything added here is a claim about the verb, not about
+/// either caller — and `may_be_linked` is a security boundary, so the claim
+/// has to be true before it is made.
+pub fn goes_to_launch_services(d: Default_) -> bool {
+    matches!(d, Default_::Act(Verb::Open | Verb::Launch | Verb::OpenUrl))
 }
 
 /// What this row is, before anybody's preference about Enter is applied.
@@ -113,7 +156,9 @@ pub fn on_enter(item: &Item) -> Default_ {
 /// `prelude://` is the case: asking `on_enter` there meant that turning on
 /// copy-everything silently made every deeplink refuse, because every row's
 /// answer had become "hand it over" — a feature dead for a whole class of
-/// people, and quietly.
+/// people, and quietly. The preference no longer reaches those three verbs, so
+/// the two answers now agree for everything a link may name; `link.rs` still
+/// asks here, because agreeing today is not the same as being governed by it.
 ///
 /// Split out rather than restated, so there is still one table.
 pub fn by_kind(item: &Item) -> Default_ {
@@ -312,7 +357,7 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
             "fallbacks" => "Choose the providers…",
             "enter" => {
                 if item.fields.first().map(String::as_str) == Some("per kind") {
-                    "Switch to copy-everything"
+                    "Switch to copy-commands"
                 } else {
                     "Switch to per-kind"
                 }

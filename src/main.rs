@@ -2089,6 +2089,63 @@ mod tests {
         }
     }
 
+    /// `copy commands` is a preference about commands. Turned on, it used to
+    /// take opening a file, a folder, an application and a link away from the
+    /// launcher — which is not a preference anybody asked for and was reported
+    /// as the launcher being broken.
+    #[test]
+    fn copying_commands_never_swallows_an_object() {
+        use crate::defaults::{enter_with, goes_to_launch_services, Default_, Verb};
+        use crate::item::{Item, Kind::*};
+
+        let link = Item::new("https://example.com", Link).put("url", "https://example.com");
+        let folder = Item::new("x", Find).put("index_kind", "folder");
+        for (it, verb) in [
+            (Item::new("x", File), Verb::Open),
+            (Item::new("x", Find), Verb::Open),
+            (folder, Verb::Open),
+            (Item::new("x", Dir), Verb::Open),
+            (Item::new("x", Config), Verb::Open),
+            (Item::new("x", App), Verb::Launch),
+            (link, Verb::OpenUrl),
+        ] {
+            for classic in [false, true] {
+                assert_eq!(
+                    enter_with(&it, classic),
+                    Default_::Act(verb),
+                    "{:?} must open under enter = {}",
+                    it.kind,
+                    if classic { "copy commands" } else { "per kind" },
+                );
+            }
+        }
+
+        // The preference still has to *do* something, or it is a row that
+        // changes nothing: every other row that would act hands its text over.
+        for k in [Msg, Skill, Run, Mcp, Session] {
+            let it = Item::new("x", k);
+            assert!(matches!(enter_with(&it, false), Default_::Act(_)), "{k:?}");
+            assert_eq!(enter_with(&it, true), Default_::Insert, "{k:?}");
+        }
+
+        // And the screen that turns it back off keeps working.
+        let setting = Item::new("x", Setting).put("setting", "enter");
+        assert_eq!(enter_with(&setting, true), Default_::Act(Verb::EditSetting));
+
+        // The immunity is the Launch Services set exactly — the same three
+        // verbs `link.rs` lets a web page reach, and no fourth.
+        for v in [
+            Verb::CopyResult, Verb::RunSkill, Verb::ResumeSession, Verb::Answer,
+            Verb::RunHere, Verb::RunInShell, Verb::Inspect, Verb::CdThere,
+            Verb::EditSetting,
+        ] {
+            assert!(!goes_to_launch_services(Default_::Act(v)), "{v:?}");
+        }
+        for v in [Verb::Open, Verb::Launch, Verb::OpenUrl] {
+            assert!(goes_to_launch_services(Default_::Act(v)), "{v:?}");
+        }
+    }
+
     /// A borrowed server has to arrive in the borrower's own dialect, not
     /// the lender's. These are the two translations, pinned.
     #[test]

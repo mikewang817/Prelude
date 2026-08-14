@@ -227,15 +227,11 @@ fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
 /// starts a process, or asks a question, and none of those is something a web
 /// page gets to cause.
 fn may_be_linked(item: &crate::item::Item) -> bool {
-    use crate::defaults::{Default_, Verb};
     // `by_kind`, not `on_enter`: `classic_enter` is a preference about what
     // the *launcher's* Enter does, and this has no launcher and no clipboard.
     // Read through `on_enter` it made every deeplink refuse for anybody who
     // had turned copy-everything on — safe, and silently dead.
-    matches!(
-        crate::defaults::by_kind(item),
-        Default_::Act(Verb::Open) | Default_::Act(Verb::Launch) | Default_::Act(Verb::OpenUrl)
-    )
+    crate::defaults::goes_to_launch_services(crate::defaults::by_kind(item))
 }
 
 /// Nothing here has a terminal, so a refusal that only printed would be a
