@@ -293,9 +293,10 @@ things with a stable name are reachable this way.
   `~/Applications`. `prelude global uninstall` removes all of them. Agent CLIs, MCP checks, web
   searches, and currency conversion use the network only when explicitly asked.
 - The update check is the one exception, and it is stated rather than buried:
-  at most four times a day, Prelude follows GitHub's `releases/latest`
-  redirect to read a version number. It sends nothing about you, carries no
-  identifier, and is not an API call. `prelude settings set update off` stops
+  at most twelve times an hour, Prelude asks GitHub's releases API for a
+  version number, falling back to the `releases/latest` redirect. It is
+  unauthenticated, sends nothing about you and carries no identifier.
+  `prelude settings set update off` stops
   that automatic check; `notify` (the default) only tells you, `download`
   stages a verified archive, and `apply` installs it — never mid-session, only
   as the panel next starts. `prelude update` is a request you typed, so it

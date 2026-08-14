@@ -543,9 +543,18 @@ fn resting(name: &str) -> bool {
 fn refresh_ttl(name: &str) -> u64 {
     match name {
         "mcp-tools" => 300,
-        // Four times a day is often enough to hear about a release and rare
-        // enough that nobody notices the request.
-        "update" => 21_600,
+        // Five minutes, and the number is bounded from both ends. A TTL is a
+        // *minimum* gap between checks, so this is a ceiling of twelve
+        // requests an hour against GitHub's sixty unauthenticated ones — and
+        // that budget is per IP rather than per program, so it is shared with
+        // every other tool on the machine. Going faster is also worth less
+        // than it looks: exhausting the API is not fatal, because
+        // `fetch_latest` falls back to the `releases/latest` redirect, but
+        // that redirect is served from a cache measured minutes behind a
+        // publish. Below about five minutes you are spending the budget to
+        // outrun GitHub's own propagation. It was six hours, which spent none
+        // of the headroom and cost most of a day of not being told.
+        "update" => 300,
         "mcp" => 60,
         "skill-hashes" => 30,
         _ => 5,
@@ -628,7 +637,7 @@ const SLOW: &[Source] = &[
     // MCP initialize + tools/list can start local server processes. It is a
     // background inventory, never part of health gather or a keypress.
     ("mcp-tools", crate::mcp_tools::inventory),
-    // One redirect to GitHub, at most four times a day, and only when the
+    // One request to GitHub, at most twelve times an hour, and only when the
     // `update` setting is anything but `off`. Degrades to nothing like every
     // other source here.
     ("update", crate::update::check),

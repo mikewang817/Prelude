@@ -11,9 +11,9 @@
 //!    convincing possible way. This is the cheapest question here and the one
 //!    people actually hit, so it is answered without a network call, without a
 //!    setting, and without asking.
-//! 2. **Is there a newer release?** Behind the slow cache tier with a six-hour
-//!    TTL, refreshed detached, degrading to nothing — the same contract every
-//!    other subprocess-backed source has.
+//! 2. **Is there a newer release?** Behind the slow cache tier with a
+//!    five-minute TTL, refreshed detached, degrading to nothing — the same
+//!    contract every other subprocess-backed source has.
 //! 3. **Apply it.** Never silently, and never while you are using the panel.
 //!    See `mode`.
 
@@ -168,17 +168,17 @@ fn state_file() -> PathBuf {
 
 /// Throw away the "a newer release exists" row.
 ///
-/// The launcher reads that row from a cache with a six-hour TTL, so an update
-/// that does not clear it leaves the panel advertising a version you have just
-/// installed — for the rest of the day, with a row whose Enter would now
-/// download what you are already running. Called after a successful swap, and
-/// by an explicit check, whose answer the panel should reflect immediately.
+/// The launcher reads that row from a cache with a TTL, so an update that does
+/// not clear it leaves the panel advertising a version you have just installed,
+/// with a row whose Enter would now download what you are already running.
+/// Called after a successful swap, and by an explicit check, whose answer the
+/// panel should reflect immediately.
 fn forget_cached_row() {
     let _ = std::fs::remove_file(crate::paths::cache().join("update.json"));
 }
 
 /// The last version a banner was posted for, so a release is announced once
-/// rather than every six hours until it is taken.
+/// rather than on every check until it is taken.
 fn announced() -> String {
     std::fs::read_to_string(state_file())
         .ok()
@@ -428,7 +428,7 @@ pub fn dispatch(args: &[&str]) -> i32 {
             match fetch_latest() {
                 Some(latest) if is_newer(&latest, VERSION) => {
                     // You asked, so the panel should say what you were told
-                    // rather than whatever the six-hourly check last saw.
+                    // rather than whatever the periodic check last saw.
                     crate::cache::write_cached("update", &[row(&latest)]);
                     println!("  {latest} is available");
                     if args == ["--check"] {
