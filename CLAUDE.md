@@ -8,7 +8,7 @@ avoid repeating mistakes already made.
 
 ```sh
 cargo build --release
-cargo test                 # 237 tests
+cargo test                 # 238 tests
 cargo clippy --release     # expected warning-free
 ./target/release/prelude bench     # p95 gather must stay under 40ms; non-zero when it does not
 ./target/release/prelude bench --json   # the same distribution, for a gate to record
@@ -406,6 +406,25 @@ dispatch. `^K` remains the unconditional low-frequency door. `→` cannot be an
 `--expect` key because its meaning is contextual, so the empty-home Actions
 case still `print`s `ui::OPEN_ACTIONS` and `run_fzf` scans for it.
 
+**Coming back from a modal lands on the row you left, and that costs an fzf
+flag most of the launcher must not have.** The action panel is a modal over the
+list — fzf exits, the panel runs, and the `continue` starts fzf again — so `→`
+on the fifth row and `←` straight back used to put the cursor on the first, on
+a list whose whole point is that you had already found something in it.
+`run_fzf` therefore carries the selected line back out (the raw line, because
+rendering is lossy and two rows can parse alike), `position_in` finds it in the
+same feed, and `with_cursor` adds `--bind start:pos(N)` to the next launch.
+**`--sync` is what makes `start` mean anything**: fzf consumes its input
+asynchronously, so without it `start` fires before the list exists and `pos()`
+lands on whichever handful of rows have arrived — a bug that would read as
+working intermittently. `load` is the wrong event for the opposite reason: it
+fires again on every `reload`, so a keystroke would drag the cursor back.
+`--sync` is added *only* on the way back, never to the first launch, because it
+holds the finder until the whole feed is read and the first launch is the one
+the 40ms budget is kept against. The position is recorded once per iteration
+rather than at each `continue` — all six mean the same thing, and the seventh
+would otherwise have to remember to say so.
+
 **A key the launcher took over keeps meaning what the fingers think it means.**
 Ctrl+R spent decades as incremental history search, and the widget sits on it;
 the debt is paid *inside*: a second press moves the typed text into `h:`
@@ -776,7 +795,7 @@ the failure to avoid is a missing row, not a slow one.
 asked, and it says so out loud.** Every other network call in this program
 answers something the person just typed. This one does not, so it is bounded
 in every direction that can be bounded: it is a slow-tier source with a
-six-hour TTL, refreshed detached, degrading to nothing; it asks GitHub's API
+five-minute TTL, refreshed detached, degrading to nothing; it asks GitHub's API
 and falls back to the `releases/latest` redirect; it sends no identifier; and
 `update = off` is a real off switch that returns before the request is
 constructed. It governs the *automatic* check only: `prelude update` is a
@@ -829,9 +848,9 @@ The lesson is the shape of the error, not the endpoint: a cost that was easy
 to name (rate limits) crowded out one that had to be measured (staleness).
 
 **The row is a cache, so anything that changes the answer must clear it.**
-`update.json` has a six-hour TTL. An update that does not remove it leaves the
-panel advertising a version you have just installed, for the rest of the day,
-on a row whose Enter would now download what you are already running.
+`update.json` has a TTL. An update that does not remove it leaves the panel
+advertising a version you have just installed, on a row whose Enter would now
+download what you are already running.
 `forget_cached_row` is called after a swap, after a rollback, and by an
 explicit `--check` — you asked, so the panel should say what you were told.
 

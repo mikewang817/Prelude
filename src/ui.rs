@@ -186,6 +186,10 @@ pub fn expects(key: &str) -> bool {
 pub struct FzfOut {
     pub key: String,
     pub item: Option<Item>,
+    /// The selected line exactly as it was fed in, which is the only thing
+    /// that can be found again in the feed. A parsed `Item` cannot: rendering
+    /// is lossy and two rows can parse alike.
+    pub line: Option<String>,
     pub failed: bool,
     pub stderr: String,
 }
@@ -222,6 +226,69 @@ pub fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    /// Backing out of the action panel put the cursor back on the first row,
+    /// so `→` on the fifth row and `←` straight back cost you your place —
+    /// every time, on a list whose whole point is that you had found something
+    /// in it.
+    #[test]
+    fn coming_back_from_a_modal_lands_on_the_row_you_left() {
+        let feed = "alpha\nbeta\ngamma\n";
+        assert_eq!(position_in(feed, "alpha"), Some(1), "pos() is one-based");
+        assert_eq!(position_in(feed, "gamma"), Some(3));
+        // A row that is not in *this* feed — it came from a query that
+        // rebuilt the list, and the list we are returning to is the home one.
+        // No position is better than a wrong one.
+        assert_eq!(position_in(feed, "delta"), None);
+        assert_eq!(position_in(feed, ""), None);
+
+        let args = vec!["--ansi".to_string()];
+        // The first launch is untouched: `--sync` would hold the finder until
+        // the whole feed is read, and that is the launch the budget is kept
+        // against.
+        assert_eq!(with_cursor(&args, None), args);
+        assert_eq!(
+            with_cursor(&args, Some(5)),
+            vec!["--ansi", "--sync", "--bind", "start:pos(5)"],
+        );
+    }
+}
+
+/// Where a line sits in the feed, one-based, which is what `pos()` counts in.
+fn position_in(feed: &str, line: &str) -> Option<usize> {
+    feed.lines().position(|candidate| candidate == line).map(|at| at + 1)
+}
+
+/// The same arguments, plus a starting cursor when we are coming back to a
+/// list somebody had already moved through.
+///
+/// **`--sync` is what makes `start` mean anything here.** fzf consumes its
+/// input asynchronously, so `start` fires before the list exists and `pos()`
+/// lands on whatever few rows have arrived — which is how this reads as
+/// "sometimes it works". `--sync` holds the finder until the input is complete
+/// and initial processing is done, and only then raises `start`.
+///
+/// It is added *only* on the way back, never to the first launch: `--sync`
+/// means rendering nothing until the whole feed is read, and the first launch
+/// is the one measured against the 40ms budget. Coming back from a modal, the
+/// feed is a string already in memory and there is no budget being kept.
+///
+/// `load` would be the other candidate and is the wrong one: it fires again on
+/// every `reload`, so the cursor would be dragged back here each time a
+/// keystroke rebuilt the list.
+fn with_cursor(args: &[String], position: Option<usize>) -> Vec<String> {
+    let mut args = args.to_vec();
+    if let Some(position) = position {
+        args.push("--sync".into());
+        args.push("--bind".into());
+        args.push(format!("start:pos({position})"));
+    }
+    args
+}
+
 pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
     // One launcher layout in both windows. The shell entry used to be a 90%
     // inline popup while the Quick Terminal filled its surface, which made the
@@ -229,7 +296,7 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
     let modes: Vec<Vec<String>> = vec![vec![]];
     let _ = cols;
 
-    let mut last = FzfOut { key: String::new(), item: None, failed: true, stderr: String::new() };
+    let mut last = FzfOut { key: String::new(), item: None, line: None, failed: true, stderr: String::new() };
     for mode in modes {
         let mut cmd = Command::new("fzf");
         cmd.args(&args).args(&mode)
@@ -254,12 +321,13 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
             if env_flag("PRELUDE_DEBUG") {
                 eprintln!("prelude: fzf mode {mode:?} failed: {}", stderr.trim());
             }
-            last = FzfOut { key: String::new(), item: None, failed: true, stderr };
+            last = FzfOut { key: String::new(), item: None, line: None, failed: true, stderr };
             continue;
         }
         let mut lines = stdout.split('\n');
         let key = lines.next().unwrap_or("").trim().to_string();
-        let item = lines.find(|l| l.contains(SEP)).and_then(render::parse_line);
+        let line = lines.find(|l| l.contains(SEP)).map(str::to_string);
+        let item = line.as_deref().and_then(render::parse_line);
         // `→` is a binding rather than an `--expect` key, so it announces
         // itself on the output queue. Scanned for rather than read from a
         // fixed line: `print` and the selection share one stream and their
@@ -269,7 +337,7 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
         } else {
             key
         };
-        return FzfOut { key, item, failed: false, stderr };
+        return FzfOut { key, item, line, failed: false, stderr };
     }
     last
 }
@@ -419,13 +487,20 @@ pub fn search() -> i32 {
         crate::refresh::keep_current(socket, widths, tw, cols);
     }
 
+    let mut restore: Option<usize> = None;
     loop {
-        let out = run_fzf(&home_feed, args.clone(), cols);
+        let out = run_fzf(&home_feed, with_cursor(&args, restore), cols);
         if out.failed {
             let msg = out.stderr.trim().lines().last().unwrap_or("").to_string();
             eprintln!("prelude: fzf could not start{}", if msg.is_empty() { String::new() } else { format!(": {msg}") });
             return 2;
         }
+        // Every `continue` below is a return *to this list* from something
+        // modal, so the cursor belongs where it was rather than back at the
+        // top. Recorded here rather than at each of the six sites: they all
+        // mean the same thing, and the next one added would otherwise have to
+        // remember to say so.
+        restore = out.line.as_deref().and_then(|line| position_in(&home_feed, line));
         let Some(item) = out.item else { return 130 };
 
         match out.key.as_str() {
