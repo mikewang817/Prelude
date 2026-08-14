@@ -38,15 +38,15 @@ and redacted capability comparisons.
 `src/agent.rs::SPECS` is the one registry for invocation syntax, conventional
 settings paths, and capability flags.
 
-| Capability | Claude Code | Codex | pi | OpenCode |
-|---|---:|---:|---:|---:|
-| detect executable and live Runs | yes | yes | yes | yes |
-| native resume command | yes | yes | yes | yes |
-| discover native Sessions | yes | yes | yes | no |
-| native fork command | yes | yes | yes | no |
-| one-off non-interactive ask | yes | yes | yes | yes |
-| use a Skill without installing it | yes | yes | yes | yes |
-| effective-config evidence | auto-mode subsystem only | resolved for current directory | none | resolved for current directory |
+| Capability | Claude Code | Codex | pi | OpenCode | Kimi | Cursor |
+|---|---:|---:|---:|---:|---:|---:|
+| detect executable and live Runs | yes | yes | yes | yes | yes | yes |
+| native resume command | yes | yes | yes | yes | yes | yes |
+| discover native Sessions | yes | yes | yes | no | yes | yes |
+| native fork command | yes | yes | yes | no | no | no |
+| one-off non-interactive ask | yes | yes | yes | yes | yes | yes |
+| use a Skill without installing it | yes | yes | yes | yes | yes | yes |
+| effective-config evidence | auto-mode subsystem only | resolved for current directory | none | resolved for current directory | none | none |
 
 Concrete command forms:
 
@@ -56,6 +56,11 @@ Concrete command forms:
 | one-off ask | `claude -p` | `codex exec --skip-git-repo-check` | `pi --print` | `opencode run` |
 | resume | `claude --resume ID` | `codex resume ID` | `pi --session ID` | `opencode --session ID` |
 | fork | `claude --resume ID --fork-session` | `codex fork ID` | `pi --fork ID` | unavailable |
+
+Kimi and Cursor resume with `kimi --session ID` and `cursor-agent --resume ID`.
+Kimi has no interactive-with-prompt form — its help lists `[command]` rather
+than a positional prompt — so `kimi --prompt` is both its start and its ask,
+the same arrangement `opencode run` already had.
 
 Conventional settings paths are:
 
@@ -207,6 +212,24 @@ Prelude discovers:
 - Codex: `~/.codex/sessions/**/*.jsonl` and
   `~/.codex/archived_sessions/**/*.jsonl`
 - pi: `~/.pi/agent/sessions/**/*.jsonl`
+- Kimi: `~/.kimi-code/sessions/<slug>/session_<uuid>/state.json`
+- Cursor: `~/.cursor/chats/<workspace>/<chat>/meta.json` and
+  `~/.cursor/acp-sessions/<id>/meta.json`
+
+The last two are not transcripts. Kimi and Cursor keep a small JSON sidecar
+beside the conversation, so those scanners read one bounded document per
+session and never open the transcript. Kimi's carries a title, a working
+directory and both timestamps; Cursor's carries the directory and timestamps
+only, because its transcript is a SQLite `store.db` and a database engine on
+the launch path is not worth a display string — a Cursor row is its project and
+its age. Sessions that were opened and never used are skipped: Cursor says so
+itself with `hasConversation: false`, and Kimi's equivalent is a `New Session`
+title whose created and updated stamps still agree.
+
+The readability probe in `doctor sessions` therefore tries line-wise JSON first
+and the whole document second. Line-wise alone reported every one of these
+sidecars as malformed, since no single line of a pretty-printed object is valid
+JSON on its own.
 
 Only bounded heads are read for identity/title/cwd. The complete inventory is a
 background cache; the launcher carries only 15 into the general catalogue, and
@@ -446,6 +469,8 @@ for it directly.
 ## Known limitations
 
 - OpenCode Sessions are not discovered, although a known resume command exists.
+- Cursor Sessions carry no title: the transcript is SQLite and is not read.
+- Kimi and Cursor have no known fork syntax, so no fork action is offered.
 - Working/waiting is inferred from process liveness, Session-file silence, and
   the last structured turn; batch/no-clock Runs cannot be classified as waiting.
 - No installed Agent CLI reports the resolved config of another live process.

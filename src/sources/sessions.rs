@@ -370,6 +370,113 @@ fn scan_pi(out: &mut Vec<Raw>) {
     });
 }
 
+/// Kimi Code: ~/.kimi-code/sessions/<workdir-slug>/session_<uuid>/state.json
+///
+/// The only one of these whose conversation is not a JSONL to be parsed. A
+/// small sidecar carries everything a row needs — title, working directory and
+/// both timestamps — so this reads one bounded JSON per session and never
+/// opens the transcript beside it.
+///
+/// Kimi titles a session from its opening message, and leaves `New Session`
+/// on one that was opened and abandoned. Nineteen of the thirty-four on the
+/// machine this was written on were exactly that. They are skipped when the
+/// two timestamps agree, which is what "created and never touched again"
+/// looks like without reading the wire log to find out.
+fn scan_kimi(out: &mut Vec<Raw>) {
+    let root = paths::home().join(".kimi-code/sessions");
+    let Ok(projects) = std::fs::read_dir(&root) else { return };
+    for project in projects.flatten() {
+        let Ok(sessions) = std::fs::read_dir(project.path()) else { continue };
+        for entry in sessions.flatten() {
+            let dir = entry.path();
+            let Some(id) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let state = dir.join("state.json");
+            let Some(v) = read_json(&state) else { continue };
+            let created = json_str(&v, "createdAt");
+            let updated = json_str(&v, "updatedAt");
+            let mut title = crate::width::flatten(&json_str(&v, "title"));
+            let cwd = json_str(&v, "workDir");
+            if title == "New Session" {
+                if created == updated {
+                    continue;
+                }
+                title = folder_label(&cwd, &state);
+            }
+            let mtime = std::fs::metadata(&state)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let opening = title.clone();
+            out.push(Raw { agent: "kimi", id, path: state, title, opening, cwd, mtime });
+        }
+    }
+}
+
+/// Cursor: ~/.cursor/chats/<workspace>/<chat-id>/meta.json
+///
+/// The transcript lives in a SQLite `store.db` beside this file, which is why
+/// a Cursor row carries no title: reading it would mean a database engine on
+/// the launch path, and the rule against new dependencies is not worth
+/// spending on a display string. The sidecar has the working directory and
+/// both timestamps, so the row says which project and when — enough to pick a
+/// conversation out, which is what resuming needs.
+///
+/// `hasConversation` is Cursor's own word for a chat that was opened and never
+/// used, and there are dozens of them. It is the same exclusion `scan_kimi`
+/// makes by comparing timestamps, stated by the format itself.
+fn scan_cursor(out: &mut Vec<Raw>) {
+    for root in [paths::home().join(".cursor/chats"), paths::home().join(".cursor/acp-sessions")] {
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        for entry in entries.flatten() {
+            // `chats/` nests one level deeper than `acp-sessions/`: a
+            // workspace directory holding the chats belonging to it.
+            let holders: Vec<PathBuf> = if entry.path().join("meta.json").is_file() {
+                vec![entry.path()]
+            } else {
+                std::fs::read_dir(entry.path())
+                    .map(|inner| inner.flatten().map(|e| e.path()).collect())
+                    .unwrap_or_default()
+            };
+            for dir in holders {
+                let meta = dir.join("meta.json");
+                let Some(v) = read_json(&meta) else { continue };
+                if v.get("hasConversation").and_then(|x| x.as_bool()) == Some(false) {
+                    continue;
+                }
+                let Some(id) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                    continue;
+                };
+                let cwd = json_str(&v, "cwd");
+                let title = folder_label(&cwd, &meta);
+                let mtime = std::fs::metadata(&meta)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let opening = title.clone();
+                out.push(Raw {
+                    agent: "cursor-agent",
+                    id,
+                    path: meta,
+                    title,
+                    opening,
+                    cwd,
+                    mtime,
+                });
+            }
+        }
+    }
+}
+
+/// One bounded JSON sidecar, or nothing.
+///
+/// `read_bounded` for the reason every read of somebody else's file here uses
+/// it: the size is another program's decision, and these are read on the
+/// session refresh for every conversation on the machine.
+fn read_json(p: &Path) -> Option<serde_json::Value> {
+    let text = crate::paths::read_bounded(p, 64 * 1024)?;
+    serde_json::from_slice(&text).ok()
+}
+
 fn folder_label(cwd: &str, p: &Path) -> String {
     if !cwd.is_empty() {
         return cwd.rsplit('/').next().unwrap_or(cwd).to_string();
@@ -417,6 +524,8 @@ pub fn all() -> Vec<Item> {
     scan_claude(&mut raw);
     scan_codex(&mut raw);
     scan_pi(&mut raw);
+    scan_kimi(&mut raw);
+    scan_cursor(&mut raw);
     raw.sort_by_key(|r| std::cmp::Reverse(r.mtime));
 
     let mut sessions: Vec<Item> = raw.into_iter()
@@ -1063,12 +1172,15 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 ///
 /// One list, because two would drift: it is both what the Trash and export
 /// boundary trusts and what the diagnostic checks it can still read.
-fn native_session_roots(home: &Path) -> [PathBuf; 4] {
+fn native_session_roots(home: &Path) -> [PathBuf; 7] {
     [
         home.join(".claude/projects"),
         home.join(".codex/sessions"),
         home.join(".codex/archived_sessions"),
         home.join(".pi/agent/sessions"),
+        home.join(".kimi-code/sessions"),
+        home.join(".cursor/chats"),
+        home.join(".cursor/acp-sessions"),
     ]
 }
 
@@ -1336,12 +1448,22 @@ fn session_problems_in(
                 continue;
             }
         };
+        // Line-wise first, because most of these are JSONL transcripts and a
+        // bounded probe of the head is all that is affordable across hundreds
+        // of files. Whole-document second, because not every Agent stores a
+        // conversation that way: Kimi and Cursor keep a small pretty-printed
+        // JSON sidecar, in which *no single line* is valid JSON. Probing only
+        // line-wise reported every one of them as malformed — seventeen
+        // perfectly good sessions, in the report whose job is to tell real
+        // damage from noise.
         let readable = BufReader::new(opened)
             .lines()
             .take(INDEX_PROBE_LINES)
             .map_while(Result::ok)
             .filter(|line| !line.trim().is_empty())
-            .any(|line| serde_json::from_str::<serde_json::Value>(&line).is_ok());
+            .any(|line| serde_json::from_str::<serde_json::Value>(&line).is_ok())
+            || crate::paths::read_bounded(Path::new(file), 64 * 1024)
+                .is_some_and(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).is_ok());
         if !readable {
             out.push(Problem {
                 session: id,

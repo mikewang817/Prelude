@@ -1415,6 +1415,29 @@ a notification fires — are pure functions pinned by tests: the bar is empty
 when there is nothing to say, and a run is announced once per stop,
 including a run first seen already quiet.
 
+**A session's Enter is its own agent's resume command, so breadth here means
+the registry rather than a path.** Skills became portable because a file can be
+read by anybody; a conversation cannot — `claude --resume` cannot open a codex
+session — so every agent added for Sessions needs a real entry in
+`agent::SPECS`. Kimi and Cursor are there now, and both were verified against
+their own `--help` rather than assumed.
+
+Two of them do not store a transcript this can parse. Kimi and Cursor keep a
+small JSON sidecar per session (`state.json`, `meta.json`), which is cheaper —
+one bounded document, never the conversation — and is why `doctor sessions`
+probes line-wise *and* whole-document: a pretty-printed object has no single
+line that is valid JSON, so the line-wise probe alone called seventeen healthy
+Kimi sessions malformed. Cursor's transcript is SQLite, so its rows carry no
+title; a database engine on the launch path is not worth a display string, and
+project plus age is enough to pick a conversation out.
+
+Adding to `SPECS` is not free, and the test that says so is the useful part:
+`diagnostics_cover_exactly_the_registered_agents` fails until the new agent has
+a doctor probe, which is what stops the registry growing past what Prelude can
+actually report on. `Effective::None`'s message had to be made to name its
+agent at the same time — it carried pi's wording, so kimi and cursor were each
+told that `pi config` was *their* only configuration surface.
+
 Each agent has its own invocation syntax. `opencode` needs a subcommand
 where the others take a prompt positionally; `codex exec` refuses to run
 outside a git repository. See `AGENTS` in `sources/sessions.rs`.

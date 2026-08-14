@@ -468,6 +468,17 @@ enum Login {
     /// provider (`pi auth check --provider …`), so there is no single state to
     /// report and Prelude reports none.
     PerProvider,
+    /// `cursor-agent status` → one line on **stdout**, `Not logged in` or a
+    /// signed-in line. Same shape as codex's, different stream, which is why
+    /// it is not the same variant: reading codex's needs `2>&1` and reading
+    /// this one must not, or a stray warning on stderr becomes the status.
+    CursorLine,
+    /// The CLI has a single account and no non-interactive way to ask about
+    /// it. Kimi's `login` runs a device-code flow and there is no `status`
+    /// beside it, so the honest report is that Prelude cannot tell — which is
+    /// a different statement from pi's, where there is no single state to ask
+    /// about in the first place.
+    NoStatusCommand,
 }
 
 struct Probe {
@@ -486,6 +497,12 @@ const PROBES: &[Probe] = &[
     Probe { agent: "codex", version: &["codex", "--version"], login: Login::CodexLine },
     Probe { agent: "pi", version: &["pi", "--version"], login: Login::PerProvider },
     Probe { agent: "opencode", version: &["opencode", "--version"], login: Login::OpencodeCount },
+    Probe { agent: "kimi", version: &["kimi", "--version"], login: Login::NoStatusCommand },
+    Probe {
+        agent: "cursor-agent",
+        version: &["cursor-agent", "--version"],
+        login: Login::CursorLine,
+    },
 ];
 
 /// What a login probe concluded. `Unknown` is a first-class answer.
@@ -557,6 +574,18 @@ fn read_login(login: Login, text: &str) -> LoginState {
             "pi authenticates per provider — `pi auth check --provider NAME` is the only answer there is"
                 .into(),
         ),
+        Login::CursorLine => {
+            if low.contains("not logged in") {
+                LoginState::Out("`cursor-agent login` to sign in".into())
+            } else if low.contains("logged in") || low.contains("@") {
+                LoginState::In("signed in".into())
+            } else {
+                LoginState::Unknown("`cursor-agent status` said nothing this understands".into())
+            }
+        }
+        Login::NoStatusCommand => LoginState::Unknown(
+            "this CLI has a login but no non-interactive way to report it".into(),
+        ),
     }
 }
 
@@ -571,7 +600,8 @@ fn login_output(login: Login) -> String {
         Login::ClaudeJson => crate::exec::run(&["claude", "auth", "status", "--json"], d),
         Login::CodexLine => crate::exec::run(&["sh", "-c", "codex login status 2>&1"], d),
         Login::OpencodeCount => crate::exec::run(&["opencode", "auth", "list"], d),
-        Login::PerProvider => String::new(),
+        Login::CursorLine => crate::exec::run(&["cursor-agent", "status"], d),
+        Login::PerProvider | Login::NoStatusCommand => String::new(),
     }
 }
 
@@ -1868,6 +1898,15 @@ mod tests {
 
         // pi has no whole-account login, and says so rather than guessing.
         assert!(matches!(read_login(Login::PerProvider, ""), LoginState::Unknown(_)));
+
+        // cursor: one line, on stdout.
+        assert!(matches!(read_login(Login::CursorLine, "Not logged in\n"), LoginState::Out(_)));
+        assert_eq!(read_login(Login::CursorLine, "Logged in as x\n"), LoginState::In("signed in".into()));
+        assert!(matches!(read_login(Login::CursorLine, ""), LoginState::Unknown(_)));
+
+        // kimi has a login and no way to ask about it. Unknown is the report,
+        // never a guess in either direction.
+        assert!(matches!(read_login(Login::NoStatusCommand, ""), LoginState::Unknown(_)));
     }
 
     /// `claude auth status --json` carries an e-mail address, an organization

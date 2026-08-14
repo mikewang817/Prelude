@@ -96,8 +96,6 @@ pub struct SkillRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
     pub copies: Vec<crate::capability::SkillCopy>,
-    pub borrow_targets: Vec<String>,
-    pub install_targets: Vec<String>,
     /// Runs that explicitly loaded this skill for one run. Never "runs of an
     /// agent that has it installed" — that is `owners`, and conflating the two
     /// is the mistake Milestone 5 exists to prevent.
@@ -237,17 +235,6 @@ impl Snapshot {
                 integrity: skill.get("integrity").to_string(),
                 fingerprint: some(skill.get("fingerprint")),
                 copies,
-                borrow_targets: Vec::new(),
-                install_targets: if skill.get("source_sensitive") == "true" {
-                    Vec::new()
-                } else {
-                    skill.get("missing").split(',').map(str::trim)
-                        .filter(|agent| {
-                            crate::agent::get(agent)
-                                .is_some_and(|spec| spec.capabilities.install_skill)
-                        })
-                        .map(str::to_string).collect()
-                },
                 }
             })
             .collect();
@@ -318,7 +305,7 @@ pub fn list(json: bool) -> i32 {
         return 0;
     }
 
-    println!("agent       installed  runs  waiting  sessions  skills");
+    println!("agent         installed  runs  waiting  sessions  skills");
     for agent in &snapshot.agents {
         let waiting = snapshot
             .runs
@@ -326,7 +313,7 @@ pub fn list(json: bool) -> i32 {
             .filter(|run| run.agent == agent.id && run.state == "waiting")
             .count();
         println!(
-            "{:<11} {:<9}  {:>4}  {:>7}  {:>8}  {:>6}",
+            "{:<13} {:<9}  {:>4}  {:>7}  {:>8}  {:>6}",
             agent.id,
             if agent.installed { "yes" } else { "no" },
             agent.runs.len(),

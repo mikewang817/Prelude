@@ -15,10 +15,6 @@ pub struct Capabilities {
     pub resume: bool,
     pub fork: bool,
     pub ask: bool,
-    pub borrow_skill: bool,
-    pub borrow_mcp: bool,
-    pub install_skill: bool,
-    pub install_mcp: bool,
     /// What the owner's CLI can report without claiming to describe an
     /// already-running process: `directory`, `subsystem`, or `none`.
     pub effective_config: &'static str,
@@ -77,18 +73,6 @@ impl Spec {
         if self.capabilities.fork {
             labels.push("fork");
         }
-        if self.capabilities.borrow_skill {
-            labels.push("borrow skill");
-        }
-        if self.capabilities.borrow_mcp {
-            labels.push("borrow mcp");
-        }
-        if self.capabilities.install_skill {
-            labels.push("install skill");
-        }
-        if self.capabilities.install_mcp {
-            labels.push("install mcp");
-        }
         labels
     }
 }
@@ -101,10 +85,6 @@ pub const SPECS: &[Spec] = &[
             resume: true,
             fork: true,
             ask: true,
-            borrow_skill: true,
-            borrow_mcp: true,
-            install_skill: true,
-            install_mcp: true,
             effective_config: "subsystem",
         },
         resume: |id| format!("claude --resume {id}"),
@@ -119,10 +99,6 @@ pub const SPECS: &[Spec] = &[
             resume: true,
             fork: true,
             ask: true,
-            borrow_skill: false,
-            borrow_mcp: true,
-            install_skill: true,
-            install_mcp: true,
             effective_config: "directory",
         },
         resume: |id| format!("codex resume {id}"),
@@ -144,10 +120,6 @@ pub const SPECS: &[Spec] = &[
             resume: true,
             fork: true,
             ask: true,
-            borrow_skill: true,
-            borrow_mcp: false,
-            install_skill: true,
-            install_mcp: false,
             effective_config: "none",
         },
         resume: |id| format!("pi --session {id}"),
@@ -162,15 +134,43 @@ pub const SPECS: &[Spec] = &[
             resume: true,
             fork: false,
             ask: true,
-            borrow_skill: false,
-            borrow_mcp: false,
-            install_skill: true,
-            install_mcp: false,
             effective_config: "directory",
         },
         resume: |id| format!("opencode --session {id}"),
         prompt: |prompt| format!("opencode run {}", shq(prompt)),
         ask: |prompt| vec!["opencode".into(), "run".into(), prompt.into()],
+        fork: None,
+    },
+    Spec {
+        name: "kimi",
+        settings: ".kimi-code/config.toml",
+        capabilities: Capabilities {
+            resume: true,
+            fork: false,
+            ask: true,
+            effective_config: "none",
+        },
+        resume: |id| format!("kimi --session {id}"),
+        // No interactive-with-prompt form: `kimi --help` lists `[command]`
+        // rather than a positional `[prompt...]`, so the one shape that is
+        // known to work carries the text as `--prompt` and prints. Same
+        // arrangement as opencode, whose `run` is also both.
+        prompt: |prompt| format!("kimi --prompt {}", shq(prompt)),
+        ask: |prompt| vec!["kimi".into(), "--prompt".into(), prompt.into()],
+        fork: None,
+    },
+    Spec {
+        name: "cursor-agent",
+        settings: ".cursor/cli-config.json",
+        capabilities: Capabilities {
+            resume: true,
+            fork: false,
+            ask: true,
+            effective_config: "none",
+        },
+        resume: |id| format!("cursor-agent --resume {id}"),
+        prompt: |prompt| format!("cursor-agent {}", shq(prompt)),
+        ask: |prompt| vec!["cursor-agent".into(), "-p".into(), prompt.into()],
         fork: None,
     },
 ];
@@ -198,22 +198,14 @@ mod tests {
             assert!(!spec.prompt("question").is_empty());
             assert!(!spec.ask("question").is_empty());
             assert_eq!(spec.fork("session-id").is_some(), spec.capabilities.fork);
-            assert_eq!(
-                spec.operation_labels().contains(&"borrow skill"),
-                spec.capabilities.borrow_skill
-            );
-            assert_eq!(
-                spec.operation_labels().contains(&"borrow mcp"),
-                spec.capabilities.borrow_mcp
-            );
-            assert_eq!(
-                spec.operation_labels().contains(&"install skill"),
-                spec.capabilities.install_skill
-            );
-            assert_eq!(
-                spec.operation_labels().contains(&"install mcp"),
-                spec.capabilities.install_mcp
-            );
+            assert_eq!(spec.operation_labels().contains(&"resume"), spec.capabilities.resume);
+            assert_eq!(spec.operation_labels().contains(&"fork"), spec.capabilities.fork);
+            assert_eq!(spec.operation_labels().contains(&"one-off ask"), spec.capabilities.ask);
+            // Every command a Spec can produce names the executable it is for,
+            // so a row cannot advertise one Agent and hand over another's.
+            assert!(spec.resume("id").starts_with(spec.name));
+            assert!(spec.prompt("q").starts_with(spec.name));
+            assert_eq!(spec.ask("q").first().map(String::as_str), Some(spec.name));
         }
     }
 }

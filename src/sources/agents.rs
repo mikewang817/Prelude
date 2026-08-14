@@ -783,10 +783,16 @@ pub fn read_effective(kind: Effective, agent: &str, text: &str) -> ConfigEvidenc
                  `claude auto-mode config` is the only effective-config reporter it has, and it \
                  covers the auto-mode classifier alone"
                     .into(),
-            Effective::None =>
-                "effective configuration unknown · pi's only configuration surface is `pi config`, \
-                 an interactive TUI with no non-interactive form — so nothing is claimed here"
-                    .into(),
+            // Named, because this arm covers every Agent whose CLI has no
+            // non-interactive way to report its resolved configuration — and
+            // it used to carry pi's specific wording for all of them. Once
+            // kimi and cursor-agent joined the registry, both were told that
+            // `pi config` was *their* only configuration surface, which is a
+            // diagnostic naming the wrong program.
+            Effective::None => format!(
+                "effective configuration unknown · {agent} exposes no non-interactive \
+                 resolved-configuration command, so nothing is claimed here"
+            ),
         },
         trouble: None,
     };
