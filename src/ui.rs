@@ -131,38 +131,68 @@ pub fn footer_for_item(
 /// which is not the same as discoverable: a feature you have to read a README
 /// to find is a feature most people never have.
 ///
+/// One whole sentence at a time, rotating on the clock.
+///
+/// Every earlier version of this line was a *table* squeezed onto one row —
+/// `c: clipboard   : scopes`, then `c: what you copied   set: settings and
+/// search folders`. Both were written in the shape of a reference rather than
+/// of a sentence, and that shape has a hard ceiling: the row is one line, so
+/// the more it covers the less each entry can say, and every entry collapses
+/// towards its bare noun. `scopes` is what that ceiling produces — the
+/// internal name of a mechanism, printed to a person who has never heard of
+/// it, because there was no room for the verb that would have explained it.
+///
+/// Rotating removes the ceiling instead of rationing space under it. One tip
+/// gets the whole line, so it can be an instruction with a subject and a verb;
+/// and the set can then be *large*, because the cost of adding one is no
+/// longer paid by the others. Every scope worth knowing is in here, which is
+/// what the single-line version had spent three revisions failing to fit.
+///
+/// It is a clock bucket rather than a counter or a shuffle, and both of those
+/// were the alternatives. A counter needs persisted state — a file written on
+/// the launch path, for a hint. A shuffle changes on every press, which reads
+/// as noise and means you can never go back to the one you half-read. The
+/// bucket is stable for `TIP_ROTATION`, so a tip survives being dismissed and
+/// re-opened, and the sequence is the same on every machine, which is what
+/// makes it something a person can be told about.
+///
 /// It shows only on an empty query and disappears the moment you type, so it
 /// costs a row exactly when there is nothing else to look at and never
 /// competes with results.
-///
-/// Two of the twenty scopes, and each says what it holds rather than what it
-/// is called.
-///
-/// Listing all of them was tried and taken back out: it is three rows of
-/// syntax above the thing the launcher is actually for, and a header that long
-/// stops reading as a hint and starts reading as the list.
-///
-/// It shrank from six as the launcher stopped needing it. A hint earns its
-/// line by naming something you cannot otherwise get to, and `/ skill`,
-/// `s: sessions` and `f: files` all stopped qualifying: Skills and
-/// conversations are the home now and match by name, and an ordinary query
-/// already mixes in the ten best file matches. Each of those prefixes still
-/// works and still *narrows* — they are simply no longer the way in, and a
-/// hint that points at rows already on screen is a line of syntax charging
-/// rent. `@ ask agent` came out at the same request; it works and is
-/// documented rather than advertised.
-///
-/// `: scopes` came out last, and it is the one whose absence is a real trade.
-/// It answered "what else is there" in full, as rows — but it answered it in
-/// the vocabulary of somebody who already knew, which is what the whole line
-/// had become: `clipboard` and `scopes` are the names of the mechanisms, not
-/// of anything a person came here wanting. A first-time reader learns more
-/// from being told that one prefix shows what they copied than from being
-/// told that a colon lists categories. `:` still works and is still
-/// documented; `set:` takes its place here because the folders this searches
-/// are chosen behind it, and that is the one thing a new install actually
-/// needs to go and do.
-pub const HINTS: &str = "c: what you copied   set: settings and search folders";
+pub const TIPS: &[&str] = &[
+    "Tip · type c: to see everything you have copied, newest first",
+    "Tip · type f: to look for a file or folder by name",
+    "Tip · type s: to find a conversation you had with an agent",
+    "Tip · press Ctrl+K on any row to see what else it can do",
+    "Tip · type set: to choose which folders are searched",
+    "Tip · type app: to open an application",
+    "Tip · type h: to search the commands you have run before",
+    "Tip · press Ctrl+P to look inside a row without opening it",
+    "Tip · type : to see every way of narrowing what you are looking at",
+    "Tip · type 10kg to lb, or any sum, to get the answer right here",
+    "Tip · type ql: to see the keywords you saved for yourself",
+    "Tip · press Ctrl+Option+Enter to copy the full path of a file",
+    "Tip · type r: to see which agents are working and which are waiting",
+    "Tip · type skill: to browse every skill on this machine",
+];
+
+/// How long one tip stays put. Long enough to be read twice and found again
+/// after a dismissal; short enough that a day at the keyboard shows the set.
+const TIP_ROTATION: u64 = 900;
+
+/// The tip for a given bucket. Pure, so the rotation can be tested without
+/// waiting fifteen minutes for it.
+pub fn tip_at(bucket: u64) -> &'static str {
+    TIPS[(bucket % TIPS.len() as u64) as usize]
+}
+
+pub fn hints() -> &'static str {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    tip_at(now / TIP_ROTATION)
+}
 
 /// The three object shortcuts are Enter chords only in the fingers: the
 /// panel's generated Ghostty config translates Ctrl+Enter into private Ctrl+G,
@@ -246,6 +276,45 @@ fn base_args(prompt: &str, label: &str, footer: Option<&str>) -> Vec<String> {
 
 pub fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tip_tests {
+    use super::*;
+
+    /// The line is one row above the list, and a tip that runs off the end of
+    /// a narrow window is advice nobody can act on. 72 leaves room inside an
+    /// 80-column terminal for the borders fzf draws around it.
+    #[test]
+    fn every_tip_fits_a_narrow_window_and_tells_you_to_do_something() {
+        for tip in TIPS {
+            let width = crate::width::dwidth(tip);
+            assert!(width <= 72, "{tip:?} is {width} columns and will be cut");
+            // A tip is an instruction. The versions this replaced were bare
+            // nouns — `clipboard`, `scopes` — which is exactly the failure,
+            // so the shape is worth pinning rather than trusting to taste.
+            assert!(
+                tip.contains(" type ") || tip.contains(" press "),
+                "{tip:?} names something instead of telling you what to do"
+            );
+        }
+    }
+
+    /// Rotation has to reach every tip and be stable inside one bucket,
+    /// because a hint that changes while you are reading it is noise.
+    #[test]
+    fn the_rotation_is_stable_within_a_bucket_and_reaches_every_tip() {
+        assert_eq!(tip_at(7), tip_at(7), "the same bucket is the same tip");
+        assert_ne!(tip_at(7), tip_at(8), "and the next one moves on");
+
+        let seen: std::collections::BTreeSet<&str> =
+            (0..TIPS.len() as u64 * 2).map(tip_at).collect();
+        assert_eq!(seen.len(), TIPS.len(), "every tip comes round");
+
+        // The bucket is unbounded — it is a wall clock divided by the
+        // rotation — so the index has to wrap rather than panic in 2035.
+        assert_eq!(tip_at(u64::MAX), TIPS[(u64::MAX % TIPS.len() as u64) as usize]);
+    }
 }
 
 #[cfg(test)]
@@ -451,7 +520,7 @@ pub fn search() -> i32 {
     let me = me.to_string_lossy().into_owned();
 
     let mut args = base_args("⌕ ", " Prelude ", Some(&footer_for("Select", cols)));
-    args.push(format!("--header={HINTS}"));
+    args.push(format!("--header={}", hints()));
     args.push(format!("--expect={EXPECT}"));
     args.push("--bind".into());
     args.push(format!(

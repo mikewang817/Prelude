@@ -560,7 +560,7 @@ fn bind_actions(q: &str, me: &str, path: &str, cols: &str, tw: &str) -> String {
     // in the way rather than helpful.
     let settings_header;
     let header = if q.trim().is_empty() {
-        ui::HINTS
+        ui::hints()
     } else if compute::scope_query(q)
         .is_some_and(|(scope, _)| scope == compute::Scope::Settings)
     {
