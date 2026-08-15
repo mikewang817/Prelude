@@ -43,8 +43,7 @@ anywhere, including inside a running agent; `Ctrl+R` opens the same launcher at
 a zsh prompt.
 
 The installer sets up everything it needs — [what it touches, and how to remove
-it](#boundaries). Run it again to upgrade or repair; `prelude global status`
-checks it and `prelude global uninstall` removes it.
+it](#boundaries). Run it again to upgrade or repair.
 
 ## Resume a conversation
 
@@ -65,14 +64,9 @@ a Codex conversation — so it covers the agents Prelude has verified. Nineteen
 Agent CLIs are registered in all, and an action is omitted when the owning CLI
 has no known syntax for it, rather than built to look plausible.
 
-Agents can also talk to you, and to each other, over a file-backed bus that
-needs no server:
-
-```sh
-prelude fleet                                       # what is running
-prelude ask "This drops legacy_users. Proceed?"     # blocks until answered
-prelude say api-gateway "rebase before editing"     # into another Run's inbox
-```
+Agents can also ask you things. One that reaches a decision it should not make
+alone runs `prelude ask` and waits; the question arrives at the top of your
+panel, and you answer it there.
 
 ## Everything else
 
@@ -95,7 +89,7 @@ finding out by opening it.
   global uninstall` removes them.
 - The network is reached only when asked. The one exception is the update check:
   at most twelve times an hour, unauthenticated, sending no identifier, and
-  `prelude settings set update off` stops it.
+  switched off in `set:` like everything else.
 - Secret-looking history, clipboard text, messages, tags and exported
   transcripts are filtered or redacted.
 - Deletion goes through the Trash and says where it put things. Irreversible
