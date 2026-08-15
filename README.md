@@ -44,7 +44,7 @@ Instead, without leaving that conversation:
 The line is an instruction, and it names the file:
 
 ```text
-Use the skill "cnipa-ooa": read /Users/you/.gemini/config/skills/cnipa-ooa/SKILL.md and follow it.
+Use the skill "example-skill": read /Users/you/.gemini/config/skills/example-skill/SKILL.md and follow it.
 ```
 
 That is the whole mechanism. A skill is a `SKILL.md` file, and any agent can
@@ -91,7 +91,7 @@ An empty query is a compact Agent home. Type `:` to see every scope.
 ```text
 a:waiting                 Runs or questions waiting for input
 s:agent:claude since:24h  recent Claude Code Sessions
-/cnipa-ooa                run an installed Skill and show its answer
+/example-skill            run an installed Skill and show its answer
 @claude explain this      ask an installed Agent and show its answer
 Prelude                   files and folders named Prelude
 c:                        clipboard text, Finder objects and images
