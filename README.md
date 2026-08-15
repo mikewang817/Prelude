@@ -20,8 +20,8 @@ curl -fsSL https://raw.githubusercontent.com/mikewang817/Prelude/main/install.sh
 ```
 
 Allow Ghostty in **System Settings → Privacy & Security → Accessibility** when
-asked — that is what makes the shortcut work. Then press **`Cmd+Shift+Space`**
-anywhere, or **`Ctrl+R`** in a new terminal. Both open the same thing.
+asked — that is what makes the shortcut work. Then press **`Cmd+Shift+Space`**,
+from anywhere, in anything. `Ctrl+R` opens the same launcher at a zsh prompt.
 
 The installer sets up everything it needs — [what it touches, and how to remove
 it](#boundaries). Run it again to upgrade or repair; `prelude global status`
@@ -33,11 +33,12 @@ You are in a terminal, talking to Claude Code. You remember a skill you want —
 but you wrote it for Gemini, so it sits in a folder Claude has never read.
 Normally that means copying the folder, or restarting with a flag, or giving up.
 
-Instead, without leaving that terminal:
+Instead, without leaving that conversation:
 
-1. Press **`Ctrl+R`**. Prelude opens right there.
+1. Press **`Cmd+Shift+Space`**. A panel drops in over whatever you are
+   looking at — you do not leave the agent, and nothing new is launched.
 2. Type **`/`** and a few letters of the skill's name.
-3. Press **`Enter`**. Prelude closes and puts one line on your clipboard.
+3. Press **`Enter`**. The panel disappears and one line is on your clipboard.
 4. Press **`Cmd+V`**, then `Enter`.
 
 The line is an instruction, and it names the file:
@@ -52,6 +53,11 @@ restarted, and it works in the conversation you already had going. Prelude reads
 the skill folder of every agent CLI it knows about, so every skill on the
 machine is reachable from every agent on the machine, whoever it was written
 for.
+
+`Cmd+Shift+Space` is the one that matters here. `Ctrl+R` opens the same
+launcher, but only from a shell prompt — while an agent is running, the shell
+is not at a prompt and that key belongs to the agent. The chord works anywhere,
+including from inside a conversation.
 
 Type `skill:` to browse them all.
 
