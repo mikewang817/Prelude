@@ -1208,7 +1208,28 @@ mod tests {
             for _ in 0..3 {
                 s.spawn(|| {
                     for _ in 0..15 {
-                        let _lock = lock_for_write(&path);
+                        // `lock_for_write` gives up after 250ms *by design* —
+                        // a launcher may lose a use count but may never hang
+                        // — and the original of this test ignored that, doing
+                        // its read-change-write whether or not it had the
+                        // lock. On a fast machine 250ms is never reached and
+                        // it passed for as long as it was only ever run on
+                        // one; on a loaded CI runner it came back 43 against
+                        // 45, which is two threads timing out and proceeding,
+                        // exactly as documented. Losing a count under that
+                        // contention is accepted behaviour, so it cannot also
+                        // be the assertion. Retrying separates the two: what
+                        // is measured here is that the lock *serialises*, and
+                        // a lock that did not would still be caught, because
+                        // the total would still be wrong.
+                        let mut held = None;
+                        for _ in 0..40 {
+                            held = lock_for_write(&path);
+                            if held.is_some() {
+                                break;
+                            }
+                        }
+                        let _lock = held.expect("the lock never came free");
                         let n: u64 = std::fs::read_to_string(&path)
                             .unwrap_or_default()
                             .trim()
