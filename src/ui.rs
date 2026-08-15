@@ -176,12 +176,22 @@ pub const TIPS: &[&str] = &[
     "Tip · type skill: to browse every skill on this machine",
 ];
 
-/// How long one tip stays put. Long enough to be read twice and found again
-/// after a dismissal; short enough that a day at the keyboard shows the set.
-const TIP_ROTATION: u64 = 900;
+/// How long one tip stays put.
+///
+/// A minute. It was fifteen, on the reasoning that a tip should survive being
+/// dismissed and re-opened — which it should, and a minute still does that,
+/// because the thing being guarded against is the tip changing *between two
+/// presses seconds apart*, not over a coffee break. Fifteen minutes bought
+/// nothing more for that and cost the whole point of rotating: at four tips an
+/// hour a fourteen-tip set takes three and a half hours to come round once,
+/// which for somebody who opens the launcher in bursts means seeing the same
+/// sentence all morning. A minute shows the set in a quarter of an hour of
+/// intermittent use, and a tip is still fixed for the entire life of any one
+/// panel a person actually reads.
+const TIP_ROTATION: u64 = 60;
 
 /// The tip for a given bucket. Pure, so the rotation can be tested without
-/// waiting fifteen minutes for it.
+/// waiting a minute for it.
 pub fn tip_at(bucket: u64) -> &'static str {
     TIPS[(bucket % TIPS.len() as u64) as usize]
 }
