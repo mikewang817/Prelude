@@ -135,12 +135,12 @@ pub fn footer_for_item(
 /// costs a row exactly when there is nothing else to look at and never
 /// competes with results.
 ///
-/// Two of the twenty scopes, and `:` for the rest.
+/// Two of the twenty scopes, and each says what it holds rather than what it
+/// is called.
 ///
 /// Listing all of them was tried and taken back out: it is three rows of
 /// syntax above the thing the launcher is actually for, and a header that long
-/// stops reading as a hint and starts reading as the list. `:` is on the end of
-/// this line and answers the same question in full, as rows, when it is asked.
+/// stops reading as a hint and starts reading as the list.
 ///
 /// It shrank from six as the launcher stopped needing it. A hint earns its
 /// line by naming something you cannot otherwise get to, and `/ skill`,
@@ -151,7 +151,18 @@ pub fn footer_for_item(
 /// hint that points at rows already on screen is a line of syntax charging
 /// rent. `@ ask agent` came out at the same request; it works and is
 /// documented rather than advertised.
-pub const HINTS: &str = "c: clipboard   : scopes";
+///
+/// `: scopes` came out last, and it is the one whose absence is a real trade.
+/// It answered "what else is there" in full, as rows — but it answered it in
+/// the vocabulary of somebody who already knew, which is what the whole line
+/// had become: `clipboard` and `scopes` are the names of the mechanisms, not
+/// of anything a person came here wanting. A first-time reader learns more
+/// from being told that one prefix shows what they copied than from being
+/// told that a colon lists categories. `:` still works and is still
+/// documented; `set:` takes its place here because the folders this searches
+/// are chosen behind it, and that is the one thing a new install actually
+/// needs to go and do.
+pub const HINTS: &str = "c: what you copied   set: settings and search folders";
 
 /// The three object shortcuts are Enter chords only in the fingers: the
 /// panel's generated Ghostty config translates Ctrl+Enter into private Ctrl+G,
