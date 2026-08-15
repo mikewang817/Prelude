@@ -922,9 +922,13 @@ cursor-position report and caches the answer. Always use `width::dwidth`.
 the two kinds with an action behind them — every visible Skill and every
 visible conversation — plus a question an agent is blocked on. All three are
 *earned*, so on a new install there are none and the correct answer is a blank
-rectangle; the home falls back to a guide row and the scope commands that do
-have something in them (`f:`, `app:`, `c:`, `set:`, never `skill:` or `s:`,
-which would answer an empty screen with a second one). The guard on that
+rectangle; the home falls back to a guide row plus `c:` and `set:` — never
+`skill:` or `s:`, which would answer an empty screen with a second one, and no
+longer `f:` or `app:`, the first being an index still building in the
+background and the second a question Spotlight already answers. Those rows are
+the real scope commands so Enter, the footer and `^K` behave normally, but they
+carry a sentence where a scope row carries its prefix: `c:` is not language,
+and this is the first screen anybody sees. The guard on that
 fallback is `!items.is_empty()`: a real first run has still gathered hundreds
 of rows, so an empty *catalogue* means the sources did not answer, and
 greeting somebody who owns fifty Skills with "start here" because one gather

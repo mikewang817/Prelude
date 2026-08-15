@@ -1861,32 +1861,53 @@ const GUIDE_URL: &str = "https://github.com/mikewang817/Prelude#readme";
 /// says the thing is broken, and the person who dismisses it has no second
 /// question to ask.
 ///
-/// These are ordinary rows and deliberately not a new kind of one. Four are
-/// the scope commands `scope_commands` already builds, so Enter completes
-/// them, the footer describes them and `^K` acts on them exactly as it does
+/// These are ordinary rows and deliberately not a new kind of one. Two are the
+/// scope commands `scope_commands` already builds, so Enter completes them,
+/// the footer describes them and `^K` acts on them exactly as it does
 /// everywhere else — an onboarding row that behaved specially would be
 /// teaching a launcher that stops being true the moment it has taught it.
-/// Which four is the other half: they are the scopes with something in them on
-/// a machine like this one. Leading somebody's first press into `skill:` or
-/// `s:` would answer an empty screen with a second empty screen, and those are
-/// the two the person is here to be told they do not have yet.
+/// Which two, and what they say rather than showing, is `FIRST_RUN`. Leading
+/// somebody's first press into `skill:` or `s:` would answer an empty screen
+/// with a second empty screen, and those are the two the person is here to be
+/// told they do not have yet.
 fn first_run_rows() -> Vec<Item> {
     let mut rows = vec![
         Item::new(GUIDE_URL, Kind::Link)
             .title("Start here — how Prelude works")
-            .fields([
-                "skills and conversations appear on this screen".to_string(),
-                "opens the guide".to_string(),
-            ]),
+            .fields(["skills and conversations appear on this screen".to_string()]),
     ];
-    rows.extend(
-        ["f:", "app:", "c:", "set:"]
+    rows.extend(FIRST_RUN.iter().filter_map(|(prefix, says)| {
+        SCOPES
             .iter()
-            .filter_map(|prefix| SCOPES.iter().find(|d| d.prefix == *prefix))
-            .map(scope_item),
-    );
+            .find(|d| d.prefix == *prefix)
+            .map(|d| scope_item(d).fields([says.to_string()]))
+    }));
     rows
 }
+
+/// The two destinations offered before anything has been earned, and what
+/// each row says instead of naming its scope.
+///
+/// A scope command's own detail column is its prefix — `c:`, `set:` — which is
+/// exactly right in root search, where the person typed something and is being
+/// shown how to narrow it. On this screen it is the first thing anybody sees of
+/// Prelude, and `c:` is not language. The row keeps its command, its
+/// `complete-query` mode and its behaviour; only what it *reads* changes, so
+/// the prefix is still what Enter puts in the query and still what teaches the
+/// shorthand — one keystroke later, at the moment it becomes useful.
+///
+/// Two rather than four. `f:` and `app:` were here and are the same mistake as
+/// `skill:` in slower motion: the file index is built in the background after
+/// a first install, so `f:` on a brand-new machine is a scope that is briefly
+/// empty for a reason nobody can see, and `app:` answers a question the person
+/// already has Spotlight for. What is left is the pair worth knowing on day
+/// one — the clipboard, which is the thing this launcher has that the built-in
+/// one does not, and settings, which is where the folders it searches are
+/// chosen.
+const FIRST_RUN: &[(&str, &str)] = &[
+    ("c:", "everything you have copied, newest first"),
+    ("set:", "the folders searched, the hotkey, the keys"),
+];
 
 /// What an ordinary root query may fuzzy-match. Large and private sources
 /// are commands here, not thousands of eager rows: `f` finds Files & Folders,
@@ -3483,13 +3504,27 @@ mod tests {
             it.get("mode") == "complete-query" || matches!(it.kind, Kind::Link)
         }));
 
-        // Never into a scope that is empty for the very reason we are here.
+        // Never into a scope that is empty for the very reason we are here,
+        // and not into the index that is still being built behind this screen.
         let scopes: Vec<&str> = rows.iter().map(|it| it.cmd.as_str()).collect();
-        for dead_end in ["skill:", "s:", "r:", "a:"] {
+        for dead_end in ["skill:", "s:", "r:", "a:", "f:", "app:"] {
             assert!(
                 !scopes.contains(&dead_end),
                 "{dead_end} answers an empty screen with another empty screen"
             );
+        }
+
+        // No row on the first screen a person sees may explain itself with a
+        // scope prefix. `c:` is not language; the row says what it holds, and
+        // Enter is what teaches the shorthand.
+        for row in &rows {
+            for field in &row.fields {
+                assert!(
+                    !SCOPES.iter().any(|d| d.prefix == field),
+                    "{:?} explains itself with a scope prefix",
+                    row.title
+                );
+            }
         }
 
         // And it is onboarding rather than a fixture: one Skill of the

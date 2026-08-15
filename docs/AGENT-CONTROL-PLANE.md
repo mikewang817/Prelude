@@ -110,9 +110,13 @@ JSON includes all four registry entries with an `installed` boolean.
 
 The home itself is Skills, Sessions and blocked questions — all three of which
 a person accumulates rather than installs. Where none exist yet, the home
-renders a guide row plus the scope commands that have content on a fresh
-machine (`f:`, `app:`, `c:`, `set:`); `skill:` and `s:` are deliberately
-excluded, since they are empty for the same reason the home is. This fallback
+renders a guide row plus `c:` and `set:`. `skill:` and `s:` are deliberately
+excluded, since they are empty for the same reason the home is; `f:` and
+`app:` are excluded too, the index being built in the background at that point
+and applications being the one thing Spotlight already covers. The two rows
+that remain are ordinary scope commands — Enter completes them and `^K` acts on
+them as usual — but they render a plain-language description in place of the
+scope prefix a scope row normally shows. This fallback
 requires a non-empty gather, so a catalogue that came back empty — a failure,
 not a new install — leaves the home empty rather than greeting an established
 user with onboarding.
