@@ -11,8 +11,9 @@ folders and links just open.
 You are talking to Claude Code. The skill you want was written for Gemini, so it
 sits in a folder Claude has never read. Without leaving that conversation:
 
-1. **`Cmd+Shift+Space`** — a panel drops in over whatever you are looking at.
-2. Type **`/`** and a few letters of the skill's name.
+1. **`Cmd+Shift+Space`** — a panel drops in over whatever you are looking at,
+   with your skills already on it. Nothing to type.
+2. Move to the one you want.
 3. **`Enter`** — the panel goes, and one line is on your clipboard.
 4. **`Cmd+V`**, then `Enter`.
 
