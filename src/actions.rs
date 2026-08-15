@@ -851,6 +851,19 @@ pub fn apply(id: &str, it: &Item) -> i32 {
         ),
         "editsnips" => ui::emit("INSERT", &format!("{editor} {}", shq(&crate::paths::config().join("snippets.toml").to_string_lossy()))),
         "editssh" => ui::emit("INSERT", &format!("{editor} ~/.ssh/config")),
+        // No confirmation, on either creation path.
+        //
+        // `ui::confirm` is for the irreversible — Trash, and `quicklink-remove`
+        // below still asks. Creating a keyword writes one line to
+        // `quicklinks.toml` and is undone by removing it, and the person has
+        // just *typed the name*, which is a stronger statement of intent than
+        // any dialog collects. It was also the odd one out: rename, relabel and
+        // re-point all act on the prompt, so creating asked twice while editing
+        // asked once.
+        //
+        // Nothing is lost by not showing the target first. On an object row it
+        // is the row you selected, and on a template you typed the URL two
+        // prompts ago; both are named again in the note that follows.
         "quicklink-create" => {
             let suggestion = crate::compute::quicklink_suggestion(it);
             let Some(key) = ask_quicklink_key(" quicklink keyword ", &suggestion) else {
@@ -871,13 +884,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
                     return 2;
                 }
             };
-            if !ui::confirm(
-                &format!("create quicklink “{key}”?"),
-                "Create Quicklink",
-                &format!("{} · {}", draft.kind, draft.target),
-            ) {
-                return 130;
-            }
             match crate::compute::create_quicklink_from(&key, &draft) {
                 Ok(_) => ui::note(&format!("created quicklink {key}")),
                 Err(e) => {
@@ -914,13 +920,6 @@ pub fn apply(id: &str, it: &Item) -> i32 {
                     return 2;
                 }
             };
-            if !ui::confirm(
-                &format!("create search quicklink “{key}”?"),
-                "Create Quicklink",
-                &draft.target,
-            ) {
-                return 130;
-            }
             match crate::compute::create_quicklink_from(&key, &draft) {
                 Ok(_) => ui::note(&format!("created {key} — type “{key} something”")),
                 Err(e) => {
