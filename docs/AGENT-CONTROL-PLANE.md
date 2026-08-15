@@ -108,6 +108,15 @@ Conventional settings paths are:
 The launcher home creates Agent rows only for installed executables. Control
 JSON includes all four registry entries with an `installed` boolean.
 
+The home itself is Skills, Sessions and blocked questions — all three of which
+a person accumulates rather than installs. Where none exist yet, the home
+renders a guide row plus the scope commands that have content on a fresh
+machine (`f:`, `app:`, `c:`, `set:`); `skill:` and `s:` are deliberately
+excluded, since they are empty for the same reason the home is. This fallback
+requires a non-empty gather, so a catalogue that came back empty — a failure,
+not a new install — leaves the home empty rather than greeting an established
+user with onboarding.
+
 ## Canonical graph
 
 `prelude control --json` serializes schema 4:

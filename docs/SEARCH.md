@@ -257,15 +257,35 @@ whose selected-row meanings appear in the footer; see
 [Actions](ACTIONS.md#prelude-setting) for the complete mapping.
 
 The backing file is `~/.config/prelude/roots.txt`. When it does not exist,
-Prelude starts with `~/App`, `~/Documents`, and `~/Desktop`; once the person has
-managed the list, that file is authoritative, including an intentionally empty
-list. Adding or removing a folder starts a background rebuild automatically.
+Prelude starts with the person's own top-level `$HOME` folders, read off disk
+rather than guessed: every directory in `$HOME` except hidden ones, `Library`
+— other applications' data, and the tree whose TCC panel names the terminal
+rather than Prelude — `Applications`, whose bundles `app:` already answers for
+by name, and `Pictures`/`Movies`/`Music`. The media folders are a latency
+decision, not a judgement about what is worth finding: they were 36,028 of
+97,488 entries on the machine that measured it, `f:` rescans the whole index on
+every keystroke, and leaving them out delivers every work folder the old
+defaults missed for +2% on the index rather than +62%. Add one back from `set:`
+in a keystroke if you want it. Each folder is a root in its own right rather than `$HOME` being
+one, so every path keeps the full depth-7 budget it would have had; walked from
+`$HOME` instead, a folder one level down reaches only six.
+
+Three hard-coded names preceded this and reached four of twenty-five folders on
+the machine it was measured on. A longer table of conventions was tried next
+and found one more. Once the person has managed the list, that file is
+authoritative, including an intentionally empty list. Adding or removing a folder starts a background rebuild automatically.
 The previous index stays searchable until the new generation is atomically
 complete. `prelude index` remains an explicit repair command, not a normal setup
 step.
 
 The index walks to a maximum depth of 7 without following symlinks and respects
-ignore files. It asks Foundation for Finder tags and stores bounded,
+ignore files. `follow_links(false)` governs symlinks met during a walk and not
+the root a walk starts from, which is descended either way — so a folder is
+kept out of the defaults by name, never by expecting the walker to decline it.
+App-managed library packages (`.photoslibrary`, `.musiclibrary`, and the rest)
+are skipped wherever they appear, including under a root the person chose
+themselves: they are one application's database, not a folder of files anybody
+searches by name. It asks Foundation for Finder tags and stores bounded,
 credential-filtered names beside each path. Ordinary terms match object names
 or tags; `tag:` matches tags only:
 

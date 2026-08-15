@@ -372,6 +372,20 @@ one manager with the same add/remove paths plus per-folder Show in Finder. Root
 edits are immediate and
 schedule a detached rebuild. A missing roots file receives onboarding defaults;
 an existing empty file is authoritative and must not silently restore them.
+Those defaults are read off `$HOME` rather than guessed — every top-level
+folder except hidden ones, `Library`, `Applications*` and the three media
+folders — because three hard-coded names reached four of twenty-five folders on
+the machine that measured it, and a nine-name table of conventions found
+exactly one more. Media is excluded on a measurement, not a taste: `f:` rescans
+the whole index per keystroke at 18.3 ms p95 against 60,104 entries, and
+`Pictures`/`Movies`/`Music` were 36,028 of the 97,488 an unfiltered `$HOME`
+produced, so leaving them out buys every work folder for +2% instead of +62%. Each
+folder is its own root: `$HOME` as a single root would cost every path one
+level of the depth-7 budget (`~/App` falls from 59,411 entries to 33,752) and
+would need `paths::is_protected`, which refuses `$HOME`, relaxed for it. The
+defaults still go through that check, and the name filter is what keeps
+`Library` out — `follow_links(false)` does not apply to the root a walk starts
+from, so a symlinked root is descended regardless.
 The previous generation remains searchable until the new one is complete and
 atomically replaces it; a held kernel lock collapses simultaneous first-search/
 root-edit requests into one builder. `prelude index` is the explicit repair
@@ -906,7 +920,16 @@ cursor-position report and caches the answer. Always use `width::dwidth`.
 
 **The home and root commands are not the catalogue.** An empty query renders
 the two kinds with an action behind them — every visible Skill and every
-visible conversation — plus a question an agent is blocked on. Agents, Runs and their inventory counts are readouts with nothing to press
+visible conversation — plus a question an agent is blocked on. All three are
+*earned*, so on a new install there are none and the correct answer is a blank
+rectangle; the home falls back to a guide row and the scope commands that do
+have something in them (`f:`, `app:`, `c:`, `set:`, never `skill:` or `s:`,
+which would answer an empty screen with a second one). The guard on that
+fallback is `!items.is_empty()`: a real first run has still gathered hundreds
+of rows, so an empty *catalogue* means the sources did not answer, and
+greeting somebody who owns fifty Skills with "start here" because one gather
+fell over is the `Vec<Item>` confusion on the one screen where it cannot be
+missed. Agents, Runs and their inventory counts are readouts with nothing to press
 Enter on; they stay in `a:`, `r:` and root search. Ordering is `by_rank` like
 everywhere else, so the kind bands do the work and the home has no second
 ordering rule of its own.

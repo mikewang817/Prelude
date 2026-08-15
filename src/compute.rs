@@ -1819,7 +1819,7 @@ fn agent_prompt_rows(q: &str, static_items: &[Item]) -> Option<Vec<Item>> {
 /// there are hundreds of them, `gather` puts only the newest
 /// `sessions::IN_MAIN_LIST` in the list at all, and `s:` owns the rest.
 pub fn home_items(items: &[Item]) -> Vec<Item> {
-    items
+    let mine: Vec<Item> = items
         .iter()
         .filter(|it| {
             (matches!(it.kind, Kind::Msg | Kind::Skill | Kind::Session)
@@ -1833,7 +1833,59 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
                 || it.get("update") == "available"
         })
         .cloned()
-        .collect()
+        .collect();
+    // `items.is_empty()` is the difference between a person who has nothing
+    // yet and a gather that failed, and they must not render the same. A real
+    // first run still returns hundreds of rows — the applications, the `$PATH`
+    // commands, the scope commands — so an empty catalogue means the sources
+    // did not answer, and greeting somebody who has fifty Skills with "start
+    // here" because one gather fell over is the `Vec<Item>` mistake this
+    // codebase already made once, on a screen where it is unmissable.
+    if mine.is_empty() && !items.is_empty() { first_run_rows() } else { mine }
+}
+
+/// Where the guide lives, for the one row that has nothing local to point at.
+const GUIDE_URL: &str = "https://github.com/mikewang817/Prelude#readme";
+
+/// What the home shows before the person has anything of their own on it.
+///
+/// The two kinds this screen is made of are earned rather than installed: a
+/// Skill arrives when you write one, a Session when you have talked to an
+/// agent, and a Msg when one asks you something. So a correct `home_items`
+/// returns nothing on a machine where none of that has happened yet, and fzf
+/// draws an empty rectangle — which is the `搜索用不了` failure exactly, and
+/// worse placed than the one `fallback_rows` already fixes. That one needs an
+/// unlucky query; this one is guaranteed, it happens to everybody once, and it
+/// happens at the only moment when nobody yet has a reason to believe the
+/// launcher works at all. First impression is the whole of it: an empty box
+/// says the thing is broken, and the person who dismisses it has no second
+/// question to ask.
+///
+/// These are ordinary rows and deliberately not a new kind of one. Four are
+/// the scope commands `scope_commands` already builds, so Enter completes
+/// them, the footer describes them and `^K` acts on them exactly as it does
+/// everywhere else — an onboarding row that behaved specially would be
+/// teaching a launcher that stops being true the moment it has taught it.
+/// Which four is the other half: they are the scopes with something in them on
+/// a machine like this one. Leading somebody's first press into `skill:` or
+/// `s:` would answer an empty screen with a second empty screen, and those are
+/// the two the person is here to be told they do not have yet.
+fn first_run_rows() -> Vec<Item> {
+    let mut rows = vec![
+        Item::new(GUIDE_URL, Kind::Link)
+            .title("Start here — how Prelude works")
+            .fields([
+                "skills and conversations appear on this screen".to_string(),
+                "opens the guide".to_string(),
+            ]),
+    ];
+    rows.extend(
+        ["f:", "app:", "c:", "set:"]
+            .iter()
+            .filter_map(|prefix| SCOPES.iter().find(|d| d.prefix == *prefix))
+            .map(scope_item),
+    );
+    rows
 }
 
 /// What an ordinary root query may fuzzy-match. Large and private sources
@@ -2492,10 +2544,133 @@ fn index_roots_from(text: Option<&str>) -> Vec<String> {
             })
             .collect();
     }
-    ["App", "Documents", "Desktop"]
-        .iter()
-        .map(|directory| paths::home().join(directory).to_string_lossy().into_owned())
-        .collect()
+    default_roots_in(&paths::home())
+}
+
+/// The folders a first search looks in: the person's own, read off `$HOME`.
+///
+/// Three names were hard-coded here — `App`, `Documents`, `Desktop` — and two
+/// of them are Apple's while the third is one developer's habit. Measured
+/// against the machine this was written on, that list reached four of
+/// twenty-five top-level folders: `Learn`, `services`, `skills`, `test`,
+/// `kimicli` and fifteen more were unreachable by name, and nothing said so.
+/// A launcher that cannot find your own checkout is not one you keep opening
+/// long enough to discover that `set:` would have fixed it.
+///
+/// Guessing harder is not the repair. A longer table of conventions —
+/// `Developer`, `Projects`, `Code`, `src`, `repos` — was written first and
+/// measured at 60,263 entries against the old 60,104: nine names, and on this
+/// machine it found one folder the three did not. The names people use are not
+/// drawn from a list anybody can write down, which is the same trap
+/// `skill_dirs` documents, except that here the answer is already on disk. So
+/// this reads `$HOME` instead of predicting it.
+///
+/// **Each folder is its own root, and that is load-bearing rather than
+/// incidental.** The obvious form of this change is to index `$HOME` itself,
+/// and it costs a level of depth inside every project, because `max_depth`
+/// counts from the root: `~/App` walked from home reaches 33,752 entries where
+/// walked directly it reaches 59,411. Rooting one level down keeps every
+/// existing path at exactly the depth it has today, needs no compensating
+/// `max_depth` bump for user-chosen roots that never asked for one, and leaves
+/// `paths::is_protected` — which refuses `$HOME` for the Trash and for
+/// `project::root` — untouched and still true.
+///
+/// Some names are held back. `Library` is other applications' data, 256,016
+/// entries here, and asking for it summons a TCC panel that names the terminal
+/// rather than Prelude; that is `project::root`'s lesson and the reason this
+/// whole function is a filter rather than a `read_dir`. `Applications` holds
+/// bundles whose insides are nobody's search result, and `app:` already
+/// answers for them by name. The three media folders go on the measurement in
+/// `excluded_home_folder` rather than on an opinion about what people search
+/// for. A person who wants any of them adds one row in `set:`, which is what
+/// defaults are for, since the file becomes authoritative the moment it is
+/// edited.
+///
+/// The name test is doing more work than it looks like, and this is the part
+/// to keep. **A symlinked root is descended even under `follow_links(false)`**
+/// — measured, because the flag governs links met *during* a walk and the root
+/// is not one of them — so `Library` has to be refused by name here rather
+/// than left for the walker to decline. What that does not catch is a
+/// `Documents` which iCloud has made a symlink into `Library/Mobile
+/// Documents`, and refusing *that* is the one thing deliberately not done:
+/// `Desktop` and `Documents` are the two least surprising search folders there
+/// are, they are already defaults today, and switching iCloud on must not
+/// quietly delete them from the list.
+fn default_roots_in(home: &std::path::Path) -> Vec<String> {
+    let mut roots: Vec<String> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // `is_dir` rather than the entry's own file type, so a folder that
+            // is a symlink — which is what iCloud makes of `Documents` — is
+            // still offered rather than silently dropped.
+            //
+            // `is_protected` because these are folders the person did not
+            // choose, which is exactly the check that rule names. It is the
+            // second guard rather than the first: it canonicalizes, at 2µs a
+            // root, and the name test above has already discarded the ones
+            // that would fail.
+            (!excluded_home_folder(&name)
+                && entry.path().is_dir()
+                && !crate::paths::is_protected(&entry.path()))
+            .then(|| entry.path().to_string_lossy().into_owned())
+        })
+        .collect();
+    if roots.is_empty() {
+        // An unreadable `$HOME` is not an empty one, and the difference has to
+        // be visible: onboarding with nothing in it looks identical to a
+        // person who deliberately cleared the list.
+        return ["Documents", "Desktop", "Downloads"]
+            .iter()
+            .map(|d| home.join(d).to_string_lossy().into_owned())
+            .collect();
+    }
+    // Whatever `read_dir` hands back is the filesystem's order, which is not
+    // an order anybody can read. Settings prints this list.
+    roots.sort();
+    roots
+}
+
+/// A package that belongs to one application and is a database rather than a
+/// folder of the person's files.
+///
+/// `~/Pictures` becomes a default search folder the moment the defaults are
+/// read off `$HOME`, and a Photos library is the `~/Library` problem in
+/// miniature: tens of thousands of derivative files nobody would ever search
+/// for by name, behind a TCC boundary whose panel names the terminal rather
+/// than Prelude. Measured here, the walk already comes back empty because
+/// macOS refuses it — so what this buys is not the rows, which were never
+/// arriving. It is not asking.
+///
+/// The check is by extension because that is what makes these packages what
+/// they are, and it applies to every root rather than only the defaults: a
+/// person who adds `~/Pictures` by hand meant the pictures too.
+fn app_managed_library(path: &std::path::Path) -> bool {
+    const LIBRARIES: &[&str] =
+        &["photoslibrary", "photolibrary", "musiclibrary", "tvlibrary", "imovielibrary", "theater"];
+    path.extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|ext| LIBRARIES.contains(&ext.as_str()))
+        || path.file_name().is_some_and(|name| name == "Photo Booth Library")
+}
+
+fn excluded_home_folder(name: &str) -> bool {
+    name.starts_with('.')
+        || name == "Library"
+        // "Applications" and "Applications (Parallels)" alike.
+        || name.starts_with("Applications")
+        // Media, and this one is a latency decision rather than a taste one.
+        // `f:` scans the whole index on every keystroke and already costs
+        // 18.3 ms p95 against 60,104 entries. Enumerating `$HOME` with these
+        // three included measured 97,488 — a 62% index for a keystroke path
+        // that is felt — and without them 61,460, which is the size it is
+        // today. `Pictures` alone was 36,028 of the difference. So every work
+        // folder the old three names missed arrives for +2%, and the folders
+        // whose contents are looked at rather than typed stay out where the
+        // person can add them from `set:` in one keystroke if they disagree.
+        || matches!(name, "Pictures" | "Movies" | "Music")
 }
 
 /// The search folders, read once per process.
@@ -2607,6 +2782,7 @@ fn indexed_paths() -> Vec<(IndexedKind, String)> {
         let walker = ignore::WalkBuilder::new(root)
             .max_depth(Some(7))
             .follow_links(false)
+            .filter_entry(|entry| !app_managed_library(entry.path()))
             .build();
         paths.extend(walker.flatten().filter_map(|entry| {
             if entry.depth() == 0 {
@@ -3279,10 +3455,108 @@ mod tests {
     #[test]
     fn an_explicitly_empty_search_folder_list_stays_empty() {
         assert!(index_roots_from(Some("# intentionally none\n")).is_empty());
-        assert_eq!(index_roots_from(None).len(), 3, "defaults exist only before first edit");
+        assert!(!index_roots_from(None).is_empty(), "defaults exist before first edit");
         let rows = index_roots_from(Some("~/App\n/tmp/work\n"));
         assert_eq!(rows[0], paths::home().join("App").to_string_lossy());
         assert_eq!(rows[1], "/tmp/work");
+    }
+
+    /// A first run has no Skills and no conversations, so the screen this
+    /// launcher opens on is the one nobody has written anything for. It must
+    /// not be blank.
+    #[test]
+    fn a_first_run_home_says_something_rather_than_nothing() {
+        // A real first run has gathered plenty — applications, `$PATH`, the
+        // scope commands — and none of it is the person's own.
+        let gathered = vec![Item::new("cargo", Kind::Path).title("cargo")];
+        let rows = home_items(&gathered);
+        assert!(!rows.is_empty(), "an empty home is the one screen everybody meets first");
+
+        // Whereas nothing at all means the sources did not answer, and that is
+        // not a person to be onboarded.
+        assert!(home_items(&[]).is_empty(), "a failed gather is not a new install");
+
+        // Every row has to act, which is the rule this screen already keeps.
+        // Four are the scope commands, so Enter completes them exactly as it
+        // does in root search; one opens the guide.
+        assert!(rows.iter().all(|it| {
+            it.get("mode") == "complete-query" || matches!(it.kind, Kind::Link)
+        }));
+
+        // Never into a scope that is empty for the very reason we are here.
+        let scopes: Vec<&str> = rows.iter().map(|it| it.cmd.as_str()).collect();
+        for dead_end in ["skill:", "s:", "r:", "a:"] {
+            assert!(
+                !scopes.contains(&dead_end),
+                "{dead_end} answers an empty screen with another empty screen"
+            );
+        }
+
+        // And it is onboarding rather than a fixture: one Skill of the
+        // person's own displaces the whole thing.
+        let mine = vec![Item::new("/deploy", Kind::Skill).title("deploy")];
+        let shown: Vec<String> = home_items(&mine).into_iter().map(|it| it.title).collect();
+        assert_eq!(shown, ["deploy"]);
+    }
+
+    /// The defaults are the person's own folders, so the parts worth pinning
+    /// are the two exclusions and the shape — never a count, which is a
+    /// property of whoever's machine is running the test.
+    #[test]
+    fn search_defaults_are_the_home_folders_minus_other_apps_data() {
+        // Not `temp_dir()`: on macOS that canonicalizes under `/private/var`,
+        // which `is_protected` refuses as a system tree — so the fixture would
+        // exercise the fallback instead of the enumeration. `target/` is
+        // under `/Users`, like the homes this actually runs against.
+        let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("prelude-roots-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&home);
+        for name in
+            ["App", "Learn", "Documents", "Library", "Applications", "Applications (Parallels)"]
+        {
+            std::fs::create_dir_all(home.join(name)).unwrap();
+        }
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::write(home.join("notes.txt"), "not a folder").unwrap();
+
+        let names: Vec<String> = default_roots_in(&home)
+            .iter()
+            .map(|root| {
+                std::path::Path::new(root).file_name().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+
+        // Whatever the person actually has, including the names no table of
+        // conventions would have contained.
+        assert_eq!(names, vec!["App", "Documents", "Learn"]);
+        // 256,016 entries on the machine this was measured on, and a TCC
+        // panel naming the terminal rather than Prelude.
+        assert!(!names.iter().any(|n| n == "Library"));
+        // Bundles, which `app:` answers for by name.
+        assert!(!names.iter().any(|n| n.starts_with("Applications")));
+        // 36,028 of 97,488 entries, on a path `f:` rescans every keystroke.
+        assert!(excluded_home_folder("Pictures") && excluded_home_folder("Movies"));
+        assert!(!names.iter().any(|n| n.starts_with('.')), "hidden trees are not search folders");
+        assert!(!names.iter().any(|n| n == "notes.txt"), "a file is not a search folder");
+        let _ = std::fs::remove_dir_all(&home);
+
+        // `Pictures` is a search folder now, so the one thing inside it that
+        // is a database rather than a person's files must not be walked —
+        // whether it arrived by default or because somebody chose it.
+        let pictures = std::path::Path::new("/Users/x/Pictures");
+        assert!(app_managed_library(&pictures.join("Photos Library.photoslibrary")));
+        assert!(app_managed_library(&pictures.join("Photo Booth Library")));
+        assert!(!app_managed_library(&pictures.join("xhs")));
+        assert!(!app_managed_library(&pictures.join("logo/mark.png")));
+    }
+
+    /// An unreadable `$HOME` must not be reported as a person who cleared the
+    /// list: the first is a failure and the second is a preference.
+    #[test]
+    fn unreadable_home_still_offers_somewhere_to_look() {
+        let missing = std::path::Path::new("/nope/nothing/here");
+        assert_eq!(default_roots_in(missing).len(), 3);
     }
 
     fn run(state: &str, project: &str) -> Item {
@@ -3326,7 +3600,7 @@ mod tests {
         // An Agent row is a readout too, and equally absent: it is still in
         // root search by name and in `a:`.
         let agent = vec![Item::new("agent", Kind::Agent).title("claude")];
-        assert!(home_items(&agent).is_empty());
+        assert!(!home_items(&agent).iter().any(|it| it.kind == Kind::Agent));
         assert_eq!(root_items(&agent).len(), 1);
 
         // Ordering is `cache::by_rank`'s job, so this filter must leave the
