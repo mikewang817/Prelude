@@ -74,54 +74,16 @@ prelude ask "This drops legacy_users. Proceed?"     # blocks until answered
 prelude say api-gateway "rebase before editing"     # into another Run's inbox
 ```
 
-## Search
+## Everything else
 
-An empty query is a compact home. Type `:` to see every scope.
+Apps, files, clipboard history, shell history, saved keywords, calculations,
+unit conversion, web search — the ordinary launcher things, much as Spotlight or
+Raycast do them.
 
-```text
-@claude explain this      ask an installed Agent and show its answer
-Prelude                   files and folders named Prelude
-c:                        clipboard text, Finder objects and images
-h:git rebase              recent, filtered shell history
-app:zed                   installed applications
-10kg to lb                unit conversion
-```
-
-Ordinary queries mix in the apps, files and folders whose own names match, and
-end with a web search so nothing dead-ends. History, clipboard rows and `$PATH`
-commands stay behind their scopes. Search starts at `~/App`, `~/Documents` and
-`~/Desktop`; `set:` changes that and everything else. Full grammar in [the
-search guide](docs/SEARCH.md).
-
-## Keys
-
-| Key | Action |
-|---|---|
-| `Enter` | Perform the focused row's stated default |
-| `Ctrl+K` | Open contextual actions |
-| `Tab` | Complete the focused scope command or keyword |
-| `Ctrl+P` | Toggle Quick Look |
-| `Ctrl+Enter` | Reveal in Finder |
-| `Ctrl+Shift+Enter` | Open Ghostty in that folder |
-| `Ctrl+Option+Enter` | Copy the absolute path and close |
-| `←` `→` | Adjust the focused setting in `set:`; otherwise move a level |
-| `Escape` | Go back one level; close at the outermost |
-
-## Names
-
-A **Quicklink** is a keyword you type to reach one thing; an **alias** is a name
-for something Prelude already has; a **Favorite** is promotion without a name.
-`Ctrl+K` creates all three, `ql:` and `set:` manage them. A name is refused the
-moment you type it if something already owns it, never later.
-
-```sh
-prelude quicklink add jira 'https://jira.example.com/issues?jql={q}' Jira
-prelude alias add browser "Google Chrome"
-```
-
-An alias is also a hotkey: bind `open 'prelude://run?alias=browser'` in any
-hotkey tool. Such links may only name an alias you created and only act on
-objects macOS opens — never the clipboard, an agent or a shell.
+Rather than list them here, the launcher tells you as you go: the footer always
+says what `Enter` will do to the row you are on, `Ctrl+K` shows everything else
+that row can do, `:` lists every scope, and `set:` is every setting. It is worth
+finding out by opening it.
 
 ## Boundaries
 
