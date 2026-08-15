@@ -135,12 +135,23 @@ pub fn footer_for_item(
 /// costs a row exactly when there is nothing else to look at and never
 /// competes with results.
 ///
-/// Six of the twenty scopes, deliberately. Listing all of them was tried and
-/// taken back out: it is three rows of syntax above the thing the launcher is
-/// actually for, and a header that long stops reading as a hint and starts
-/// reading as the list. `:` is on the end of this line and answers the same
-/// question in full, as rows, when it is asked.
-pub const HINTS: &str = "@ ask agent   / skill   s: sessions   f: files   c: clipboard   : scopes";
+/// Two of the twenty scopes, and `:` for the rest.
+///
+/// Listing all of them was tried and taken back out: it is three rows of
+/// syntax above the thing the launcher is actually for, and a header that long
+/// stops reading as a hint and starts reading as the list. `:` is on the end of
+/// this line and answers the same question in full, as rows, when it is asked.
+///
+/// It shrank from six as the launcher stopped needing it. A hint earns its
+/// line by naming something you cannot otherwise get to, and `/ skill`,
+/// `s: sessions` and `f: files` all stopped qualifying: Skills and
+/// conversations are the home now and match by name, and an ordinary query
+/// already mixes in the ten best file matches. Each of those prefixes still
+/// works and still *narrows* — they are simply no longer the way in, and a
+/// hint that points at rows already on screen is a line of syntax charging
+/// rent. `@ ask agent` came out at the same request; it works and is
+/// documented rather than advertised.
+pub const HINTS: &str = "c: clipboard   : scopes";
 
 /// The three object shortcuts are Enter chords only in the fingers: the
 /// panel's generated Ghostty config translates Ctrl+Enter into private Ctrl+G,

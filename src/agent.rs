@@ -173,6 +173,20 @@ pub const SPECS: &[Spec] = &[
         ask: |prompt| vec!["cursor-agent".into(), "-p".into(), prompt.into()],
         fork: None,
     },
+    Spec {
+        name: "omp",
+        settings: ".omp/agent/config.yml",
+        capabilities: Capabilities {
+            resume: true,
+            fork: false,
+            ask: true,
+            effective_config: "none",
+        },
+        resume: |id| format!("omp --resume {id}"),
+        prompt: |prompt| format!("omp {}", shq(prompt)),
+        ask: |prompt| vec!["omp".into(), "-p".into(), prompt.into()],
+        fork: None,
+    },
 ];
 
 pub fn get(name: &str) -> Option<&'static Spec> {

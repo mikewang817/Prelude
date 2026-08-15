@@ -38,15 +38,21 @@ and redacted capability comparisons.
 `src/agent.rs::SPECS` is the one registry for invocation syntax, conventional
 settings paths, and capability flags.
 
-| Capability | Claude Code | Codex | pi | OpenCode | Kimi | Cursor |
-|---|---:|---:|---:|---:|---:|---:|
-| detect executable and live Runs | yes | yes | yes | yes | yes | yes |
-| native resume command | yes | yes | yes | yes | yes | yes |
-| discover native Sessions | yes | yes | yes | no | yes | yes |
-| native fork command | yes | yes | yes | no | no | no |
-| one-off non-interactive ask | yes | yes | yes | yes | yes | yes |
-| use a Skill without installing it | yes | yes | yes | yes | yes | yes |
-| effective-config evidence | auto-mode subsystem only | resolved for current directory | none | resolved for current directory | none | none |
+| Capability | Claude | Codex | pi | OpenCode | Kimi | Cursor | omp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| detect executable and live Runs | yes | yes | yes | yes | yes | yes | yes |
+| native resume command | yes | yes | yes | yes | yes | yes | yes |
+| discover native Sessions | yes | yes | yes | no | yes | yes | yes |
+| native fork command | yes | yes | yes | no | no | no | no |
+| one-off non-interactive ask | yes | yes | yes | yes | yes | yes | yes |
+| use a Skill without installing it | yes | yes | yes | yes | yes | yes | yes |
+| effective-config evidence | auto-mode only | for current directory | none | for current directory | none | none | none |
+
+Skills need none of this: a `SKILL.md` is read by name and path, so
+`skill_dirs` covers forty-odd CLIs while this table stays at seven. An Agent
+enters here only when Prelude can *drive* it — which for Sessions means a
+resume command and a readable conversation store, both verified against the
+CLI's own `--help` and the files on disk.
 
 Concrete command forms:
 
@@ -57,7 +63,8 @@ Concrete command forms:
 | resume | `claude --resume ID` | `codex resume ID` | `pi --session ID` | `opencode --session ID` |
 | fork | `claude --resume ID --fork-session` | `codex fork ID` | `pi --fork ID` | unavailable |
 
-Kimi and Cursor resume with `kimi --session ID` and `cursor-agent --resume ID`.
+Kimi, Cursor and omp resume with `kimi --session ID`,
+`cursor-agent --resume ID` and `omp --resume ID`.
 Kimi has no interactive-with-prompt form — its help lists `[command]` rather
 than a positional prompt — so `kimi --prompt` is both its start and its ask,
 the same arrangement `opencode run` already had.
@@ -215,6 +222,7 @@ Prelude discovers:
 - Kimi: `~/.kimi-code/sessions/<slug>/session_<uuid>/state.json`
 - Cursor: `~/.cursor/chats/<workspace>/<chat>/meta.json` and
   `~/.cursor/acp-sessions/<id>/meta.json`
+- omp: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 
 The last two are not transcripts. Kimi and Cursor keep a small JSON sidecar
 beside the conversation, so those scanners read one bounded document per
@@ -468,7 +476,13 @@ for it directly.
 
 ## Known limitations
 
-- OpenCode Sessions are not discovered, although a known resume command exists.
+- OpenCode Sessions are not discovered, although a known resume command exists:
+  they live in a SQLite `~/.local/share/opencode/opencode.db`, and a database
+  engine on the launch path is a dependency this does not spend.
+- Copilot, Qwen, Amp, Qoder, Kilo, Mastra, Grok, Cline, Droid, Antigravity and
+  Kiro are installed on the machine this was written on and keep no local
+  conversation store that could be found, so there is nothing to discover
+  rather than something unimplemented.
 - Cursor Sessions carry no title: the transcript is SQLite and is not read.
 - Kimi and Cursor have no known fork syntax, so no fork action is offered.
 - Working/waiting is inferred from process liveness, Session-file silence, and

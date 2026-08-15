@@ -52,6 +52,11 @@ pub(crate) fn skill_dirs() -> Vec<(std::path::PathBuf, &'static str)> {
         (".kimi-code/skills", "kimi"),
         (".zcode/skills", "zcode"),
         (".openclaw/skills", "openclaw"),
+        // `~/.gemini/config/skills` is where Gemini CLI actually keeps them on
+        // this machine; `~/.gemini/skills` is what the survey tables say. Both,
+        // because an absent root costs one failed `read_dir` and being wrong
+        // about the live one costs every Skill in it.
+        (".gemini/config/skills", "gemini"),
         (".gemini/skills", "gemini"),
         (".gemini/antigravity/skills", "antigravity"),
         (".gemini/antigravity/global_skills", "antigravity"),
@@ -85,6 +90,13 @@ pub(crate) fn skill_dirs() -> Vec<(std::path::PathBuf, &'static str)> {
         (".pochi/skills", "pochi"),
         (".mcpjam/skills", "mcpjam"),
         (".adal/skills", "adal"),
+        // Observed data directories, for CLIs installed here whose Skill root
+        // does not exist yet: the layout is known even when the folder is not
+        // there, and a root that never matches costs nothing.
+        (".omp/agent/skills", "omp"),
+        (".local/share/kilo/skills", "kilo"),
+        (".grok/skills", "grok"),
+        (".mastracode/skills", "mastracode"),
     ]
     .into_iter()
     .map(|(rel, label)| (h.join(rel), label))

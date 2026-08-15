@@ -370,6 +370,39 @@ fn scan_pi(out: &mut Vec<Raw>) {
     });
 }
 
+/// omp: ~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl
+///
+/// The most generous of these formats: the head carries a `title` record that
+/// omp writes itself, and a `session` record with the id, the timestamp and
+/// the working directory. Nothing has to be inferred from a first message, and
+/// nothing below the head has to be read.
+fn scan_omp(out: &mut Vec<Raw>) {
+    let root = paths::home().join(".omp/agent/sessions");
+    walk_jsonl(&root, &mut |p, mtime| {
+        let mut id = String::new();
+        let mut cwd = String::new();
+        let mut title = String::new();
+        for line in head_lines(p, 12) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            match json_str(&v, "type").as_str() {
+                "session" if id.is_empty() => {
+                    id = json_str(&v, "id");
+                    cwd = json_str(&v, "cwd");
+                }
+                "title" if title.is_empty() => title = crate::width::flatten(&json_str(&v, "title")),
+                _ => {}
+            }
+        }
+        if title.is_empty() {
+            title = folder_label(&cwd, p);
+        }
+        if !id.is_empty() {
+            let opening = title.clone();
+            out.push(Raw { agent: "omp", id, path: p.clone(), title, opening, cwd, mtime });
+        }
+    });
+}
+
 /// Kimi Code: ~/.kimi-code/sessions/<workdir-slug>/session_<uuid>/state.json
 ///
 /// The only one of these whose conversation is not a JSONL to be parsed. A
@@ -524,6 +557,7 @@ pub fn all() -> Vec<Item> {
     scan_claude(&mut raw);
     scan_codex(&mut raw);
     scan_pi(&mut raw);
+    scan_omp(&mut raw);
     scan_kimi(&mut raw);
     scan_cursor(&mut raw);
     raw.sort_by_key(|r| std::cmp::Reverse(r.mtime));
@@ -1168,7 +1202,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 ///
 /// One list, because two would drift: it is both what the Trash and export
 /// boundary trusts and what the diagnostic checks it can still read.
-fn native_session_roots(home: &Path) -> [PathBuf; 7] {
+fn native_session_roots(home: &Path) -> [PathBuf; 8] {
     [
         home.join(".claude/projects"),
         home.join(".codex/sessions"),
@@ -1177,6 +1211,7 @@ fn native_session_roots(home: &Path) -> [PathBuf; 7] {
         home.join(".kimi-code/sessions"),
         home.join(".cursor/chats"),
         home.join(".cursor/acp-sessions"),
+        home.join(".omp/agent/sessions"),
     ]
 }
 

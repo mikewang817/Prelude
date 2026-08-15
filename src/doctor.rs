@@ -503,6 +503,7 @@ const PROBES: &[Probe] = &[
         version: &["cursor-agent", "--version"],
         login: Login::CursorLine,
     },
+    Probe { agent: "omp", version: &["omp", "--version"], login: Login::NoStatusCommand },
 ];
 
 /// What a login probe concluded. `Unknown` is a first-class answer.

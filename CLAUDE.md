@@ -1451,6 +1451,19 @@ session — so every agent added for Sessions needs a real entry in
 `agent::SPECS`. Kimi and Cursor are there now, and both were verified against
 their own `--help` rather than assumed.
 
+omp joined them on the same evidence: 85 conversations at
+`~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`, whose head carries a
+title record *and* a session record with id, timestamp and cwd — the most
+generous of these formats, and nothing below the head is read.
+
+Eleven other CLIs on this machine were checked and produced nothing: they are
+installed and keep no local conversation store to find. OpenCode does keep one,
+in a SQLite `opencode.db`, which is the same wall Cursor's transcript is behind
+— a database engine on the launch path is a dependency this does not spend, so
+OpenCode has a resume command and no discoverable Sessions. Writing that down
+is the point: "not implemented" and "there is nothing there" look identical
+from the launcher and want opposite responses.
+
 Two of them do not store a transcript this can parse. Kimi and Cursor keep a
 small JSON sidecar per session (`state.json`, `meta.json`), which is cheaper —
 one bounded document, never the conversation — and is why `doctor sessions`
