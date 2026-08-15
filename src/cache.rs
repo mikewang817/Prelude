@@ -752,12 +752,21 @@ pub fn gather() -> Vec<Item> {
     items.extend(timed("read procs", || read_cached("procs")));
     items.extend(timed("read dirs", || read_cached("dirs")));
     items.extend(timed("read update", || read_cached("update")));
-    // Sessions are numerous enough to swamp the list; only the newest
-    // few go in, and `s:` searches the rest.
+    // Every visible conversation, not the newest handful.
+    //
+    // The cap was here because sessions would "swamp the list", and that was
+    // true of a list they could not be *found* in: `root_items` excluded them,
+    // so the fifteen on the home vanished the moment anybody typed and the
+    // other eight hundred were reachable only by knowing to type `s:` first.
+    // The complaint that produced this reads as "why only fifteen"; the thing
+    // actually wrong was that typing a project name found none of them.
+    //
+    // Swamping is handled where it belongs instead — `Item::band` puts Session
+    // at 980, below Skill and Agent, so a typed query still leads with the
+    // capability or the agent that matches it.
     items.extend(
         sessions.iter()
             .filter(|session| crate::sources::sessions::visible(session))
-            .take(crate::sources::sessions::IN_MAIN_LIST)
             .cloned(),
     );
     // The `fleet` cache is deliberately *not* extended here, unlike its three

@@ -554,10 +554,6 @@ pub fn all() -> Vec<Item> {
     sessions
 }
 
-/// Only the most recent handful go in the main list; `s:` searches them all.
-/// Without this the 500+ sessions here would swamp everything else.
-pub const IN_MAIN_LIST: usize = 15;
-
 /// The newest conversation this agent had, if there is one.
 ///
 /// The cache is written newest-first, so this is the first match. It is what

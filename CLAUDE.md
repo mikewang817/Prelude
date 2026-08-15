@@ -905,9 +905,8 @@ terminal, and `·` is the separator on every row. `doctor` measures it with a
 cursor-position report and caches the answer. Always use `width::dwidth`.
 
 **The home and root commands are not the catalogue.** An empty query renders
-the two kinds with an action behind them — Skills and the newest
-`sessions::IN_MAIN_LIST` conversations — plus a question an agent is blocked
-on. Agents, Runs and their inventory counts are readouts with nothing to press
+the two kinds with an action behind them — every visible Skill and every
+visible conversation — plus a question an agent is blocked on. Agents, Runs and their inventory counts are readouts with nothing to press
 Enter on; they stay in `a:`, `r:` and root search. Ordering is `by_rank` like
 everywhere else, so the kind bands do the work and the home has no second
 ordering rule of its own.
@@ -926,6 +925,36 @@ never the thousands of history entries, clipboard rows and
 `$PATH` commands underneath. Ordinary queries now mix in at most ten local
 file/folder name matches; exact `f` shows one Files & Folders command and `f:`
 opens the longer result set. `:` lists every scope, and clearing restores the home.
+
+**Conversations are in root search, and the cap that kept them out is gone.**
+Fifteen went into the catalogue and `root_items` excluded the kind, so the
+launcher could not answer its most ordinary question about them: typing a
+project name found the agent, the skills and the files, and none of the
+conversations you had *in that project*. The fifteen on the home vanished at
+the first keystroke and the other eight hundred needed `s:` — a prefix you had
+to know rather than a way to narrow. All of them are in the list now, and
+swamping is handled where it belongs: `Item::band` puts Session at 980, below
+Skill and Agent, so a typed query still leads with the capability or the agent
+that matches it. Measured on eight hundred conversations: gather 7.4ms p95,
+launch 10.0ms, per-keystroke 19.1ms, `list.txt` 28KB to 48KB.
+
+**Every Skill therefore sits above every conversation on the home, and that is
+a known, accepted cost rather than an oversight.** On the machine this was
+written on, eleven of the first seventeen rows are Skills and six of those have
+never been invoked — two thirds of the first screen is capability the person
+has not used, above conversations from minutes ago. The band is doing exactly
+what it is for and `usage_rank` cannot cross it, because frecency orders
+*within* a band by design.
+
+Three ways out were weighed and all three refused, so do not re-derive them: a
+cap on Skills is the cap that was just removed from Sessions wearing a
+different hat; interleaving breaks the rule that kind decides the band; and
+letting a never-used Skill fall below a recent Session means the home orders
+Skills differently from `skill:` and from root search, which is the same object
+sorting two ways in one launcher. The decision was to leave it, because typing
+now reaches everything and the first screen matters less than it did when it
+was the only way in. Revisit it with evidence that somebody actually lost a
+conversation to it, not because the screen looks unbalanced.
 
 **Applications are the exception that had to be made, and the shape of the
 error is worth keeping.** Apps were in that excluded list beside history and

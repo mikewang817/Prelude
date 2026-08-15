@@ -17,10 +17,8 @@ The per-keystroke helper filters those files. It does not gather sources again.
 The home contains, in Kind order:
 
 1. unanswered questions posted with `prelude ask`
-2. installed Agent launch rows
-3. live Agent Runs
-4. non-archived Skills
-5. up to the 15 newest visible Sessions
+2. non-archived Skills
+3. every visible Session
 
 Files, applications, commands, history, clipboard records, ports, processes,
 containers, settings, and search commands are gathered but do not appear on an
@@ -46,12 +44,15 @@ The root catalogue contains:
 
 - unanswered questions
 - Agent, Run and Skill inventory rows
+- every visible Session
 - scope commands such as `Past Conversations` and `Files & Folders`
 - every Quicklink, fixed and template alike
 
-Session and Config objects themselves are not in root search; their visible
-scope commands lead to `s:` and `cfg:`. History, clipboard rows, and `$PATH`
-commands require their scope.
+Config objects themselves are not in root search; its scope command leads to
+`cfg:`. History, clipboard rows, and `$PATH` commands require their scope.
+Sessions *are* searchable by typing — `s:` narrows to them rather than being
+the only way in — and `Item::band` keeps them below Skills and Agents, so a
+query still leads with the capability or agent that matches it.
 
 Local objects are the deliberate exception, in two tiers. Any ordinary query of
 at least two characters adds up to five matching applications, then up to ten

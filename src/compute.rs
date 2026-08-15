@@ -1842,15 +1842,21 @@ pub fn home_items(items: &[Item]) -> Vec<Item> {
 /// best ten filesystem matches. Fixed Quicklinks remain root commands even when
 /// their target happens to be a file or application.
 ///
-/// Sessions are the one kind held back: there are hundreds of them and `s:`
-/// owns them, on the same rule the home follows.
+/// Sessions are here too, and that is the change this paragraph exists for.
+/// They were held back because there are hundreds of them — which kept the
+/// catalogue small and made the launcher unable to answer its most ordinary
+/// question about them. Typing a project name found agents, skills and files
+/// and none of the conversations you had *in that project*; the fifteen on the
+/// home disappeared at the first keystroke, and `s:` was a prefix you had to
+/// know rather than a way to narrow. `Item::band` keeps them below Skill and
+/// Agent, so they extend the answer rather than displacing it.
 pub fn root_items(items: &[Item]) -> Vec<Item> {
     items
         .iter()
         .filter(|it| {
             (matches!(
                 it.kind,
-                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Search
+                Kind::Msg | Kind::Agent | Kind::Run | Kind::Skill | Kind::Session | Kind::Search
             ) && crate::archive::visible(it))
                 || it.is_quicklink()
                 || it.get("update") == "available"
@@ -3332,11 +3338,13 @@ mod tests {
         let order: Vec<String> = home_items(&pair).into_iter().map(|it| it.title).collect();
         assert_eq!(order, ["first", "second"]);
 
-        // A typed query searches the same inventory, minus the hundreds of
-        // old conversations that `s:` owns.
+        // A typed query searches the same inventory *and* the conversations.
+        // They used to be held back, which meant typing a project name found
+        // agents, skills and files but none of the sessions you had in that
+        // project — and the ones on the home vanished at the first keystroke.
         let root: Vec<String> = root_items(&rows).into_iter().map(|it| it.title).collect();
         assert!(root.contains(&"deploy".to_string()));
-        assert!(!root.contains(&"old".to_string()), "sessions have their own s: scope");
+        assert!(root.contains(&"old".to_string()), "a conversation is findable by typing");
     }
 
     #[test]

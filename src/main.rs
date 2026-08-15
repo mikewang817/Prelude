@@ -1046,7 +1046,10 @@ mod tests {
         assert!(home.iter().all(|i| matches!(i.kind, Kind::Skill | Kind::Session)));
         let root = root_items(&all);
         assert!(root.iter().any(|i| i.title == "Files & Folders"));
-        assert!(root.iter().all(|i| !matches!(i.kind, Kind::Session | Kind::Path | Kind::Clip | Kind::History)));
+        // Conversations are searchable by typing; the large private sources
+        // still are not — those are what `h:`, `c:` and `cmd:` own.
+        assert!(root.iter().any(|i| i.kind == Kind::Session));
+        assert!(root.iter().all(|i| !matches!(i.kind, Kind::Path | Kind::Clip | Kind::History)));
         let f = crate::compute::dynamic_rows_with("f", &all);
         assert_eq!(f.len(), 1, "an exact scope alias must not open global fuzzy search");
         assert_eq!(f[0].get("completion"), "f:");
