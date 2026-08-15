@@ -747,7 +747,6 @@ const CODEX_CONFIG_KEYS: &[&str] = &[
     "cwd",
     "model",
     "model provider",
-    "mcp servers",
     "feature flags enabled",
     "feature flag overrides",
 ];
@@ -1002,13 +1001,13 @@ pub fn evidence_lines(evidence: &ConfigEvidence) -> Vec<String> {
 /// summarises.
 pub fn summary(skills: &[Item], sessions: &[Item], runs: &[Item]) -> Vec<Item> {
     use std::collections::BTreeMap;
-    let mut per: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    let mut per: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut tally = |it: &Item| {
         for a in it.get("agent").split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let e = per.entry(a.to_string()).or_default();
             match it.kind {
                 Kind::Skill => e.0 += 1,
-                Kind::Session => e.2 += 1,
+                Kind::Session => e.1 += 1,
                 _ => {}
             }
         }
@@ -1019,7 +1018,7 @@ pub fn summary(skills: &[Item], sessions: &[Item], runs: &[Item]) -> Vec<Item> {
     crate::agent::installed()
         .into_iter()
         .map(|name| {
-            let (sk, mc, se) = per.get(name).copied().unwrap_or_default();
+            let (sk, se) = per.get(name).copied().unwrap_or_default();
             let own_runs: Vec<&Item> = runs.iter().filter(|run| run.get("agent") == name).collect();
             let waiting = own_runs.iter().filter(|run| run.get("state") == "waiting").count();
             let projects: Vec<&str> = own_runs
@@ -1046,7 +1045,6 @@ pub fn summary(skills: &[Item], sessions: &[Item], runs: &[Item]) -> Vec<Item> {
                 .title(name)
                 .fields([
                     format!("{sk} skills"),
-                    format!("{mc} mcp"),
                     format!("{se} sessions"),
                 ])
                 .put("agent", name)

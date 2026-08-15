@@ -504,6 +504,25 @@ const PROBES: &[Probe] = &[
         login: Login::CursorLine,
     },
     Probe { agent: "omp", version: &["omp", "--version"], login: Login::NoStatusCommand },
+    // The rest report a version and nothing this can read a login state from.
+    // `NoStatusCommand` is the honest answer for all of them until one is
+    // verified: a guess in either direction is worse than "cannot tell".
+    Probe { agent: "gemini", version: &["gemini", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "qwen", version: &["qwen", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "copilot", version: &["copilot", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "qoder", version: &["qoder", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "droid", version: &["droid", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "grok", version: &["grok", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "agy", version: &["agy", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "cline", version: &["cline", "--version"], login: Login::NoStatusCommand },
+    Probe {
+        agent: "mastracode",
+        version: &["mastracode", "--version"],
+        login: Login::NoStatusCommand,
+    },
+    Probe { agent: "amp", version: &["amp", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "kiro-cli", version: &["kiro-cli", "--version"], login: Login::NoStatusCommand },
+    Probe { agent: "kilo", version: &["kilo", "--version"], login: Login::NoStatusCommand },
 ];
 
 /// What a login probe concluded. `Unknown` is a first-class answer.

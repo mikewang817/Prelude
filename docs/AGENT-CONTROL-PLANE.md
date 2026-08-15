@@ -38,15 +38,44 @@ and redacted capability comparisons.
 `src/agent.rs::SPECS` is the one registry for invocation syntax, conventional
 settings paths, and capability flags.
 
-| Capability | Claude | Codex | pi | OpenCode | Kimi | Cursor | omp |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| detect executable and live Runs | yes | yes | yes | yes | yes | yes | yes |
-| native resume command | yes | yes | yes | yes | yes | yes | yes |
-| discover native Sessions | yes | yes | yes | no | yes | yes | yes |
-| native fork command | yes | yes | yes | no | no | no | no |
-| one-off non-interactive ask | yes | yes | yes | yes | yes | yes | yes |
-| use a Skill without installing it | yes | yes | yes | yes | yes | yes | yes |
-| effective-config evidence | auto-mode only | for current directory | none | for current directory | none | none | none |
+`agent::SPECS` holds nineteen CLIs — every one installed on the machine this
+was written on. Each entry carries only syntax read out of that CLI's own
+`--help`, and `resume`, `ask` and `fork` are all `Option`, so "no known form"
+is representable rather than invented. That matters more than breadth: a
+command assembled from a guessed flag looks right on the clipboard and fails
+after the launcher has closed.
+
+| | resume by id | non-interactive ask | fork | Sessions found |
+|---|---|---|---|---|
+| claude | `--resume ID` | `-p` | yes | yes |
+| codex | `resume ID` | `exec` | yes | yes |
+| pi | `--session ID` | `--print` | yes | yes |
+| omp | `--resume ID` | `-p` | — | yes |
+| kimi | `--session ID` | `--prompt` | — | yes |
+| cursor-agent | `--resume ID` | `-p` | — | yes |
+| opencode | `--session ID` | `run` | — | no, SQLite |
+| gemini | `-r ID` | `-p` | — | not yet used |
+| qwen | `-r ID` | `-p` | — | not yet used |
+| copilot | `--resume=ID` | `-p` | — | not yet used |
+| qoder | `-r ID` | `-p` | `--fork-session` | not yet used |
+| droid | `-r ID` | `exec` | — | not yet used |
+| agy | `--conversation ID` | `-p` | — | not yet used |
+| mastracode | `--thread ID` | `--prompt` | — | not yet used |
+| amp | `threads continue ID` | `-x` | — | not yet used |
+| grok | `-r ID` | — | — | not yet used |
+| cline | `--id ID` | — | — | not yet used |
+| kiro-cli | `chat --resume-id ID` | — | — | not yet used |
+| kilo | — | — | — | not yet used |
+
+"Sessions found" is about this machine, not the CLI: most of these keep no
+local conversation store because they have not been used yet, and a scanner
+cannot be written against a format nobody has produced. `kilo` offers only
+`--continue`, so a named conversation has nothing honest to hand over and
+`resume_cmd` falls back to the bare id rather than inventing a flag. The three
+without an ask have output-format flags that shape a session they do not start.
+
+Skills need none of this: a `SKILL.md` is read by name and path, so
+`skill_dirs` covers forty-odd CLIs on paths alone.
 
 Skills need none of this: a `SKILL.md` is read by name and path, so
 `skill_dirs` covers forty-odd CLIs while this table stays at seven. An Agent

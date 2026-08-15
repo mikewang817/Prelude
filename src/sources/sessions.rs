@@ -195,9 +195,18 @@ pub fn visible(session: &Item) -> bool {
     session.get("archived") != "true" || !session.get("active_run").is_empty()
 }
 
+/// What a Session row hands over, or the bare id when its Agent has no way to
+/// resume a named conversation.
+///
+/// The fallback is deliberately not a command. Several CLIs offer only
+/// `--continue` — the most recent session, no id — and inventing
+/// `<agent> --resume <id>` for those produces a line that looks right on the
+/// clipboard and fails once the launcher has closed, which is the failure this
+/// registry exists to prevent. The id is at least true, and it is what those
+/// CLIs' own session pickers ask for.
 fn resume_cmd(agent: &str, id: &str) -> String {
     crate::agent::get(agent)
-        .map(|spec| spec.resume(id))
+        .and_then(|spec| spec.resume(id))
         .unwrap_or_else(|| id.to_string())
 }
 
@@ -1508,7 +1517,7 @@ fn session_problems_in(
 
 /// The non-interactive invocation for an agent, if we know one.
 pub fn ask_cmd(agent: &str, prompt: &str) -> Option<Vec<String>> {
-    Some(crate::agent::get(agent)?.ask(prompt))
+    crate::agent::get(agent)?.ask(prompt)
 }
 
 /// Start a fresh agent session in a directory, optionally invoking a skill.

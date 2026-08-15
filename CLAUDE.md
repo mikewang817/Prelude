@@ -1444,6 +1444,19 @@ a notification fires — are pure functions pinned by tests: the bar is empty
 when there is nothing to say, and a run is announced once per stop,
 including a run first seen already quiet.
 
+**`Spec::resume`, `ask` and `fork` are all `Option`, and that is what makes
+breadth safe.** Nineteen CLIs are registered — every one installed here — and
+each entry carries only syntax read out of that CLI's own `--help`. The struct
+used to force a `resume` and an `ask` on every agent, so adding one meant
+inventing the missing form, and an invented flag is the exact failure this
+registry exists to prevent: it looks right on the clipboard and fails after the
+launcher has closed. `kilo` has only `--continue`, so it has no `resume` at all
+and `resume_cmd` falls back to the bare id; grok, cline and kiro-cli have no
+verified non-interactive form and offer no ask. Adding an agent still costs a
+doctor probe, because `diagnostics_cover_exactly_the_registered_agents` fails
+without one — which is what stops the registry outgrowing what Prelude can
+report on.
+
 **A session's Enter is its own agent's resume command, so breadth here means
 the registry rather than a path.** Skills became portable because a file can be
 read by anybody; a conversation cannot — `claude --resume` cannot open a codex
