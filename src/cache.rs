@@ -577,6 +577,54 @@ fn is_stale(since: Option<Duration>, ttl: u64) -> bool {
     since.map(|age| age.as_secs() >= ttl).unwrap_or(true)
 }
 
+/// How long a source has been waiting *past* the gap it asked for.
+///
+/// Lateness in seconds, not a multiple of the TTL. The multiple was tried
+/// first and measured still starving the thing it was written for: these TTLs
+/// span five seconds to five minutes, so as a ratio a `fleet` that is 85
+/// minutes old is 1020× overdue while an `update` of 88 minutes is 17×, and
+/// the short-TTL sources go on taking both slots exactly when every source is
+/// starved. Ratios rank by *impatience*, and a five-second source is
+/// permanently the most impatient thing in the list.
+///
+/// Absolute lateness asks the question the cap actually needs answered — who
+/// has been waiting longest for a turn — and it cannot be gamed by a small
+/// TTL, because a source that is refreshed on schedule never accumulates any.
+/// A source that has never answered has been waiting forever, which is also
+/// what a first run should mean.
+fn overdue(since: Option<Duration>, ttl: u64) -> f64 {
+    match since {
+        Some(age) => age.as_secs_f64() - ttl as f64,
+        None => f64::INFINITY,
+    }
+}
+
+/// Which of the sources wanting a refresh actually get one this launch.
+///
+/// The candidates used to be taken in the order `SLOW` happens to declare
+/// them, stopping at the cap — which is strict priority by array position,
+/// and strict priority starves. Measured on a machine that had been up an
+/// hour and a half: `ports`, `procs`, `dirs` and `sessions` have five-second
+/// TTLs and so are stale at *every* gather, they are the first four entries,
+/// and the cap is two. Everything from the fifth entry on had last refreshed
+/// eighty-three minutes earlier. `update` is sixth, so the automatic check
+/// this program documents as running twelve times an hour was running
+/// approximately never, and the only way to see a new release was to type
+/// `prelude update --check` — which bypasses this queue entirely and is
+/// exactly how the bug was reported.
+///
+/// Ordering by how long each has been waiting fixes it without a scheduler,
+/// because losing makes a source later: whatever keeps being passed over
+/// eventually outranks the five-second sources, refreshes, drops to zero, and
+/// hands the slots straight back. No state to persist, no rotation cursor to
+/// keep, and the cap still means what it says.
+fn refresh_order(mut due: Vec<(&'static str, f64)>, cap: usize) -> Vec<&'static str> {
+    // Descending, and `total_cmp` because `overdue` yields infinity for a
+    // source that has never run — which `partial_cmp` cannot order.
+    due.sort_by(|left, right| right.1.total_cmp(&left.1));
+    due.into_iter().take(cap).map(|(name, _)| name).collect()
+}
+
 /// A named source: what to call it in the cache, and how to gather it.
 type Source = (&'static str, fn() -> Vec<Item>);
 
@@ -737,15 +785,22 @@ pub fn gather() -> Vec<Item> {
         // the cost it avoids is a process spawn per stale source per launch.
         // Nothing here is authoritative and nothing here needs to be — a
         // process that spawns beyond the limit finds no slot and exits.
-        let mut spawned = 0;
-        for (name, _) in SLOW {
-            if spawned >= MAX_CONCURRENT_REFRESH {
-                break;
-            }
-            if stale(name) && !resting(name) && !lease_is_live(name) {
-                spawn_self(&["_refresh", name]);
-                spawned += 1;
-            }
+        //
+        // `last_refreshed` is read once per source and answers both questions
+        // — whether it is due, and how overdue — so ranking them costs a sort
+        // of seven floats and one fewer stat than testing them in order did.
+        let due: Vec<(&'static str, f64)> = SLOW
+            .iter()
+            .filter_map(|(name, _)| {
+                let ttl = refresh_ttl(name);
+                let since = last_refreshed(name);
+                let wanted =
+                    is_stale(since, ttl) && !resting(name) && !lease_is_live(name);
+                wanted.then(|| (*name, overdue(since, ttl)))
+            })
+            .collect();
+        for name in refresh_order(due, MAX_CONCURRENT_REFRESH) {
+            spawn_self(&["_refresh", name]);
         }
     });
     items.extend(timed("read ports", || read_cached("ports")));
@@ -1052,6 +1107,75 @@ mod tests {
 
     /// A refresh that fails leaves the cache untouched and therefore still
     /// stale, so without a rest the next gather spawns it again at once —
+    /// A source at the back of `SLOW` must not be starved by the ones in
+    /// front of it, which is what array order plus a hard cap produced: the
+    /// four five-second sources are the first four entries and are stale at
+    /// every gather, the cap is two, and `update` is sixth — measured at
+    /// eighty-six minutes since its last refresh against a five-minute TTL,
+    /// on a machine whose first four had refreshed two minutes earlier.
+    #[test]
+    fn the_most_overdue_source_refreshes_rather_than_the_earliest_listed() {
+        let ttl_fast = refresh_ttl("ports");
+        let ttl_update = refresh_ttl("update");
+
+        // The exact state that was on disk when this was reported.
+        let due = vec![
+            ("ports", overdue(Some(Duration::from_secs(6)), ttl_fast)),
+            ("procs", overdue(Some(Duration::from_secs(6)), ttl_fast)),
+            ("dirs", overdue(Some(Duration::from_secs(6)), ttl_fast)),
+            ("sessions", overdue(Some(Duration::from_secs(6)), ttl_fast)),
+            ("update", overdue(Some(Duration::from_secs(86 * 60)), ttl_update)),
+        ];
+        assert_eq!(
+            refresh_order(due, MAX_CONCURRENT_REFRESH)[0],
+            "update",
+            "the source that keeps losing has to eventually win, or it never runs"
+        );
+
+        // Lateness rather than a multiple of the TTL, which was the first
+        // attempt and measured still starving `update`. As a ratio a
+        // five-second source is permanently the most impatient thing here: a
+        // `fleet` that had just refreshed and gone stale again scored 5 while
+        // an 88-minute `update` scored 17, and one more gather put `fleet`
+        // back above it — which is the starvation, restated. In seconds late,
+        // the source that has actually been waiting wins.
+        let churning = vec![
+            ("fleet", overdue(Some(Duration::from_secs(30)), refresh_ttl("fleet"))),
+            ("update", overdue(Some(Duration::from_secs(88 * 60)), ttl_update)),
+        ];
+        assert_eq!(refresh_order(churning, 1), ["update"], "waited longest, goes first");
+
+        // Between two genuinely starved sources either order is fine and both
+        // get in; what must never happen is one of them being unreachable.
+        let both = vec![
+            ("fleet", overdue(Some(Duration::from_secs(85 * 60)), refresh_ttl("fleet"))),
+            ("update", overdue(Some(Duration::from_secs(88 * 60)), ttl_update)),
+        ];
+        assert_eq!(refresh_order(both, MAX_CONCURRENT_REFRESH).len(), 2);
+
+        // Having just run, it stands aside again — the slots go back to the
+        // sources that genuinely churn rather than sticking to the loser.
+        let after = vec![
+            ("ports", overdue(Some(Duration::from_secs(6)), ttl_fast)),
+            ("procs", overdue(Some(Duration::from_secs(6)), ttl_fast)),
+            ("update", overdue(Some(Duration::from_secs(0)), ttl_update)),
+        ];
+        assert_eq!(refresh_order(after, MAX_CONCURRENT_REFRESH), ["ports", "procs"]);
+
+        // Never having answered outranks any age, which is what a first run
+        // is: `f64::INFINITY`, so the comparison must be `total_cmp`.
+        let first_run = vec![
+            ("ports", overdue(Some(Duration::from_secs(3600)), ttl_fast)),
+            ("update", overdue(None, ttl_update)),
+        ];
+        assert_eq!(refresh_order(first_run, 1), ["update"]);
+
+        // And the cap is still a cap.
+        let all: Vec<(&str, f64)> =
+            SLOW.iter().map(|(n, _)| (*n, overdue(None, refresh_ttl(n)))).collect();
+        assert_eq!(refresh_order(all, MAX_CONCURRENT_REFRESH).len(), MAX_CONCURRENT_REFRESH);
+    }
+
     /// one broken agent CLI becoming a permanent background load.
     #[test]
     fn a_failing_source_is_asked_less_often_rather_than_more() {

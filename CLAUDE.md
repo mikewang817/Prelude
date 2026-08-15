@@ -734,6 +734,21 @@ not inherit a login shell's PATH, so `claude` can be missing there and present
 in every terminal on the machine. Treated as an honest empty, that wiped the
 person's MCP servers out of the panel and left nothing to say why.
 
+**Two refresh slots, and they go to whoever has waited longest.** The
+candidates used to be taken in `SLOW`'s declaration order, stopping at
+`MAX_CONCURRENT_REFRESH` — strict priority by array position, which starves
+the tail. Measured on a machine up ninety minutes: `ports`, `procs`, `dirs`
+and `sessions` have five-second TTLs, are the first four entries and are stale
+at *every* gather, so everything from the fifth on had last refreshed
+eighty-three minutes earlier. `update` is sixth, so the automatic check
+documented as running twelve times an hour ran approximately never, and the
+only way to learn about a release was to type `prelude update --check`, which
+bypasses this queue entirely — which is exactly how it was reported. Ranking
+by lateness needs no scheduler, because losing makes a source later. Lateness
+in *seconds past its own TTL*, not as a multiple of it: as a ratio a
+five-second source is permanently the most impatient thing in the list, and
+that version was measured still starving `update`.
+
 **One refresh per source, and a rest after a failure — both held by the
 kernel.** Every stale source used to spawn `_refresh` on every gather with
 nothing coordinating them, so three shells meant three processes running the
