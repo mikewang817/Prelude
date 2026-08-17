@@ -294,14 +294,12 @@ pub fn apps() -> Vec<Item> {
                 if !seen.insert(stem.clone()) {
                     continue;
                 }
-                let parent = path
-                    .parent()
-                    .map(|p| paths::tilde(&p.to_string_lossy()))
-                    .unwrap_or_default();
                 items.push(
                     Item::new(crate::openwith::app_command(&stem), Kind::App)
                         .title(stem)
-                        .sub(parent)
+                        // The bundle's own path, the same full-path context
+                        // every filesystem row shows.
+                        .sub(paths::tilde(&path.to_string_lossy()))
                         .put("path", path.to_string_lossy()),
                 );
             }

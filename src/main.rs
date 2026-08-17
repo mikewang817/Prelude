@@ -34,6 +34,7 @@ mod preview;
 mod probe;
 mod refresh;
 mod render;
+mod rewrite;
 mod runhere;
 mod secrets;
 mod settings;
@@ -233,6 +234,19 @@ fn main() -> ExitCode {
                 Err(e) => { eprintln!("prelude: {e}"); 2 }
             }
         }
+        // The rewrite engine without fzf in front of it, for the reason
+        // `settings add-root` exists: the guards, the endpoint resolution and
+        // the quality checks can then be exercised directly. It is also the
+        // form an agent can use — `prelude rewrite` reads stdin.
+        ["rewrite", "--models"] => rewrite_models(),
+        ["rewrite", "--key", key] => match rewrite::set_api_key(key) {
+            Ok(()) => {
+                println!("{}", if key.trim().is_empty() { "key removed" } else { "key saved" });
+                0
+            }
+            Err(e) => { eprintln!("prelude: {e}"); 2 }
+        },
+        ["rewrite", rest @ ..] => rewrite_cli(rest),
         // Non-interactive dump of the rendered list, for testing and for
         // diffing behaviour without standing up a terminal.
         ["_dump"] => {
@@ -297,7 +311,20 @@ fn main() -> ExitCode {
         // Ctrl+R inside the launcher: the query moves into `h:` and back out,
         // carrying the typed text both ways. See `compute::history_toggle`.
         ["_hist", q] => {
-            println!("change-query({})", fzf_action_arg(&compute::history_toggle(q)));
+            println!("{}", fzf_action_line("change-query", &compute::history_toggle(q)));
+            0
+        }
+        // An object chord accepts only where the focused row carries the
+        // object; everywhere else the empty transform is fzf's no-op and the
+        // key is inert. The marker rides the output queue the way
+        // `OPEN_ACTIONS` does, and `run_fzf` folds it back into a key name.
+        ["_objkey", which, line] => {
+            if let Some(marker) = render::parse_line(line)
+                .as_ref()
+                .and_then(|item| ui::objkey_marker(which, item))
+            {
+                println!("print({marker})+accept");
+            }
             0
         }
         // Tab completes the focused row where completion is what Enter would
@@ -306,7 +333,7 @@ fn main() -> ExitCode {
         // rather than teaching it a second meaning.
         ["_tab", line] => {
             if let Some(completion) = tab_completion(render::parse_line(line).as_ref()) {
-                println!("change-query({})", fzf_action_arg(completion));
+                println!("{}", fzf_action_line("change-query", completion));
             }
             0
         }
@@ -327,7 +354,7 @@ fn main() -> ExitCode {
                 // Search commands are Prelude's one-input equivalent of
                 // One-input argument form: stay open and put the provider or
                 // scope syntax in the box for the person to continue typing.
-                println!("change-query({})", it.get("completion"));
+                println!("{}", fzf_action_line("change-query", it.get("completion")));
                 return ExitCode::SUCCESS;
             }
             let ask = item
@@ -461,6 +488,8 @@ SETUP
                          --check asks now · --rollback puts the previous back
   prelude bench          measure candidate-gathering
   prelude build-translate  compile the Apple translation helper
+  prelude rewrite [text]   rewrite text as a clear English prompt (stdin if
+                         no text) · --models lists them · --key stores one
 ";
 
 const AUTO_PREVIEW_LABEL: &str = "Clipboard preview";
@@ -497,8 +526,20 @@ fn focus_preview(q: &str, item: Option<&item::Item>, automatic_is_open: bool) ->
     }
 }
 
-fn fzf_action_arg(value: &str) -> String {
-    value.replace('\\', "\\\\").replace(')', "\\)")
+/// One fzf action whose argument is taken verbatim to the end of the line.
+///
+/// fzf has no escape syntax inside `action(...)` — the man page's answer to
+/// an argument containing parentheses is a different delimiter, and the last
+/// of those, `action:arg`, consumes the rest of the string with no closing
+/// character at all. Backslash-escaping was tried first and measured doing
+/// the opposite of escaping: fzf keeps the backslash, so Ctrl+R on
+/// `git (wip)` put `h:git (wip\)` in the box — a query the person never
+/// typed, searching for a history line that cannot exist.
+///
+/// The catch the man page names — it must be the last action — is met by
+/// construction: the caller's action is the whole output.
+fn fzf_action_line(action: &str, value: &str) -> String {
+    format!("{action}:{value}")
 }
 
 /// What Tab may do to the focused row: complete it, or nothing.
@@ -516,24 +557,25 @@ fn focus(q: &str, line: &str, terminal_width: usize) -> i32 {
     let item = render::parse_line(line);
     let automatic_is_open = std::env::var("FZF_PREVIEW_LABEL")
         .is_ok_and(|label| label.trim() == AUTO_PREVIEW_LABEL);
-    let mut action = format!(
-        "change-footer({})",
-        fzf_action_arg(&footer_for_line(line, terminal_width)),
-    );
+    // The footer goes *last*, in the delimiter-free `action:arg` form, so its
+    // text needs no escaping — fzf has none, and the backslash workaround
+    // tried here landed in the rendered footer verbatim.
+    let mut action = String::new();
     match focus_preview(q, item.as_ref(), automatic_is_open) {
         FocusPreview::Keep => {}
         FocusPreview::ShowClipboardPreview => action.push_str(&format!(
-            "+change-preview-window({CLIPBOARD_PREVIEW_WINDOW})+show-preview\
-             +change-preview-label({AUTO_PREVIEW_LABEL})"
+            "change-preview-window({CLIPBOARD_PREVIEW_WINDOW})+show-preview\
+             +change-preview-label({AUTO_PREVIEW_LABEL})+"
         )),
         // `change-preview-window` without `hidden` makes a hidden pane visible.
         // It used to run after `hide-preview`, immediately undoing the hide and
         // producing the horizontal text pane shown in the bug report.
         FocusPreview::HideClipboardPreview => action.push_str(
-            "+change-preview-window(down,99%,wrap,border-top,hidden)\
-             +change-preview-label()",
+            "change-preview-window(down,99%,wrap,border-top,hidden)\
+             +change-preview-label()+",
         ),
     }
+    action.push_str(&fzf_action_line("change-footer", &footer_for_line(line, terminal_width)));
     println!("{action}");
     0
 }
@@ -668,9 +710,18 @@ fn dynamic(q: &str, path: &str, cols: usize, tw: Option<usize>) -> i32 {
         std::path::PathBuf::from(path)
     };
     if let Ok(t) = std::fs::read_to_string(list) {
-        print!("{t}");
-        if !t.ends_with('\n') {
-            println!();
+        // A query that exactly names a scope already printed that scope's row
+        // at the top, so the catalogue's own copy is dropped — the same
+        // "on screen once, as the row the name resolved to" rule
+        // `quicklink_with_neighbours` follows, checked on the payload `cmd`
+        // because the rendered line carries colour the query never typed.
+        let duplicate = compute::exact_scope_command(q)
+            .map(|item| format!("\"cmd\":{}", serde_json::to_string(&item.cmd).unwrap_or_default()));
+        for line in t.lines() {
+            if duplicate.as_deref().is_some_and(|marker| line.contains(marker)) {
+                continue;
+            }
+            println!("{line}");
         }
     }
     // Local objects supplement the launcher rather than taking it over: the
@@ -886,6 +937,116 @@ fn bench(json: bool) -> i32 {
 /// out for 100 columns on a 260-column terminal — two thirds of the window
 /// blank. Ask the other standard descriptors, then the controlling terminal
 /// itself, before giving up.
+/// `prelude rewrite [text…]`, reading stdin when given nothing.
+///
+/// Stdin is what makes it composable — `pbpaste | prelude rewrite` is the
+/// menu-bar "Convert Clipboard" without a menu bar, and an agent can pipe into
+/// it the same way. The rewrite goes to stdout and every warning to stderr, so
+/// a pipeline gets the text alone and a person still sees the doubts.
+fn rewrite_cli(args: &[&str]) -> i32 {
+    let mut profile_override = None;
+    let mut words: Vec<&str> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match *arg {
+            "--profile" | "--style" => match rest.next() {
+                Some(v) => profile_override = Some(v.to_string()),
+                None => {
+                    eprintln!("prelude: --profile needs a style name");
+                    return 2;
+                }
+            },
+            // Everything after the first ordinary word is content, so a
+            // sentence containing "--profile" survives — the same rule
+            // `bus::ask` follows for a question that mentions a flag.
+            other => {
+                words.push(other);
+                words.extend(rest.copied());
+                break;
+            }
+        }
+    }
+
+    let source = if words.is_empty() {
+        use std::io::Read;
+        let mut buffer = String::new();
+        if std::io::stdin().read_to_string(&mut buffer).is_err() {
+            eprintln!("prelude: could not read stdin");
+            return 2;
+        }
+        buffer
+    } else {
+        words.join(" ")
+    };
+
+    let mut cfg = rewrite::config();
+    if let Some(id) = profile_override {
+        match rewrite::profile(&id) {
+            Some(p) => {
+                cfg.system = p.system.to_string();
+                cfg.built_in = true;
+                cfg.profile_id = p.id.to_string();
+            }
+            None if id == rewrite::CUSTOM => {
+                cfg.system = rewrite::custom_system_prompt();
+                cfg.built_in = false;
+                cfg.profile_id = id;
+            }
+            None => {
+                let names: Vec<&str> = rewrite::PROFILES.iter().map(|p| p.id).collect();
+                eprintln!("prelude: unknown style {id:?} — one of {}", names.join(", "));
+                return 2;
+            }
+        }
+    }
+
+    match rewrite::rewrite(&source, &cfg) {
+        Ok(out) => {
+            println!("{}", out.text);
+            // Identical text through an identical configuration is answered
+            // from disk, which is otherwise indistinguishable from a model
+            // that keeps saying the same thing — the question somebody
+            // comparing two styles will actually ask.
+            if out.cached {
+                eprintln!("prelude: from the cache · same text, style and model");
+            }
+            for warning in &out.warnings {
+                eprintln!("prelude: check the rewrite — {warning}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("prelude: {e}");
+            2
+        }
+    }
+}
+
+fn rewrite_models() -> i32 {
+    let cfg = rewrite::config();
+    if cfg.provider == rewrite::Provider::Off {
+        eprintln!("prelude: rewriting is off — prelude settings set rewrite ollama");
+        return 2;
+    }
+    match rewrite::models(&cfg) {
+        Ok(names) if names.is_empty() => {
+            eprintln!("prelude: {} reported no models", cfg.url);
+            2
+        }
+        Ok(names) => {
+            for name in names {
+                let mark = if name == cfg.model { "*" } else { " " };
+                println!("{mark} {name}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("prelude: {e}");
+            2
+        }
+    }
+}
+
 pub fn term_width() -> usize {
     // Helpers launched by fzf have no terminal on stdout, but fzf exports its
     // exact inner dimensions. Prefer that over the shell's possibly stale
@@ -1051,8 +1212,25 @@ mod tests {
         assert!(root.iter().any(|i| i.kind == Kind::Session));
         assert!(root.iter().all(|i| !matches!(i.kind, Kind::Path | Kind::Clip | Kind::History)));
         let f = crate::compute::dynamic_rows_with("f", &all);
-        assert_eq!(f.len(), 1, "an exact scope alias must not open global fuzzy search");
+        assert_eq!(f.len(), 1, "the scope command leads the list");
         assert_eq!(f[0].get("completion"), "f:");
+        // A query that merely spells a scope's name is an ordinary root query:
+        // the scope row leads, and the catalogue, the local tiers and the web
+        // fallback all stay under it. Special would clear the room — typing
+        // `app` used to collapse the launcher to one `app:` row, hiding the
+        // folder named `App` on the keystroke that completed the word.
+        for name in ["app", "f", "docker", "set"] {
+            assert!(!crate::compute::is_special(name), "{name} must not clear the room");
+            assert!(
+                !crate::compute::fallback_rows_from(
+                    crate::compute::QUICKLINKS_DEFAULT,
+                    crate::compute::WEB_SEARCH_KEY,
+                    name,
+                )
+                .is_empty(),
+                "{name} keeps its web fallback like any other root query"
+            );
+        }
 
         assert_eq!(scope_query("c:"), Some((Scope::Clipboard, "")));
         assert_eq!(scope_query("H: git"), Some((Scope::History, "git")));
@@ -1331,6 +1509,17 @@ mod tests {
             assert_eq!(crate::ui::path_to_copy(&it), None, "{kind:?}");
             let bare = crate::ui::footer_for_item("Copy the command", Some(&it), true, 160);
             assert!(!bare.contains("Ctrl+Enter"), "{kind:?} advertises no object chord");
+            // And the chord itself is inert there, not merely unadvertised: as
+            // `--expect` keys these exited fzf on every row, so pressing one
+            // on an objectless row destroyed the typed query for nothing.
+            for (_, which, _) in crate::ui::OBJ_CHORDS {
+                assert_eq!(crate::ui::objkey_marker(which, &it), None, "{kind:?} {which}");
+            }
+        }
+        // Where the object exists, each chord answers with its own marker.
+        let folder = Item::new("cd /tmp/project", Kind::Dir).put("path", "/tmp/project");
+        for (_, which, marker) in crate::ui::OBJ_CHORDS {
+            assert_eq!(crate::ui::objkey_marker(which, &folder), Some(*marker), "{which}");
         }
         // A text clip has no payload on disk, so it carries no object either.
         let text_clip = Item::new("hello", Kind::Clip).put("clip_kind", "text");
@@ -2243,11 +2432,20 @@ mod tests {
 
         let clip = Item::new("rm -rf /tmp/x", Kind::Clip);
         let clip_ids = ids(&clip);
-        assert_eq!(clip_ids, ["tr_en", "tr_zh"]);
+        assert_eq!(&clip_ids[..2], ["tr_en", "tr_zh"]);
+        // Text is the only clip kind with anything to rewrite, and which
+        // rewrite entries appear depends on how far the setting is configured
+        // — so the shape is asserted rather than one machine's state.
+        assert!(
+            clip_ids[2..].iter().all(|id| id.starts_with("rw")),
+            "a text clip offers rewriting: {clip_ids:?}"
+        );
+        assert!(!clip_ids[2..].is_empty(), "…and offers it in every state");
 
         let image_clip = Item::new("'/tmp/image.png'", Kind::Clip)
             .put("clip_kind", "image")
             .put("path", "/tmp/image.png");
+        // No rewrite entries: there is no text here to rewrite.
         assert_eq!(ids(&image_clip), ["openit", "reveal-finder", "copyabs"]);
         assert!(!clip_ids.iter().any(|id| id == "run" || id == "runhere"));
 

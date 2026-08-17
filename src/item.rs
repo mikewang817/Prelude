@@ -19,6 +19,8 @@ pub enum Kind {
     /// A search provider or scoped search waiting for its argument.
     Search,
     Translate,
+    /// Text a model has rewritten into a clear English prompt.
+    Rewrite,
     Calc,
     Port,
     Proc,
@@ -75,6 +77,10 @@ impl Kind {
             Setting => 440,
             Search => 430,
             Translate => 420,
+            // Beside Translate, and for the same reason: both are a computed
+            // answer to text the person typed or picked, and neither is
+            // something the launcher found lying about on the machine.
+            Rewrite => 419,
             Calc => 400,
             Port => 150,
             Proc => 148,
@@ -110,6 +116,9 @@ impl Kind {
             Setting => (YELLOW, "setting"),
             Search => (CYAN, "search"),
             Translate => (CYAN, "translate"),
+            // The kind column names what a row *is*, and this one is a prompt.
+            // Not "rewrite", which is what Enter did to get here.
+            Rewrite => (BRIGHT_CYAN, "prompt"),
             Calc => (YELLOW, "="),
             Port => (RED, "port"),
             Proc => (RED, "process"),
@@ -164,7 +173,7 @@ impl Kind {
     pub fn all() -> &'static [Kind] {
         use Kind::*;
         &[
-            Msg, Agent, Run, Session, Config, Setting, Search, Translate, Calc, Port, Proc, Link, Find, Container, Snippet,
+            Msg, Agent, Run, Session, Config, Setting, Search, Translate, Rewrite, Calc, Port, Proc, Link, Find, Container, Snippet,
             Clip, Skill, Ssh, App, Sys, Script, History, Dir, Git, File, Path,
         ]
     }

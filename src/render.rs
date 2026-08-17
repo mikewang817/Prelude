@@ -153,11 +153,10 @@ pub fn render_general(items: &[Item], width: usize) -> String {
         let (color, label) = item.style();
 
         let detail = if filesystem && !item.is_quicklink() {
-            let parent = std::path::Path::new(item.get("path"))
-                .parent()
-                .map(|parent| crate::paths::tilde(&parent.to_string_lossy()))
-                .filter(|parent| !parent.is_empty())
-                .unwrap_or_else(|| item.subtitle.clone());
+            // The object's own complete path, the same rule `render_files`
+            // follows: parent-only context read `App · ~` on the row for
+            // `~/App`, which said least exactly where it mattered most.
+            let location = crate::paths::tilde(item.get("path"));
             let tags = item
                 .get("tags")
                 .split('\u{1e}')
@@ -166,12 +165,12 @@ pub fn render_general(items: &[Item], width: usize) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             if tags.is_empty() {
-                dtrunc_middle(&flatten(&parent), detail_width)
+                dtrunc_middle(&flatten(&location), detail_width)
             } else {
                 let tag_budget = (detail_width * 45 / 100).max(8).min(detail_width);
                 let tag_text = format!(" · {}", dtrunc(&tags, tag_budget.saturating_sub(3)));
-                let parent_width = detail_width.saturating_sub(dwidth(&tag_text));
-                format!("{}{}", dtrunc_middle(&flatten(&parent), parent_width), tag_text)
+                let location_width = detail_width.saturating_sub(dwidth(&tag_text));
+                format!("{}{}", dtrunc_middle(&flatten(&location), location_width), tag_text)
             }
         } else {
             let context = if item.fields.is_empty() {
@@ -278,11 +277,15 @@ pub fn render_files(items: &[Item], width: usize) -> String {
             .filter(|name| !name.is_empty())
             .unwrap_or(&item.title);
         let title = dtrunc(&flatten(title), tw);
-        let parent = std::path::Path::new(path)
-            .parent()
-            .map(|parent| crate::paths::tilde(&parent.to_string_lossy()))
-            .filter(|parent| !parent.is_empty())
-            .unwrap_or_else(|| item.subtitle.clone());
+        // The object's own complete path, not its parent. A parent-only
+        // context put `· ~` beside the row for `~/App` — the one folder its
+        // context column said least about — and left eight rows all titled
+        // `app` telling the reader to join two columns in their head.
+        let location = if path.is_empty() {
+            item.subtitle.clone()
+        } else {
+            crate::paths::tilde(path)
+        };
         let tag_text = if path_width >= 16 && !item.get("tags").is_empty() {
             let tags = item
                 .get("tags")
@@ -296,8 +299,8 @@ pub fn render_files(items: &[Item], width: usize) -> String {
         } else {
             String::new()
         };
-        let parent_width = path_width.saturating_sub(dwidth(&tag_text));
-        let parent = dtrunc_middle(&flatten(&parent), parent_width);
+        let location_width = path_width.saturating_sub(dwidth(&tag_text));
+        let location = dtrunc_middle(&flatten(&location), location_width);
         let (color, label) = item.style();
 
         out.push_str(&title);
@@ -305,7 +308,7 @@ pub fn render_files(items: &[Item], width: usize) -> String {
         out.push_str(color);
         out.push_str(&pad_to(label, lw, true));
         out.push_str(RESET);
-        out.push_str(&format!("{DIM} · {parent}{tag_text}{RESET}"));
+        out.push_str(&format!("{DIM} · {location}{tag_text}{RESET}"));
         out.push(SEP);
         out.push_str(&serde_json::to_string(item).unwrap_or_default());
         out.push('\n');
@@ -466,8 +469,12 @@ mod tests {
         assert!(positions.iter().all(|position| *position == positions[0]), "{positions:?}");
     }
 
+    /// The context column is the object's **complete** path, requested after
+    /// the parent-only form put `· ~` beside the row for `~/App` — the one
+    /// folder its context said least about. A long path still loses its
+    /// middle before either useful end is discarded.
     #[test]
-    fn file_search_spends_space_on_the_filename_and_middle_truncates_its_parent() {
+    fn file_search_spends_space_on_the_filename_and_shows_the_complete_path() {
         let filename = "CN115131558A_complete_name.md";
         let path = crate::paths::home()
             .join("App/a-very-long-container-name/another-long-project-name/source/deep/parent")
@@ -475,12 +482,23 @@ mod tests {
         let item = Item::new(path.to_string_lossy(), Kind::Find)
             .title(filename)
             .put("path", path.to_string_lossy().into_owned());
-        let rendered = render_files(&[item], 120);
+        let rendered = render_files(&[item], 160);
         let visible = rendered.split(super::SEP).next().unwrap();
         assert!(visible.contains(filename), "the filename had room but was cut: {visible}");
         assert!(visible.contains("~/App/"), "the path root is useful context: {visible}");
-        assert!(visible.contains("..."), "a long parent should lose its middle: {visible}");
-        assert!(visible.contains("/deep/parent"), "keep the directory nearest the file: {visible}");
-        assert_eq!(visible.matches(filename).count(), 1, "the final column is the parent, not the filename again");
+        assert!(visible.contains("..."), "a long path should lose its middle: {visible}");
+        assert!(
+            visible.contains(&format!("/{filename}")),
+            "the path column ends in the object itself, so it reads as one complete path: {visible}"
+        );
+
+        // A short path arrives whole: the row for `~/App` says `~/App`, not `~`.
+        let folder = Item::new("cd /Users/x/App", Kind::Find)
+            .title("App")
+            .put("path", "/Users/x/App")
+            .put("index_kind", "folder");
+        let rendered = render_files(&[folder], 120);
+        let visible = rendered.split(super::SEP).next().unwrap();
+        assert!(visible.contains("/Users/x/App"), "{visible}");
     }
 }

@@ -219,7 +219,24 @@ pub fn hints() -> &'static str {
 /// start of a field rather than as a keypress. And not Ctrl+[, which is 0x1b:
 /// that *is* Escape, the same byte, so binding it would take away the key
 /// that means "back" at every level.
-const EXPECT: &str = "ctrl-x,ctrl-k,ctrl-g,ctrl-],ctrl-y";
+///
+/// Only the two keys that act on *every* row are `--expect` keys. The three
+/// object chords used to be here too, and an `--expect` key cannot be
+/// conditional: fzf exits on it whatever the row, so pressing Ctrl+Enter on a
+/// history entry — a row with no object, where the footer advertised nothing —
+/// tore the whole launcher down and rebuilt it empty, deleting the typed
+/// query. They are transforms now, on Tab's precedent: applicable rows print
+/// a marker and accept, everything else is inert.
+const EXPECT: &str = "ctrl-x,ctrl-k";
+
+/// The three object chords, as (fzf key, `_objkey` name, output marker).
+/// The marker rides fzf's output queue exactly as `OPEN_ACTIONS` does, and
+/// `run_fzf` folds it back into the key name so `search` reads one vocabulary.
+pub const OBJ_CHORDS: &[(&str, &str, &str)] = &[
+    ("ctrl-g", "reveal", "prelude:reveal-object"),
+    ("ctrl-]", "terminal", "prelude:terminal-there"),
+    ("ctrl-y", "copy-path", "prelude:copy-path"),
+];
 
 /// How `→` says "open the action panel" without being an `--expect` key.
 ///
@@ -247,6 +264,10 @@ pub fn expects(key: &str) -> bool {
 
 pub struct FzfOut {
     pub key: String,
+    /// The query as it stood when fzf exited, from `--print-query`. Empty
+    /// when the flag was not passed — and on abort, where fzf prints nothing
+    /// at all, not even the query line.
+    pub query: String,
     pub item: Option<Item>,
     /// The selected line exactly as it was fed in, which is the only thing
     /// that can be found again in the feed. A parsed `Item` cannot: rendering
@@ -363,10 +384,19 @@ mod cursor_tests {
         // The first launch is untouched: `--sync` would hold the finder until
         // the whole feed is read, and that is the launch the budget is kept
         // against.
-        assert_eq!(with_cursor(&args, None), args);
+        assert_eq!(with_cursor(&args, None, None), args);
         assert_eq!(
-            with_cursor(&args, Some(5)),
+            with_cursor(&args, Some(5), None),
             vec!["--ansi", "--sync", "--bind", "start:pos(5)"],
+        );
+        // A typed query is the other half of that state. It comes back as
+        // `--query` plus the same `_bind` transform every keystroke runs, and
+        // it wins over `pos`: with a query the visible list was `_dynamic`'s,
+        // where a home-feed position would be a spot in the wrong list.
+        let resume = ("clau".to_string(), "transform:prelude _bind".to_string());
+        assert_eq!(
+            with_cursor(&args, Some(5), Some(&resume)),
+            vec!["--ansi", "--query=clau", "--bind", "start:transform:prelude _bind"],
         );
     }
 }
@@ -411,8 +441,24 @@ fn payload_of(line: &str) -> Option<&str> {
 /// `load` would be the other candidate and is the wrong one: it fires again on
 /// every `reload`, so the cursor would be dragged back here each time a
 /// keystroke rebuilt the list.
-fn with_cursor(args: &[String], position: Option<usize>) -> Vec<String> {
+/// Re-open the list where the person left it: cursor, or query.
+///
+/// The two restorations are exclusive. With no query, the row is found in the
+/// static home feed and the cursor returns to it. With a typed query, the row
+/// lives in a list only `_dynamic` can rebuild, so the query is put back and
+/// `start` runs the same `_bind` transform every keystroke runs — without it
+/// fzf would filter the *home* feed by the restored query, which is the wrong
+/// list wearing the right words. `--sync` stays with `pos` alone: it exists
+/// to keep `start` from firing before the feed is read, and the reload path
+/// replaces the feed anyway.
+fn with_cursor(args: &[String], position: Option<usize>, resume: Option<&(String, String)>) -> Vec<String> {
     let mut args = args.to_vec();
+    if let Some((query, reload)) = resume {
+        args.push(format!("--query={query}"));
+        args.push("--bind".into());
+        args.push(format!("start:{reload}"));
+        return args;
+    }
     if let Some(position) = position {
         args.push("--sync".into());
         args.push("--bind".into());
@@ -428,7 +474,13 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
     let modes: Vec<Vec<String>> = vec![vec![]];
     let _ = cols;
 
-    let mut last = FzfOut { key: String::new(), item: None, line: None, failed: true, stderr: String::new() };
+    let mut last = FzfOut { key: String::new(), query: String::new(), item: None, line: None, failed: true, stderr: String::new() };
+    // stdout's shape follows the flags, pinned by experiment against fzf
+    // 0.74: with `--print-query` the query is the first line, with `--expect`
+    // the key is the next, `print(...)` lines follow, then the selection. On
+    // abort fzf prints nothing at all — not even the query line.
+    let has_query = args.iter().any(|arg| arg == "--print-query");
+    let has_expect = args.iter().any(|arg| arg.starts_with("--expect"));
     for mode in modes {
         let mut cmd = Command::new("fzf");
         cmd.args(&args).args(&mode)
@@ -453,23 +505,43 @@ pub fn run_fzf(feed: &str, args: Vec<String>, cols: usize) -> FzfOut {
             if env_flag("PRELUDE_DEBUG") {
                 eprintln!("prelude: fzf mode {mode:?} failed: {}", stderr.trim());
             }
-            last = FzfOut { key: String::new(), item: None, line: None, failed: true, stderr };
+            last = FzfOut { key: String::new(), query: String::new(), item: None, line: None, failed: true, stderr };
             continue;
         }
         let mut lines = stdout.split('\n');
-        let key = lines.next().unwrap_or("").trim().to_string();
-        let line = lines.find(|l| l.contains(SEP)).map(str::to_string);
+        let query = if has_query {
+            lines.next().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+        let key = if has_expect {
+            lines.next().unwrap_or("").trim().to_string()
+        } else {
+            String::new()
+        };
+        // Everything after the query and key lines: `print` output and the
+        // selection, in whatever order fzf chose.
+        let rest: Vec<&str> = lines.collect();
+        let line = rest.iter().find(|l| l.contains(SEP)).map(|l| l.to_string());
         let item = line.as_deref().and_then(render::parse_line);
         // `→` is a binding rather than an `--expect` key, so it announces
         // itself on the output queue. Scanned for rather than read from a
         // fixed line: `print` and the selection share one stream and their
-        // order is fzf's business, not ours.
-        let key = if stdout.lines().any(|l| l.trim() == OPEN_ACTIONS) {
+        // order is fzf's business, not ours. The object chords ride the same
+        // queue for the same reason. Scanned in `rest`, never the whole
+        // stdout: `--print-query` puts the typed text on the first line, and
+        // a person who types a marker's own words must not trigger its key.
+        let key = if rest.iter().any(|l| l.trim() == OPEN_ACTIONS) {
             "ctrl-k".to_string()
+        } else if let Some((chord, _, _)) = OBJ_CHORDS
+            .iter()
+            .find(|(_, _, marker)| rest.iter().any(|l| l.trim() == *marker))
+        {
+            chord.to_string()
         } else {
             key
         };
-        return FzfOut { key, item, line, failed: false, stderr };
+        return FzfOut { key, query, item, line, failed: false, stderr };
     }
     last
 }
@@ -532,6 +604,10 @@ pub fn search() -> i32 {
     let mut args = base_args("⌕ ", " Prelude ", Some(&footer_for("Select", cols)));
     args.push(format!("--header={}", hints()));
     args.push(format!("--expect={EXPECT}"));
+    // The query is part of the state a modal must hand back. Without it, ^K
+    // then Esc landed on the home screen with the typed text gone — "back one
+    // level" that quietly took two.
+    args.push("--print-query".into());
     args.push("--bind".into());
     args.push(format!(
         "change:transform:{} _bind {{q}} {} {cols} {tw}",
@@ -590,6 +666,14 @@ pub fn search() -> i32 {
     args.push("esc:transform:[ -n {q} ] && echo clear-query || echo abort".into());
     args.push("--bind".into());
     args.push(format!("ctrl-o:execute({} _runhere {{2}})", shq(&me)));
+    // The object chords act only where the focused row carries the object,
+    // and are inert everywhere else — Tab's precedent. As `--expect` keys
+    // they exited fzf on every row, which on an objectless one meant the
+    // typed query and the cursor were destroyed for nothing.
+    for (chord, which, _) in OBJ_CHORDS {
+        args.push("--bind".into());
+        args.push(format!("{chord}:transform:{} _objkey {which} {{2}}", shq(&me)));
+    }
     // The key that used to be history search still is: pressed *inside* the
     // launcher it moves the query into `h:`, carrying whatever was typed, and
     // pressed again it carries the text back out. Ctrl+R twice at a shell is
@@ -619,20 +703,31 @@ pub fn search() -> i32 {
         crate::refresh::keep_current(socket, widths, tw, cols);
     }
 
+    // The same `_bind` transform every keystroke runs, reused verbatim at
+    // `start` when a query is being restored, so the rebuilt list cannot
+    // disagree with the one typing would have produced.
+    let resume_reload = format!(
+        "transform:{} _bind {{q}} {} {cols} {tw}",
+        shq(&me),
+        shq(&static_path.to_string_lossy())
+    );
     let mut restore: Option<usize> = None;
+    let mut resume: Option<(String, String)> = None;
     loop {
-        let out = run_fzf(&home_feed, with_cursor(&args, restore), cols);
+        let out = run_fzf(&home_feed, with_cursor(&args, restore, resume.as_ref()), cols);
         if out.failed {
             let msg = out.stderr.trim().lines().last().unwrap_or("").to_string();
             eprintln!("prelude: fzf could not start{}", if msg.is_empty() { String::new() } else { format!(": {msg}") });
             return 2;
         }
         // Every `continue` below is a return *to this list* from something
-        // modal, so the cursor belongs where it was rather than back at the
-        // top. Recorded here rather than at each of the six sites: they all
-        // mean the same thing, and the next one added would otherwise have to
-        // remember to say so.
+        // modal, so the cursor — and the typed query — belong where they
+        // were rather than back at a blank home. Recorded here rather than at
+        // each of the six sites: they all mean the same thing, and the next
+        // one added would otherwise have to remember to say so.
         restore = out.line.as_deref().and_then(|line| position_in(&home_feed, line));
+        resume = (!out.query.trim().is_empty())
+            .then(|| (out.query.clone(), resume_reload.clone()));
         let Some(item) = out.item else { return 130 };
 
         match out.key.as_str() {
@@ -692,6 +787,23 @@ pub fn search() -> i32 {
             _ => return apply_default(&item),
         }
     }
+}
+
+/// Whether an object chord applies to this row, answered as the marker the
+/// `_objkey` transform prints before accepting — or `None`, which the
+/// transform turns into fzf's no-op and the person feels as an inert key.
+///
+/// The same three predicates the footer uses to decide what to advertise, so
+/// a chord can never fire on a row whose footer said nothing about it.
+pub fn objkey_marker(which: &str, item: &Item) -> Option<&'static str> {
+    let (_, _, marker) = OBJ_CHORDS.iter().find(|(_, name, _)| *name == which)?;
+    let applies = match which {
+        "reveal" => revealable_path(item),
+        "terminal" => terminal_directory(item).is_some(),
+        "copy-path" => path_to_copy(item).is_some(),
+        _ => false,
+    };
+    applies.then_some(*marker)
 }
 
 /// Whether Enter should hand this row to Finder rather than to the
@@ -931,6 +1043,30 @@ fn act(item: &Item, verb: crate::defaults::Verb) -> i32 {
             emit("INSERT", &format!("cd {}", shq(d)));
         }
         EditSetting => return crate::settings::edit(item),
+        // The one action here that waits on a model, so it says it is working:
+        // a launcher that goes still for four seconds has, as far as anyone
+        // watching can tell, done nothing.
+        Rewrite => {
+            let (source, cfg) = crate::rewrite::for_item(item);
+            eprintln!("rewriting with {} …", cfg.model);
+            match crate::rewrite::rewrite(&source, &cfg) {
+                // Copy-and-close, the same contract every other row ends on.
+                Ok(out) if out.warnings.is_empty() => emit("INSERT", &out.text),
+                // Both halves matter, and `MSG` is terminal, so the clipboard
+                // is written here rather than by the parent. A rewrite that
+                // dropped `Sources/App.swift` reads perfectly well and there is
+                // nothing left to compare it against once the panel has gone —
+                // this is the only moment the suspicion is worth anything.
+                Ok(out) => {
+                    copy(&out.text);
+                    note(&format!("copied · check it: {}", out.warnings.join("; ")));
+                }
+                Err(e) => {
+                    note(&e);
+                    return 2;
+                }
+            }
+        }
     }
     0
 }
@@ -1047,7 +1183,7 @@ pub fn prompt_line_initial(label: &str, initial: &str) -> Option<String> {
     if out.failed {
         return None;
     }
-    let line = out.key.trim().to_string();
+    let line = out.query.trim().to_string();
     if line.is_empty() { None } else { Some(line) }
 }
 

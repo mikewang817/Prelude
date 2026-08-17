@@ -60,6 +60,7 @@ With the default **per kind** setting:
 | URL / Quicklink result | open in the default browser |
 | newer release available | download, verify, install, and close the panel |
 | Calculator / conversion / translation | copy the result |
+| prompt rewrite (`p:`) | send the text, copy the rewrite, close |
 | Prelude setting | carry out the setting-specific edit |
 | clipboard record | hand its text or payload path back to the surface |
 | History, script, `$PATH`, snippet, SSH, container, Git, port, process, system command | hand over the command for review |
@@ -116,7 +117,9 @@ and a prompt in `~/.claude/projects/…` answers nothing.
 
 The copy chord hands plain, unescaped POSIX text to the clipboard and closes
 Prelude. Rows with no object of their own — history, agents, `$PATH` binaries,
-links, text clips — advertise and perform none of the three, and a Setting is
+links, text clips — advertise and perform none of the three: the chord is
+inert there, leaving the query and cursor exactly where they were, rather than
+closing and reopening the launcher. A Setting is
 deliberately excluded although it carries a path: its backing file belongs in
 Details, and `set:` is a form whose `←`/`→` controls must keep the footer.
 `Ctrl+K` exposes the same named operations and remains the fallback outside
@@ -405,6 +408,15 @@ Snippets expand `{{name}}` to visible `<name>` placeholders before handoff.
   payload and copy the payload path.
 - Translation: copy the translated result by default; the action panel can copy
   the original.
+- Prompt rewrite: the `p:` row states the style, the model and the destination
+  and does nothing until Enter, which sends the text and copies what comes
+  back. A text clip carries the same verbs in its own panel. The alternatives
+  copy the original, run the same text through another style *once* without
+  changing the setting, and choose a model by asking the endpoint. When the
+  result loses a technical literal, collapses, or opens with an assistant
+  preface, it is still copied and the doubt is stated — there is no window left
+  to compare it in. Text matching `secrets::looks_secret` is refused rather
+  than sent, and `set: rewrite` `off` prevents the request being built at all.
 - Calculator/conversion: copy the result by default; the opposite inserts or
   copies it according to the surface, with no extra panel rows.
 

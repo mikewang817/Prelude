@@ -473,6 +473,17 @@ pub fn text(it: &Item) -> String {
             }
         }
         Kind::Clip => out.push(it.get("full").to_string()),
+        // The source in full, because the row can only show its first line and
+        // the whole of it is what would be sent. What comes back is not here to
+        // be previewed: no request happens until Enter.
+        Kind::Rewrite => {
+            kv(&mut out, "profile", it.get("rw_profile_name"));
+            kv(&mut out, "model", it.get("rw_model"));
+            kv(&mut out, "endpoint", it.get("rw_where"));
+            out.push(String::new());
+            out.push(format!("{DIM}source{RESET}"));
+            out.extend(it.get("rw_source").lines().map(str::to_string));
+        }
         Kind::App => kv(&mut out, "path", &tilde(it.get("path"))),
         Kind::Link => kv(&mut out, "url", it.get("url")),
         Kind::Search => {

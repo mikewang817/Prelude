@@ -20,6 +20,33 @@ fn a(id: &'static str, label: impl Into<String>, sub: impl Into<String>) -> Act 
 }
 
 
+/// The rewrite entries any text-bearing row gets.
+///
+/// One entry per style would be three rows saying the same verb with a
+/// different noun, and `a` takes a `&'static str` id, so the styles go behind
+/// one chooser — the same shape `with_options` uses for a skill that exists in
+/// four agents.
+fn rewrite_actions(it: &Item) -> Vec<Act> {
+    let cfg = crate::rewrite::config();
+    if cfg.provider == crate::rewrite::Provider::Off {
+        return vec![a("rw_setup", "Set up prompt rewriting…", "off")];
+    }
+    if cfg.model.trim().is_empty() {
+        return vec![a("rw_model", "Choose a rewrite model…", "none chosen yet")];
+    }
+    let style = crate::rewrite::profile(&cfg.profile_id)
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| "Custom".to_string());
+    let mut v = Vec::new();
+    // On a Rewrite row Enter already is this, and the panel states Enter above.
+    if it.kind != Kind::Rewrite {
+        v.push(a("rw", "Rewrite as an English prompt", style.clone()));
+    }
+    v.push(a("rw_style", "Rewrite in another style…", style));
+    v.push(a("rw_model", "Choose a rewrite model…", cfg.model));
+    v
+}
+
 /// The agents a per-agent verb can be pointed at, as the ids `apply` takes.
 ///
 /// One row can stand for several things — a skill merged across four agents
@@ -330,10 +357,24 @@ pub fn actions_for(it: &Item, surface: crate::defaults::Surface) -> Vec<Act> {
             a("reveal-finder", "Reveal image in Finder", it.get("path")),
             a("copyabs", "Copy image path", it.get("path")),
         ],
-        Kind::Clip => vec![
-            a("tr_en", "Translate to English", ""),
-            a("tr_zh", "Translate to Chinese", ""),
-        ],
+        // Text clips only, which is the same line `tr_en` already draws: a
+        // filenames list and an image have nothing to rewrite.
+        Kind::Clip => {
+            let mut v = vec![
+                a("tr_en", "Translate to English", ""),
+                a("tr_zh", "Translate to Chinese", ""),
+            ];
+            v.extend(rewrite_actions(it));
+            v
+        }
+        // Enter rewrites it with the standing style, so what is left is the
+        // original, the other styles, and the two settings that decide where
+        // the text goes.
+        Kind::Rewrite => {
+            let mut v = vec![a("rw_src", "Copy the original", it.get("rw_source"))];
+            v.extend(rewrite_actions(it));
+            v
+        }
         Kind::Snippet => vec![
             a("editsnips", "Edit snippets file", crate::paths::config().join("snippets.toml").to_string_lossy()),
             a("copy", "Copy raw", ""),
@@ -1021,6 +1062,37 @@ pub fn apply(id: &str, it: &Item) -> i32 {
             }
         }
         "tr_src" => ui::copy(it.get("source")),
+        "rw_src" => ui::copy(it.get("rw_source")),
+        // The standing style, and the same code path Enter takes on a `p:`
+        // row: one place decides what a rewrite is.
+        "rw" => return ui::perform(it, crate::defaults::Default_::Act(crate::defaults::Verb::Rewrite)),
+        "rw_style" => {
+            let cfg = crate::rewrite::config();
+            let mut choices: Vec<(String, String, String)> = crate::rewrite::PROFILES
+                .iter()
+                .map(|p| {
+                    let note = if p.id == cfg.profile_id { "current" } else { p.desc };
+                    (p.id.to_string(), p.name.to_string(), note.to_string())
+                })
+                .collect();
+            choices.push((
+                crate::rewrite::CUSTOM.to_string(),
+                "Custom".to_string(),
+                "your own system prompt".to_string(),
+            ));
+            let Some(chosen) = pick_one(" rewrite in which style ", &choices) else {
+                return 130;
+            };
+            // Once, for this row — the standing preference is not touched,
+            // because "try the other style on this one thing" is the question
+            // being asked, and answering it by changing a setting is how a
+            // person ends up with a preference they did not mean to make.
+            let mut once = it.clone();
+            once.data.insert("rw_profile".into(), chosen);
+            return ui::perform(&once, crate::defaults::Default_::Act(crate::defaults::Verb::Rewrite));
+        }
+        "rw_model" => return crate::settings::adjust_named("rewrite_model", "right"),
+        "rw_setup" => return crate::settings::adjust_named("rewrite", "right"),
         "default" => return ui::apply_default(it),
         "secondary" => {
             if let Some(d) = crate::defaults::on_secondary(it, crate::defaults::surface()) {

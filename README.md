@@ -68,6 +68,33 @@ Agents can also ask you things. One that reaches a decision it should not make
 alone runs `prelude ask` and waits; the question arrives at the top of your
 panel, and you answer it there.
 
+## Write the prompt in your own language
+
+`p:` turns text into a clear English prompt, faithfully — every constraint,
+negation, question and uncertainty preserved, and every path, flag, number and
+backticked literal left exactly as written. Copy something and press `p:` with
+nothing typed and the clipboard is the subject; type after it and that is. The
+result goes on the clipboard, so `Ctrl+V` puts it wherever you were going.
+
+```text
+p:                        rewrite what you just copied
+p: 先运行 npm test，失败再改代码    or whatever you type here
+```
+
+It is off in the sense that matters until you choose a model: `set: rewrite`
+picks the service, and `→` on the model row asks the endpoint what it has
+rather than making you type a name. The default service is Ollama on this
+machine, so nothing leaves it. Three styles ship — a faithful multilingual
+rewrite, plain American English, and a tightened coding task — plus your own,
+and `Ctrl+K` tries another one on the row in front of you without changing the
+setting.
+
+Prelude checks the result mechanically before handing it over: a rewrite that
+lost `Sources/App.swift`, collapsed to a third of the length, or opened with
+"Sure, here is" is copied *and* called out, because once the panel has closed
+there is nothing left to compare it against. `prelude rewrite` is the same
+engine at a shell, and reads stdin.
+
 ## Everything else
 
 Apps, files, clipboard history, shell history, saved keywords, calculations,
@@ -90,6 +117,12 @@ finding out by opening it.
 - The network is reached only when asked. The one exception is the update check:
   at most twelve times an hour, unauthenticated, sending no identifier, and
   switched off in `set:` like everything else.
+- `p:` sends the text you point it at to whichever model you configured, and
+  nowhere else. On the default setting that is Ollama on this machine, so
+  nothing leaves it; pointing `set: rewrite` at an OpenAI-compatible endpoint
+  means your text goes to that endpoint, and the row says so before you press
+  Enter. Text that looks like it holds a credential is refused rather than
+  sent. `off` is a real off switch.
 - Secret-looking history, clipboard text, messages, tags and exported
   transcripts are filtered or redacted.
 - Deletion goes through the Trash and says where it put things. Irreversible

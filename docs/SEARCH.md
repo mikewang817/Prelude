@@ -56,9 +56,15 @@ query still leads with the capability or agent that matches it.
 
 Local objects are the deliberate exception, in two tiers. Any ordinary query of
 at least two characters adds up to five matching applications, then up to ten
-matching files or folders; exact `f` still opens the longer `f:` view, and
-`app:` still lists every installed application. Both tiers sit below the
+matching files or folders; `f:` opens the longer view, and `app:` still lists
+every installed application. Both tiers sit below the
 catalogue, so an Agent or a Quicklink keyword still leads its own name.
+
+A query that exactly spells a scope's name — `f`, `app`, `docker` — leads with
+that scope command and keeps everything else: the catalogue, both local tiers,
+and the web fallback stay underneath. It used to collapse the list to the one
+scope row, which hid the folder named `App` on the keystroke that completed
+the word.
 Applications sit above files because between two objects of one name, the
 application is what a launcher is usually being asked for — `Chrome` means the
 browser far more often than it means an icon inside somebody's `node_modules`.
@@ -68,11 +74,12 @@ Files accept a forgiving subsequence; applications do not, because their block
 is printed first and a stretched match would otherwise outrank a file whose
 name the query actually spells.
 
-Local matching uses the object's own name and Finder tags. A parent path is
-shown only as context and does not make a child match. Thus `OpenGhostty`
-returns `OpenGhosttyFromAnyFolder`, not every `main.swift` beneath it. A query
-containing `/`, such as `OpenGhostty/main`, explicitly opts into ordered path
-component matching.
+Local matching uses the object's own name and Finder tags. The context column
+shows the object's complete path — the row for `~/App` reads `~/App`, not `~`
+— but path components are display-only and do not make a child match. Thus
+`OpenGhostty` returns `OpenGhosttyFromAnyFolder`, not every `main.swift`
+beneath it. A query containing `/`, such as `OpenGhostty/main`, explicitly
+opts into ordered path component matching.
 
 Clearing the query returns to the Agent home. Type `:` to list every scope.
 
@@ -130,6 +137,16 @@ and can save it as a Quicklink.
 | `cfg:` | existing Agent settings and instruction files |
 | `ql:` | every Quicklink, including entries that do not resolve |
 | `set:` | Prelude settings with their effective values and sources |
+| `p:` | one row describing a rewrite of the typed text, or of the clipboard |
+
+`p:` is the exception to this table: its row is computed from the query rather
+than selected from the snapshot, and it is a statement of intent rather than a
+result. No request is made while you type — Enter is what sends the text, and
+the row names the style, the model and where the text is about to go before it
+goes. With nothing typed the subject is the newest text clipping, read from the
+snapshot the launcher already has. Until a model is chosen, `p:` shows the
+`set:` rows that choose one instead of an empty box. See
+[Defaults, actions, and safety](ACTIONS.md).
 
 A bare prefix lists the scope. Scoped queries disable fzf's own fuzzy filter;
 Prelude applies the term against the cached Items so syntax such as `c:` is not
@@ -240,7 +257,10 @@ Ordinary search combines a small result from two sets:
 - files and folders stored by Prelude's shared index
 
 `f:` shows a longer combined list; `dir:` restricts it to folders and merges in
-zoxide/recent-`cd` evidence for ranking. Empty folders are indexed too.
+zoxide/recent-`cd` evidence for ranking. Empty folders are indexed too. One
+folder is one row however the evidence spelled it: a trailing slash or a
+miscased `cd` that the case-insensitive filesystem honoured does not earn a
+duplicate.
 
 Search folders are managed in `set:` → **Search folders**. `→` adds through the
 native macOS folder chooser, `←` selects one to remove, and Enter opens the full
@@ -279,7 +299,8 @@ complete. `prelude index` remains an explicit repair command, not a normal setup
 step.
 
 The index walks to a maximum depth of 7 without following symlinks and respects
-ignore files. `follow_links(false)` governs symlinks met during a walk and not
+ignore files. Each root folder is itself a row: `~/App` is findable by typing
+`app`, not only the folders inside it. `follow_links(false)` governs symlinks met during a walk and not
 the root a walk starts from, which is descended either way — so a folder is
 kept out of the defaults by name, never by expecting the walker to decline it.
 App-managed library packages (`.photoslibrary`, `.musiclibrary`, and the rest)

@@ -90,6 +90,9 @@ pub enum Verb {
     Answer,
     /// Run it right here in the launcher and show the output.
     RunHere,
+    /// Send the row's text to be rewritten as a clear English prompt, and
+    /// leave the result on the clipboard.
+    Rewrite,
     RunInShell,
     Inspect,
     CdThere,
@@ -116,6 +119,15 @@ pub fn enter_with(item: &Item, classic: bool) -> Default_ {
     // `set:roots` instead of opening its manager made the very screen that can
     // turn the preference off unusable. Control-plane rows always act.
     if item.kind == Kind::Setting {
+        return chosen;
+    }
+    // A rewrite already ends with text on the clipboard, which is the whole of
+    // what this preference asks for. Converted to `Insert` the row would hand
+    // back the text you asked to have rewritten — not a different way of doing
+    // the same thing, but the row refusing to do it at all, while still saying
+    // it would. It is the Skill exception below, arrived at from the other
+    // side: there, Enter is text already; here, Enter's *product* is.
+    if item.kind == Kind::Rewrite {
         return chosen;
     }
     // The preference is about **commands**: the rows whose being handed over
@@ -227,6 +239,11 @@ pub fn by_kind(item: &Item) -> Default_ {
 
         Calc | Translate => Act(Verb::CopyResult),
 
+        // The work has not happened yet: the row describes a rewrite, and
+        // Enter is what pays for it. Nothing is computed while you type, for
+        // the reason `rewrite.rs` opens with.
+        Rewrite => Act(Verb::Rewrite),
+
 
         // The one form of a Skill that works in an Agent you already have
         // open, whichever Agent it is and wherever the Skill is installed.
@@ -323,6 +340,11 @@ pub fn on_secondary(item: &Item, surface: Surface) -> Option<Default_> {
         // one unlabelled opposite.
         Setting => return None,
         Search => return None,
+        // Enter rewrites it. The alternatives — the original text, the same
+        // text through a different profile — are named in the panel, because
+        // "the other profile" is not one thing to compress into an unlabelled
+        // opposite when there are three of them.
+        Rewrite => return None,
     };
     // "Insert it" and "run it" are opposites only where there is a shell to
     // run it in. On the clipboard they are the same bytes, and two rows
@@ -386,6 +408,18 @@ fn name(item: &Item, d: Default_, surface: Surface) -> &'static str {
                     "Switch to copy-commands"
                 } else {
                     "Switch to per-kind"
+                }
+            }
+            "rewrite" => "Choose the service…",
+            "rewrite_url" => "Change the endpoint…",
+            "rewrite_model" => "Choose a model…",
+            "rewrite_key" => "Set the API key…",
+            "rewrite_profile" => "Choose the style…",
+            "rewrite_review" => {
+                if item.fields.first().map(String::as_str) == Some("on") {
+                    "Turn the review pass off"
+                } else {
+                    "Turn the review pass on"
                 }
             }
             "openwith" => "Manage open-with rules",
@@ -468,6 +502,10 @@ fn describe_action(d: Default_, surface: Surface) -> &'static str {
         Default_::Act(Verb::Inspect) => "Show what is using it",
         Default_::Act(Verb::CdThere) => "Insert the cd command",
         Default_::Act(Verb::EditSetting) => "Change it",
+        // The same sentence on either surface: the result lands on the
+        // clipboard because that is the only place this launcher delivers to,
+        // not because of a preference about commands.
+        Default_::Act(Verb::Rewrite) => "Rewrite it and copy",
     }
 }
 

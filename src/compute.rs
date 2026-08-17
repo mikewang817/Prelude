@@ -226,7 +226,7 @@ pub fn translate(text: &str, target: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn fxhash(s: &str) -> u64 {
+pub fn fxhash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         h ^= b as u64;
@@ -1633,6 +1633,8 @@ pub enum Scope {
     /// only one with nowhere to be seen as a whole — the sole way to answer
     /// "what quicklinks do I have" was to open the TOML.
     Quicklinks,
+    /// Text on its way to being a clear English prompt.
+    Prompt,
 }
 
 struct ScopeDef {
@@ -1661,6 +1663,10 @@ const SCOPES: &[ScopeDef] = &[
     ScopeDef { scope: Scope::Containers, prefix: "docker:", title: "Containers", desc: "running Docker containers" },
     ScopeDef { scope: Scope::Config, prefix: "cfg:", title: "Agent Config", desc: "settings and instruction files" },
     ScopeDef { scope: Scope::Quicklinks, prefix: "ql:", title: "Quicklinks", desc: "keywords you saved yourself" },
+    // With nothing after it, the clipboard is the subject: copy, press the
+    // chord, `p:`, Enter. That is the whole of what PromptConverter's menu-bar
+    // "Convert Clipboard" was, minus the menu bar.
+    ScopeDef { scope: Scope::Prompt, prefix: "p:", title: "Rewrite as a Prompt", desc: "clipboard or typed text, into clear English" },
     // Prelude's own, as opposed to the four agents' above it. It was the only
     // thing in this list the launcher could not reach.
     ScopeDef { scope: Scope::Settings, prefix: "set:", title: "Prelude Settings", desc: "search roots, hotkey, keys and rules" },
@@ -1679,7 +1685,7 @@ pub fn scope_commands() -> Vec<Item> {
     SCOPES.iter().map(scope_item).collect()
 }
 
-fn exact_scope_command(q: &str) -> Option<Item> {
+pub(crate) fn exact_scope_command(q: &str) -> Option<Item> {
     let want = q.trim().to_ascii_lowercase();
     SCOPES.iter()
         .find(|d| d.prefix.trim_end_matches(':') == want)
@@ -2189,6 +2195,97 @@ fn capability_archive_filter(term: &str) -> (CapabilityArchiveView, String) {
     (view, needles.join(" "))
 }
 
+/// `p:` — one row, describing work that has not happened yet.
+///
+/// Deliberately one and not one per profile. Three rows differing only by a
+/// name in the middle column is the "two rows for one intent" that `/` already
+/// refuses; the other profiles are in `^K`, where every other per-row choice in
+/// this launcher lives. It also keeps `cmd` unique without encoding a profile
+/// into it, which `finish`'s `(kind, cmd)` dedupe would otherwise collapse.
+///
+/// **Nothing here reaches the network.** The row states what would be sent and
+/// where; Enter is what sends it. `scoped_rows` runs on every keystroke.
+fn prompt_rows(term: &str, static_items: &[Item]) -> Vec<Item> {
+    prompt_rows_with(&crate::rewrite::config(), term, static_items)
+}
+
+/// The rule, with the configuration handed in — for the reason `surface()`
+/// gives: a rule that reads preferences to decide cannot be walked in a test,
+/// and every branch here is one a person actually meets.
+fn prompt_rows_with(cfg: &crate::rewrite::Config, term: &str, static_items: &[Item]) -> Vec<Item> {
+    // Not configured yet, so hand over the controls rather than an explanation
+    // of them. These are the real setting rows: `←`, `→` and Enter all work
+    // here exactly as they do in `set:`.
+    if cfg.provider == crate::rewrite::Provider::Off || cfg.model.trim().is_empty() {
+        return crate::settings::items()
+            .into_iter()
+            .filter(|item| item.get("group") == "Rewrite")
+            .collect();
+    }
+
+    let typed = term.trim();
+    // With nothing typed the subject is the clipboard, taken from the snapshot
+    // the launcher already gathered rather than from `pbpaste` — a subprocess
+    // per keystroke to read a value that is already in memory.
+    let (source, whence) = if typed.is_empty() {
+        match static_items
+            .iter()
+            .find(|it| it.kind == Kind::Clip && it.get("clip_kind") == "text")
+        {
+            Some(clip) => {
+                let full = clip.get("full");
+                let text = if full.trim().is_empty() { clip.cmd.clone() } else { full.to_string() };
+                (text, "from the clipboard")
+            }
+            None => {
+                return vec![Item::new("p:", Kind::Search)
+                    .title("Type the text to rewrite")
+                    .sub("nothing on the clipboard to use instead")
+                    .put("mode", "complete-query")
+                    .put("completion", "p:")];
+            }
+        }
+    } else {
+        (typed.to_string(), "typed here")
+    };
+
+    if source.trim().is_empty() {
+        return Vec::new();
+    }
+    let profile_name = crate::rewrite::profile(&cfg.profile_id)
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| "Custom".to_string());
+    // Where the text is about to go, said on the row rather than in Details.
+    // On the default it is this machine; on any other endpoint it is somebody
+    // else's, and that is not a fact to make a person open a submenu for.
+    let where_to = if cfg.provider == crate::rewrite::Provider::Ollama
+        && (cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1"))
+    {
+        format!("{} · on this machine", cfg.model)
+    } else {
+        format!("{} · {}", cfg.model, host_of(&cfg.url))
+    };
+    vec![Item::new(source.clone(), Kind::Rewrite)
+        .title(crate::width::flatten(&source))
+        .fields([profile_name.clone(), where_to.clone(), whence.to_string()])
+        .put("rw_source", source)
+        .put("rw_profile", cfg.profile_id.clone())
+        .put("rw_profile_name", profile_name)
+        .put("rw_model", cfg.model.clone())
+        .put("rw_where", where_to)]
+}
+
+/// The host of a URL, for saying where text is about to be sent.
+pub fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
 pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item> {
     use Kind::*;
     if scope == Scope::Running {
@@ -2263,6 +2360,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
             "search" => Some("Search"),
             "launcher" => Some("Launcher"),
             "behavior" | "behaviour" => Some("Behavior"),
+            "rewrite" => Some("Rewrite"),
             "library" => Some("Library"),
             _ => None,
         };
@@ -2291,6 +2389,9 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
             .cloned()
             .collect();
     }
+    if scope == Scope::Prompt {
+        return prompt_rows(term, static_items);
+    }
     let wanted = |kind| match scope {
         Scope::Clipboard => kind == Clip,
         Scope::History => kind == History,
@@ -2306,7 +2407,7 @@ pub fn scoped_rows(scope: Scope, term: &str, static_items: &[Item]) -> Vec<Item>
         Scope::Skills => false,
         Scope::Config => kind == Config,
         Scope::Settings => kind == Setting,
-        Scope::Quicklinks => false,
+        Scope::Quicklinks | Scope::Prompt => false,
         Scope::Agent | Scope::Running | Scope::Sessions | Scope::Files => false,
     };
     static_items.iter()
@@ -2426,7 +2527,10 @@ pub(crate) fn fallback_rows_from(text: &str, spec: &str, q: &str) -> Vec<Item> {
     if term.is_empty() || term == ":" || term == "/" || term == "@" {
         return Vec::new();
     }
-    if scope_query(term).is_some() || exact_scope_command(term).is_some() {
+    // A scope is a statement about where to look, so no web row inside one.
+    // A query that merely *spells* a scope's name (`app`, `docker`) is an
+    // ordinary root query and keeps its fallback like any other.
+    if scope_query(term).is_some() {
         return Vec::new();
     }
     let links = crate::minitoml::parse(text);
@@ -2791,8 +2895,12 @@ fn finder_tags(_: &std::path::Path, _: &[String]) -> std::collections::HashMap<S
 }
 
 fn indexed_paths() -> Vec<(IndexedKind, String)> {
+    indexed_paths_from(&index_roots())
+}
+
+fn indexed_paths_from(roots: &[String]) -> Vec<(IndexedKind, String)> {
     let mut paths = Vec::new();
-    for root in index_roots() {
+    for root in roots {
         let root = std::path::Path::new(&root);
         if !root.is_dir() {
             continue;
@@ -2805,10 +2913,11 @@ fn indexed_paths() -> Vec<(IndexedKind, String)> {
             .follow_links(false)
             .filter_entry(|entry| !app_managed_library(entry.path()))
             .build();
+        // Depth 0 is the root itself, and it goes in. It was skipped, which
+        // made every search folder the one folder its own name could never
+        // find: `~/App` was a root, so `f:app` answered with `…/src/app`
+        // seven levels down and never with the folder the person meant.
         paths.extend(walker.flatten().filter_map(|entry| {
-            if entry.depth() == 0 {
-                return None;
-            }
             let kind = match entry.file_type() {
                 Some(file_type) if file_type.is_file() => IndexedKind::File,
                 Some(file_type) if file_type.is_dir() => IndexedKind::Folder,
@@ -2946,14 +3055,17 @@ fn path_matches(path: &str, words: &[String]) -> bool {
 
 fn indexed_item(kind: IndexedKind, path: &str, tags: &[String], score: i64) -> Item {
     let name = path.rsplit('/').next().unwrap_or(path).to_string();
-    let parent = path.rsplit_once('/').map(|(dir, _)| paths::tilde(dir)).unwrap_or_default();
     let cmd = match kind {
         IndexedKind::File => path.to_string(),
         IndexedKind::Folder => format!("cd {}", shq(path)),
     };
+    // The context is the object's own complete path. It was the parent, which
+    // told the reader least exactly where it mattered most: the row for
+    // `~/App` read `App · ~`, and eight rows all titled `app` asked the
+    // reader to join two columns in their head.
     Item::new(cmd, Kind::Find)
         .title(name)
-        .sub(parent)
+        .sub(paths::tilde(path))
         .put("path", path)
         .put("tags", tags.join("\u{1e}"))
         .put("index_kind", kind.data())
@@ -2980,6 +3092,25 @@ fn scored_filesystem_item(mut item: Item, term: &str, bonus: i64) -> Option<Item
     Some(item)
 }
 
+/// One folder, one dedup key, however it was written down.
+///
+/// The index stores clean paths, but the zoxide and recent-`cd` evidence
+/// merged into `dir:` stores whatever was typed: `~/App/` with its
+/// trailing slash, and `~/APp` from a miscased `cd` that macOS's
+/// case-insensitive filesystem was happy to honour. Keyed on the raw string,
+/// each spelling was its own row, and the folder a person uses most arrived
+/// in triplicate at the top of the very scope that exists to rank it.
+///
+/// Folding case can in principle merge two genuinely distinct folders on a
+/// case-sensitive volume; that is accepted, because the default macOS volume
+/// is case-insensitive and the duplicated rows appear there on every real
+/// machine, while the sibling pair differing only by case appears on almost
+/// none.
+fn filesystem_identity(path: &str) -> String {
+    let trimmed = if path.len() > 1 { path.trim_end_matches('/') } else { path };
+    trimmed.to_lowercase()
+}
+
 fn finish_filesystem_rows(rows: Vec<Item>, limit: usize) -> Vec<Item> {
     let freq = crate::frecency::load();
     let mut best: std::collections::HashMap<String, Item> = std::collections::HashMap::new();
@@ -2991,10 +3122,11 @@ fn finish_filesystem_rows(rows: Vec<Item>, limit: usize) -> Vec<Item> {
         if let Some((uses, last)) = freq.get(&item.cmd) {
             item.score += crate::frecency::bonus(*uses, *last);
         }
-        match best.get(&path) {
+        let identity = filesystem_identity(&path);
+        match best.get(&identity) {
             Some(existing) if existing.score >= item.score => {}
             _ => {
-                best.insert(path, item);
+                best.insert(identity, item);
             }
         }
     }
@@ -3286,14 +3418,10 @@ fn local_path_item(q: &str) -> Option<Item> {
                 .put("path", path_text),
         )
     } else if path.is_file() {
-        let parent = path
-            .parent()
-            .map(|parent| paths::tilde(&parent.to_string_lossy()))
-            .unwrap_or_default();
         Some(
             Item::new(path_text.clone(), Kind::File)
                 .title(title)
-                .sub(parent)
+                .sub(paths::tilde(&path_text))
                 .put("path", path_text),
         )
     } else {
@@ -3306,8 +3434,14 @@ pub fn is_special(q: &str) -> bool {
     if t.is_empty() {
         return false;
     }
+    // A query that exactly spells a scope's name — `app`, `docker`, `f` — is
+    // deliberately *not* special. It used to be, and the result was the exact
+    // alias bug wearing a different hat: typing `app` collapsed the whole
+    // launcher to one `app:` row, so the folder named `App` and the
+    // application whose name contains "app" vanished on the keystroke that
+    // completed the word. The scope command still leads — `dynamic_rows_with`
+    // emits it first — but the room stays furnished.
     if t == ":"
-        || exact_scope_command(t).is_some()
         || scope_query(t).is_some()
         || t.starts_with(['/', '@'])
         || looks_like_local_path(t)
@@ -3345,6 +3479,10 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
     if q.trim() == ":" {
         return scope_commands();
     }
+    // The scope command the query exactly names leads the list; it does not
+    // clear the room. `dynamic` prints the catalogue, the local tiers and the
+    // web fallback underneath, and drops the catalogue's own copy of this row
+    // so the screen holds it once, at the top.
     if let Some(item) = exact_scope_command(q) {
         return vec![item];
     }
@@ -3465,6 +3603,96 @@ pub fn dynamic_rows_with(q: &str, static_items: &[Item]) -> Vec<Item> {
 mod tests {
     use super::*;
 
+    /// Built literally, never through `rewrite::config()`, so the developer's
+    /// own preferences and environment cannot decide what these assert.
+    fn ready_rewrite_config() -> crate::rewrite::Config {
+        crate::rewrite::Config {
+            provider: crate::rewrite::Provider::Ollama,
+            url: "http://localhost:11434".into(),
+            model: "m".into(),
+            timeout: 60,
+            profile_id: crate::rewrite::default_profile().id.into(),
+            system: crate::rewrite::default_profile().system.into(),
+            built_in: true,
+            review: false,
+        }
+    }
+
+    /// The whole point of the row: it describes work, and the request happens
+    /// on Enter. `scoped_rows` runs on every keystroke.
+    #[test]
+    fn a_prompt_row_states_the_work_without_doing_it() {
+        let rows = prompt_rows_with(&ready_rewrite_config(), " 帮我检查登录按钮 ", &[]);
+        assert_eq!(rows.len(), 1, "one row, not one per style");
+        let row = &rows[0];
+        assert_eq!(row.kind, Kind::Rewrite);
+        assert_eq!(row.get("rw_source"), "帮我检查登录按钮", "trimmed, and the source is carried");
+        assert_eq!(row.get("rw_model"), "m");
+        // Enter acts, and no preference may turn that into handing back the
+        // very text the row exists to replace.
+        assert_eq!(
+            crate::defaults::enter_with(row, true),
+            crate::defaults::Default_::Act(crate::defaults::Verb::Rewrite),
+        );
+    }
+
+    /// With nothing typed the subject is the newest clipping, taken from the
+    /// snapshot rather than from `pbpaste` — a subprocess per keystroke to
+    /// read a value that is already in memory.
+    #[test]
+    fn an_empty_prompt_query_uses_the_clipboard_from_the_snapshot() {
+        let clip = Item::new("这个方案…", Kind::Clip)
+            .put("clip_kind", "text")
+            .put("full", "这个方案我还不确定是否可行");
+        let rows = prompt_rows_with(&ready_rewrite_config(), "", &[clip]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("rw_source"), "这个方案我还不确定是否可行", "the full clip, not its label");
+        assert_eq!(rows[0].fields[2], "from the clipboard");
+
+        // An image has no text to rewrite, so it is not the subject.
+        let image = Item::new("shot.png", Kind::Clip).put("clip_kind", "image");
+        let rows = prompt_rows_with(&ready_rewrite_config(), "", &[image]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, Kind::Search, "nothing to use, so say what to do");
+    }
+
+    /// Answering "no model yet" with an empty box is the failure
+    /// `fallback_rows` exists to prevent, one scope along.
+    #[test]
+    fn an_unconfigured_prompt_scope_hands_over_the_controls() {
+        let mut cfg = ready_rewrite_config();
+        cfg.model = String::new();
+        let rows = prompt_rows_with(&cfg, "anything", &[]);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|it| it.kind == Kind::Setting && it.get("group") == "Rewrite"));
+
+        cfg.model = "m".into();
+        cfg.provider = crate::rewrite::Provider::Off;
+        let rows = prompt_rows_with(&cfg, "anything", &[]);
+        assert!(rows.iter().all(|it| it.kind == Kind::Setting), "off says so with its own switch");
+    }
+
+    /// The row names where the text is about to go. Local and remote must not
+    /// read the same, because that is the only difference that matters.
+    #[test]
+    fn a_prompt_row_says_where_the_text_goes() {
+        let local = prompt_rows_with(&ready_rewrite_config(), "hello there", &[]);
+        assert!(local[0].fields[1].contains("on this machine"), "{:?}", local[0].fields);
+
+        let mut remote = ready_rewrite_config();
+        remote.provider = crate::rewrite::Provider::OpenAi;
+        remote.url = "https://api.example.com/v1".into();
+        let rows = prompt_rows_with(&remote, "hello there", &[]);
+        assert!(rows[0].fields[1].contains("api.example.com"), "{:?}", rows[0].fields);
+        assert!(!rows[0].fields[1].contains("on this machine"));
+    }
+
+    #[test]
+    fn a_url_host_is_read_without_its_scheme_or_path() {
+        assert_eq!(host_of("https://api.example.com/v1/chat"), "api.example.com");
+        assert_eq!(host_of("http://localhost:11434"), "localhost:11434");
+    }
+
     #[test]
     fn a_complete_settings_category_is_an_exact_filter() {
         let rows = scoped_rows(Scope::Settings, "search", &[]);
@@ -3584,6 +3812,52 @@ mod tests {
         assert!(app_managed_library(&pictures.join("Photo Booth Library")));
         assert!(!app_managed_library(&pictures.join("xhs")));
         assert!(!app_managed_library(&pictures.join("logo/mark.png")));
+    }
+
+    /// zoxide and recent-`cd` evidence record whatever was typed, so one
+    /// folder arrives spelled three ways — clean, with a trailing slash, and
+    /// with a miscasing the case-insensitive filesystem honoured. Keyed on
+    /// the raw string, each spelling was its own row, and the folder a
+    /// person uses most led `dir:` in triplicate.
+    #[test]
+    fn one_folder_is_one_row_however_the_evidence_spelled_it() {
+        let spellings = ["/Users/x/App", "/Users/x/App/", "/Users/x/APp"];
+        let rows: Vec<Item> = spellings
+            .iter()
+            .map(|path| {
+                Item::new(format!("cd {path}"), Kind::Dir).title("App").put("path", *path)
+            })
+            .collect();
+        let out = finish_filesystem_rows(rows, 10);
+        assert_eq!(out.len(), 1, "three spellings of one folder are one row");
+        assert_eq!(filesystem_identity("/"), "/", "the filesystem root keeps its slash");
+    }
+
+    /// A root was the one folder its own name could never find: depth 0 was
+    /// skipped, so `~/App` was absent from the very index built out of it,
+    /// and `f:app` answered with `…/src/app` seven levels down while the
+    /// folder the person actually meant was not a row at all.
+    #[test]
+    fn the_index_contains_each_root_itself() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("prelude-idx-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("inner")).unwrap();
+        std::fs::write(root.join("inner").join("file.txt"), "x").unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let paths = indexed_paths_from(std::slice::from_ref(&root_text));
+        assert!(
+            paths.iter().any(|(kind, path)| *kind == IndexedKind::Folder && *path == root_text),
+            "the root itself is a Folder row"
+        );
+        assert!(paths.iter().any(|(kind, path)| {
+            *kind == IndexedKind::Folder && path.ends_with("inner")
+        }));
+        assert!(paths.iter().any(|(kind, path)| {
+            *kind == IndexedKind::File && path.ends_with("file.txt")
+        }));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// An unreadable `$HOME` must not be reported as a person who cleared the

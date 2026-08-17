@@ -405,6 +405,80 @@ process on a keystroke. Settings gather may use file checks and stats, never
 `pgrep` or another subprocess; live panel status belongs to explicit
 `prelude global status`.
 
+## Rewriting text into a prompt
+
+`rewrite.rs` is PromptConverter's engine and nothing else of it. That program
+spends most of its code answering *where is the text and how do I put it back*
+— an event tap, a triple-space trigger, Accessibility reads of the focused
+composer, a synthesised ⌘A/⌘C, a paste fallback, and a reconstructed terminal
+command line to backspace over. Prelude answered that question already, in the
+opposite direction, and deleting the equivalent machinery is what the launcher
+panel section is about. Do not bring any of it across. PromptConverter's own
+README calls clipboard conversion its "universal fallback" and "the reliable
+path"; here it is the whole mechanism, and the chord, the typed clipboard
+history and ⌃V were all already present.
+
+**Nothing reaches the network on the gather path, and this is the one place
+`translate` is the wrong precedent.** `compute::translate` is called from
+`dynamic_rows_with`, so typing `en: hello world` fires a subprocess per
+keystroke — tolerable for an on-device translator behind a file cache, and
+ruinous for a model call that costs seconds and, on a paid endpoint, money.
+`prompt_rows` therefore computes rows that *describe* work, and `Verb::Rewrite`
+is what pays for it. The `p:` row also reads the newest clipping out of the
+gathered snapshot rather than shelling out to `pbpaste`, for the same reason.
+
+**One row, not one per style.** Three rows differing only by a name in the
+middle column is the "two rows for one intent" that `/` already refuses, and it
+would need the profile encoded into `cmd` to survive `finish`'s `(kind, cmd)`
+dedupe. The other styles live in `^K`, behind one chooser, the shape
+`with_options` uses. Choosing one there applies it **once**, to that row —
+answering "try the other style on this" by writing a preference is how somebody
+ends up with a setting they did not mean to make.
+
+**`classic_enter` does not reach a Rewrite row.** Converted to `Insert` it
+would hand back the text you asked to have rewritten: not a different way of
+doing the same thing, but the row refusing to act while still saying it will.
+It is the Skill exception arrived at from the other side — there Enter is text
+already, here Enter's *product* is.
+
+**The API key never touches argv, and neither does the body.** `ps` is readable
+by anything on the machine, so `curl` is driven entirely through a 0600
+`--config` file; `quote` strips newlines because one would end the directive
+and begin a new one. `exec::capture` nulls stdin, which is what buys every
+subprocess its process group and its deadline, and is worth more than a pipe.
+
+**Refusing to send a credential is stricter than refusing to index one.**
+`secrets::looks_secret` already keeps these out of history and the clipboard
+rows; transmitting one to a third party is worse than storing it, so `rewrite`
+refuses out loud rather than skipping quietly.
+
+**The quality checks go on the row, not in a log.** PromptConverter wrote them
+to `~/Library/Logs`, which its window could afford because the window stayed in
+front of you. Prelude's panel has closed by the time you paste, so a rewrite
+that dropped `Sources/App.swift` reads perfectly well with nothing left to
+compare it against. `MSG` is terminal and so is `INSERT`, so the warning path
+writes the clipboard here and then notes; the clean path emits `INSERT` and
+lets the parent do it. `protected_fragments` is hand-scanned rather than
+regex-matched — a dependency is paid at every startup by every entry point,
+and this needs none.
+
+**The endpoint is normalised before a route is appended, not per route.**
+People paste the base, the versioned URL or the full route, and all three are
+correct. Deciding each route independently reads as working, because the
+setting is almost always exercised through chat: a base pinned to `/api/chat`
+answers chat correctly and sends the model list to `/api/chat/api/tags`.
+PromptConverter has that bug; the fix is to strip a known route first and only
+then ask which one is wanted.
+
+**The default is local, and the boundary paragraph depends on it.** `ollama` on
+`localhost` sends nothing off the machine, which is why the README can still
+say the update check is the only unbidden request. The endpoint's default
+*follows* the provider rather than being stored, so switching to `openai` does
+not leave a loopback address aimed at nothing — a connection refused is the one
+error that says nothing about the setting that caused it. And the row names
+where text is about to go, because that is not a fact to make somebody open a
+submenu for.
+
 ## The rules that matter
 
 **Latency is the product.** fzf re-invokes the binary on *every keystroke*
@@ -478,6 +552,18 @@ a list whose whole point is that you had already found something in it.
 in the same feed, and `with_cursor` adds `--bind start:pos(N)` to the next
 launch.
 
+**The typed query is part of that state, and it needs the other flag.** With a
+query on screen, ^K then Esc used to land on a blank home — "back one level"
+that quietly took two, because the restart knew the row but not the words that
+had found it. `--print-query` carries the query out (`FzfOut::query`), and the
+way back is `--query` plus a `start:` binding running the *same* `_bind`
+transform every keystroke runs, so the rebuilt list cannot disagree with the
+one typing would have produced. The two restorations are exclusive: a query
+means the visible list was `_dynamic`'s, where a home-feed `pos(N)` would be a
+position in the wrong list. On abort fzf prints nothing at all — not even the
+query line — which is fine, because abort is the one exit that does not come
+back.
+
 **`position_in` matches on the payload, because `--ansi` means fzf does not
 give back what it was given.** It parses the colour codes out for display and
 prints the line *without* them, and every row here is coloured — so comparing
@@ -509,7 +595,18 @@ is the same rule for shell completion: it completes exactly the rows whose
 Enter is already a completion — scope commands and providers, `tab_completion`
 — and stays inert everywhere else, so the key never acquires a meaning that
 varies by row. Both are bindings, not `--expect` keys, for the reason `→` is
-not; both go through `fzf_action_arg` because a query can contain `)`.
+not.
+
+**fzf has no escape syntax inside `action(...)`, and pretending otherwise
+corrupts the text.** A `fzf_action_arg` that backslash-escaped `)` shipped
+here on the assumption fzf would unescape it; measured, fzf keeps the
+backslash, so Ctrl+R on `git (wip)` put `h:git (wip\)` in the box — a query
+the person never typed, searching for a history line that cannot exist. The
+man page's real answer is a different delimiter, and the last of those,
+`action:arg`, consumes the rest of the string with no closing character at
+all. `fzf_action_line` emits that form; its one constraint — the action must
+be last — is met by construction in `_hist`, `_tab` and `_enter`, and `focus`
+orders its preview actions first so `change-footer:` can close the line.
 
 **Two general action keys: Enter is primary, Ctrl+K is the panel. A row that
 *is* a filesystem object adds three explicit Enter chords. Ctrl+P is a mode.**
@@ -598,8 +695,17 @@ nothing a terminal application can read. So the filesystem shortcuts are Enter c
 their translations in both the dedicated config and one marked
 ordinary-Ghostty block: `ctrl+enter=text:\\x07`,
 `ctrl+shift+enter=text:\\x1d`, and `ctrl+alt+enter=text:\\x19` become private
-Ctrl+G, Ctrl+], and Ctrl+Y. `EXPECT` includes all three, and the footer advertises
-them only when the focused row carries the corresponding path.
+Ctrl+G, Ctrl+], and Ctrl+Y. The three are conditional transforms
+(`OBJ_CHORDS`, the `_objkey` door), not `--expect` keys: an `--expect` key
+exits fzf on every row, so pressing a chord on a row with no object — where
+the footer advertised nothing — tore the launcher down and rebuilt it empty,
+deleting the typed query. On Tab's precedent, an applicable row prints its
+marker and accepts (`run_fzf` folds the marker back into the key name, the
+`OPEN_ACTIONS` mechanism), and every other row leaves the key inert. `EXPECT`
+keeps only the two keys that act on every row, Ctrl+X and Ctrl+K, and the
+footer advertises a chord only when the focused row carries the corresponding
+path — the same predicates, `objkey_marker`, so advertisement and behaviour
+cannot disagree.
 
 Ctrl+] is 0x1d and deliberately not 0x1f, which is `render::SEP` — the
 delimiter every rendered row carries, and which fzf would read as a field
@@ -965,7 +1071,8 @@ Sessions are on the home now, which they never were before. An ordinary query
 searches all of that plus Search commands and fixed Quicklinks —
 never the thousands of history entries, clipboard rows and
 `$PATH` commands underneath. Ordinary queries now mix in at most ten local
-file/folder name matches; exact `f` shows one Files & Folders command and `f:`
+file/folder name matches; a query that exactly spells a scope's name (`f`,
+`app`) leads with that scope command without clearing the room, and `f:`
 opens the longer result set. `:` lists every scope, and clearing restores the home.
 
 **Conversations are in root search, and the cap that kept them out is gone.**
@@ -1135,6 +1242,19 @@ config, and why `needs_static_items` now says yes to it — one 400KB parse on
 the handful of keystrokes that complete a keyword, measured at 0.4ms against a
 2ms keystroke.
 
+**A scope's own name obeys the same rule, the other way round.** `app`,
+`docker`, `f` and the rest were `is_special`, and `dynamic_rows_with` answered
+each with one scope-command row — the identical clearing, on the identical
+keystroke: `ap` showed a full list, `app` showed one row, `appl` restored the
+list, and the folder named `App` vanished at the exact moment its name was
+complete. A scope name is *not* special now: the scope command still leads —
+`dynamic` prints it first and drops the catalogue's own copy of that row, the
+"on screen once" rule — and the catalogue, the application and file tiers and
+the web fallback all stay underneath, ranked by fzf like any root query. The
+quicklink treatment above stays special because Prelude must resolve the key
+from config; a scope command needs no resolving, so fzf's own filter does the
+narrowing.
+
 **Every lookup folds case, and every refusal happens at the moment of naming.**
 `minitoml` keeps a section name as written and every lookup lowercases the
 query, so a hand-written `[Design]` matched nothing, produced no row and
@@ -1192,10 +1312,15 @@ and replaces the result area, so rows are always measured against the full
 terminal width. The contextual `c:` image pane still uses those full-width
 rows and lets fzf clip the left list; do not introduce a second layout for that
 transient pane. `f:` is the explicit stable exception to the catalogue table:
-it is always filename, kind, parent path, with a width-derived (not
-result-derived) filename column so filtering cannot make it jump. The parent
-never repeats the filename and loses its middle as `...` before either useful
-end is discarded.
+it is always filename, kind, complete path, with a width-derived (not
+result-derived) filename column so filtering cannot make it jump. The context
+column is the object's **own full path**, not its parent — parent-only put
+`· ~` beside the row for `~/App`, the one folder its context said least
+about, and left eight rows all titled `app` telling the reader to join two
+columns in their head. A long path loses its middle as `...` before either
+useful end is discarded. Matching is unchanged: parent components are
+display-only and never make a child match without an explicit `/` in the
+query.
 
 **Clipboard is typeful and strictly chronological.** `pbpaste` sees only
 text, so `clipd` keeps one sleeping JXA/AppKit process and watches

@@ -31,8 +31,23 @@ const DEFAULT_PREVIEW: bool = true;
 const DEFAULT_CLASSIC_ENTER: bool = false;
 const DEFAULT_UPDATE: &str = "notify";
 const DEFAULT_FALLBACKS: &str = crate::compute::WEB_SEARCH_KEY;
-const PREF_KEYS: &[&str] =
-    &["key", "preview", "classic_enter", "update", "fallbacks"];
+/// Local by default, so the boundary the README draws does not move: turning
+/// rewriting on sends nothing off the machine until somebody points it at a
+/// remote endpoint themselves.
+const DEFAULT_REWRITE: &str = "ollama";
+const DEFAULT_REWRITE_REVIEW: bool = false;
+const PREF_KEYS: &[&str] = &[
+    "key",
+    "preview",
+    "classic_enter",
+    "update",
+    "fallbacks",
+    "rewrite",
+    "rewrite_url",
+    "rewrite_model",
+    "rewrite_profile",
+    "rewrite_review",
+];
 
 // ---------------------------------------------------------------------------
 // settings.toml — the preferences that had nowhere else to live
@@ -49,6 +64,11 @@ struct Prefs {
     classic_enter: Option<bool>,
     update: Option<String>,
     fallbacks: Option<String>,
+    rewrite: Option<String>,
+    rewrite_url: Option<String>,
+    rewrite_model: Option<String>,
+    rewrite_profile: Option<String>,
+    rewrite_review: Option<bool>,
     present: std::collections::BTreeSet<String>,
 }
 
@@ -75,6 +95,12 @@ fn prefs() -> &'static Prefs {
             classic_enter: flag("classic_enter"),
             update: get("update").and_then(|v| validate_pref("update", &v).ok()),
             fallbacks: get("fallbacks").and_then(|v| validate_pref("fallbacks", &v).ok()),
+            rewrite: get("rewrite").and_then(|v| validate_pref("rewrite", &v).ok()),
+            rewrite_url: get("rewrite_url").and_then(|v| validate_pref("rewrite_url", &v).ok()),
+            rewrite_model: get("rewrite_model").and_then(|v| validate_pref("rewrite_model", &v).ok()),
+            rewrite_profile: get("rewrite_profile")
+                .and_then(|v| validate_pref("rewrite_profile", &v).ok()),
+            rewrite_review: flag("rewrite_review"),
             present: root
                 .into_iter()
                 .flat_map(|table| table.keys().cloned())
@@ -115,6 +141,12 @@ fn canonical_key(key: &str) -> Option<&'static str> {
         "fallbacks" | "fallback" => Some("fallbacks"),
         "enter" | "classic_enter" => Some("classic_enter"),
         "update" | "updates" | "auto_update" => Some("update"),
+        "rewrite" | "prompt" | "rewriting" => Some("rewrite"),
+        "rewrite_url" | "rewrite_endpoint" | "endpoint" => Some("rewrite_url"),
+        "rewrite_model" | "model" => Some("rewrite_model"),
+        "rewrite_profile" | "profile" | "prompt_profile" => Some("rewrite_profile"),
+        "rewrite_review" | "review" | "fidelity_review" => Some("rewrite_review"),
+        "rewrite_key" | "api_key" | "apikey" => Some("rewrite_key"),
         "hotkey" | "global_hotkey" => Some("hotkey"),
         "paneldir" | "panel_directory" | "directory" => Some("paneldir"),
         "roots" | "search_roots" => Some("roots"),
@@ -167,9 +199,48 @@ fn validate_pref(key: &str, value: &str) -> Result<String, String> {
                     .to_string()
             }),
         },
-        "preview" => parse_bool(value)
+        "preview" | "rewrite_review" => parse_bool(value)
             .map(|v| v.to_string())
             .ok_or_else(|| format!("{key} is on or off (also true/false, yes/no or 1/0)")),
+        // `off` is a real off switch and the reason this is an enum rather than
+        // a bool beside an endpoint: with three values the row states which
+        // service is about to receive your text, which for `openai` is the
+        // whole of what a person needs to see before pressing Enter.
+        "rewrite" => crate::rewrite::Provider::parse(value)
+            .map(|p| p.name().to_string())
+            .ok_or_else(|| "rewrite is off, ollama or openai".into()),
+        // Syntax only, and deliberately not a reachability check: an endpoint
+        // that is down at the moment somebody edits an unrelated preference
+        // must not make the file unwritable, and `checks` is where a dead one
+        // gets reported. `http` is allowed because the default is a loopback
+        // address, where TLS buys nothing.
+        "rewrite_url" => {
+            let v = value.trim();
+            let ok = (v.starts_with("http://") || v.starts_with("https://"))
+                && v.len() > 8
+                && v.len() <= 2048
+                && !v.chars().any(|c| c.is_whitespace() || c.is_control());
+            if ok {
+                Ok(v.trim_end_matches('/').to_string())
+            } else {
+                Err("the endpoint is an http:// or https:// URL".into())
+            }
+        }
+        "rewrite_model" => {
+            let v = value.trim();
+            if v.is_empty() || v.len() > 200 || v.chars().any(|c| c.is_control()) {
+                return Err("a model is the name the endpoint reports, such as gemma3:4b".into());
+            }
+            Ok(v.to_string())
+        }
+        "rewrite_profile" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v == crate::rewrite::CUSTOM || crate::rewrite::profile(&v).is_some() {
+                return Ok(v);
+            }
+            let names: Vec<&str> = crate::rewrite::PROFILES.iter().map(|p| p.id).collect();
+            Err(format!("a profile is one of {}, {}", names.join(", "), crate::rewrite::CUSTOM))
+        }
         // Syntax only. Whether a keyword names something that can take a query
         // is answered against `quicklinks.toml` at the moment it is used, and
         // reported by `checks`: this file must not decide it, because a
@@ -243,6 +314,44 @@ pub fn parse_update_mode(value: &str) -> crate::update::Mode {
 /// module exists to narrow.
 pub fn fallbacks() -> String {
     prefs().fallbacks.clone().unwrap_or_else(|| DEFAULT_FALLBACKS.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// rewriting
+// ---------------------------------------------------------------------------
+
+/// Which service, or none. `off` returns before a request is ever built, on
+/// the same terms `update = off` does.
+pub fn rewrite_provider() -> crate::rewrite::Provider {
+    let from_env = env("PRELUDE_REWRITE").and_then(|v| validate_pref("rewrite", &v).ok());
+    let value = resolve(from_env, prefs().rewrite.clone(), DEFAULT_REWRITE);
+    crate::rewrite::Provider::parse(&value).unwrap_or(crate::rewrite::Provider::Ollama)
+}
+
+/// The endpoint, defaulting to whatever the chosen provider's is.
+///
+/// The default follows the provider rather than being stored, so switching
+/// from `ollama` to `openai` does not leave a loopback address pointed at a
+/// service that is not there — which fails as a connection refused, the one
+/// error that says nothing about the setting that caused it.
+pub fn rewrite_url() -> String {
+    let from_env = env("PRELUDE_REWRITE_URL").and_then(|v| validate_pref("rewrite_url", &v).ok());
+    resolve(from_env, prefs().rewrite_url.clone(), rewrite_provider().default_url())
+}
+
+pub fn rewrite_model() -> String {
+    let from_env = env("PRELUDE_REWRITE_MODEL").and_then(|v| validate_pref("rewrite_model", &v).ok());
+    resolve(from_env, prefs().rewrite_model.clone(), "")
+}
+
+pub fn rewrite_profile() -> String {
+    let from_env =
+        env("PRELUDE_REWRITE_PROFILE").and_then(|v| validate_pref("rewrite_profile", &v).ok());
+    resolve(from_env, prefs().rewrite_profile.clone(), crate::rewrite::default_profile().id)
+}
+
+pub fn rewrite_review() -> bool {
+    prefs().rewrite_review.unwrap_or(DEFAULT_REWRITE_REVIEW)
 }
 
 /// The keywords that resolve, and those that do not, for the row and `check`.
@@ -788,6 +897,11 @@ fn setting_group(id: &str) -> &'static str {
         "roots" | "index" | "fallbacks" => "Search",
         "hotkey" | "paneldir" | "key" => "Launcher",
         "preview" | "enter" | "update" => "Behavior",
+        // Its own group rather than folded into Behavior: these five rows are
+        // the only ones that answer "where does my text go", and that question
+        // deserves to be readable as a block.
+        "rewrite" | "rewrite_url" | "rewrite_model" | "rewrite_key" | "rewrite_profile"
+        | "rewrite_review" => "Rewrite",
         _ => "Library",
     }
 }
@@ -974,6 +1088,100 @@ pub fn items() -> Vec<Item> {
         &format!("update policy · {version_note}"),
         EDIT_TOGGLE,
         ("update", DEFAULT_UPDATE, "PRELUDE_UPDATE"),
+    ));
+
+    // Rewriting. The provider leads, because it is the only row here that
+    // decides whether anything leaves the machine at all — and on the default
+    // it does not. The endpoint follows it rather than being stored, so
+    // switching provider cannot leave a loopback address aimed at a service
+    // that was never there.
+    let provider = rewrite_provider();
+    let is_local = provider == crate::rewrite::Provider::Ollama
+        && (rewrite_url().contains("localhost") || rewrite_url().contains("127.0.0.1"));
+    v.push(preference_row(
+        "rewrite",
+        "Rewrite as a prompt",
+        provider.name().to_string(),
+        if provider == crate::rewrite::Provider::Off {
+            "p: is off · no text is sent anywhere"
+        } else if is_local {
+            "p: rewrites text into clear English · stays on this machine"
+        } else {
+            "p: rewrites text into clear English · sent to the endpoint below"
+        },
+        EDIT_TOGGLE,
+        ("rewrite", DEFAULT_REWRITE, "PRELUDE_REWRITE"),
+    ));
+    v.push(preference_row(
+        "rewrite_url",
+        "Rewrite endpoint",
+        rewrite_url(),
+        "where rewriting sends text · Ollama or any OpenAI-compatible API",
+        EDIT_PROMPT,
+        ("rewrite_url", provider.default_url(), "PRELUDE_REWRITE_URL"),
+    ));
+    let model = rewrite_model();
+    v.push(preference_row(
+        "rewrite_model",
+        "Rewrite model",
+        if model.trim().is_empty() { "not chosen".into() } else { model },
+        "the model that does the rewriting · → lists what the endpoint has",
+        EDIT_PROMPT,
+        ("rewrite_model", "", "PRELUDE_REWRITE_MODEL"),
+    ));
+    let profile_id = rewrite_profile();
+    let profile_name = crate::rewrite::profile(&profile_id)
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| "Custom".to_string());
+    let profile_detail = crate::rewrite::profile(&profile_id)
+        .map(|p| p.desc.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "your own, in {}",
+                crate::paths::tilde(&crate::rewrite::custom_prompt_file().to_string_lossy())
+            )
+        });
+    v.push(preference_row(
+        "rewrite_profile",
+        "Rewrite style",
+        profile_name,
+        &profile_detail,
+        EDIT_TOGGLE,
+        ("rewrite_profile", crate::rewrite::default_profile().id, "PRELUDE_REWRITE_PROFILE"),
+    ));
+    // Present or absent, never the value. A secret still has to be *visible as
+    // a setting* — without this row the only way to learn that an endpoint
+    // needs a key, or that one is already stored, is to try a rewrite and read
+    // the 401 the endpoint sends back.
+    let key_present = crate::rewrite::has_api_key();
+    let key_from_env = std::env::var("PRELUDE_REWRITE_KEY").is_ok_and(|v| !v.trim().is_empty());
+    v.push(
+        row(
+            "rewrite_key",
+            "Rewrite API key",
+            match (key_present, key_from_env) {
+                (true, true) => "set · from $PRELUDE_REWRITE_KEY".into(),
+                (true, false) => "set".into(),
+                _ => "none".into(),
+            },
+            if provider == crate::rewrite::Provider::Ollama {
+                "not needed for a local Ollama endpoint"
+            } else {
+                "sent as a bearer token to the endpoint above"
+            },
+            EDIT_PROMPT,
+        )
+        .put("source", if key_from_env { "environment" } else if key_present { "saved" } else { "none" })
+        .put("environment", "PRELUDE_REWRITE_KEY")
+        .put("path", crate::rewrite::key_file().to_string_lossy().into_owned()),
+    );
+    v.push(preference_row(
+        "rewrite_review",
+        "Rewrite review pass",
+        if rewrite_review() { "on".into() } else { "off".into() },
+        "a second model pass that checks the first for dropped meaning · slower",
+        EDIT_TOGGLE,
+        ("rewrite_review", "off", ""),
     ));
 
     let openwith = config.join("open.toml");
@@ -1222,7 +1430,14 @@ pub fn edit(it: &Item) -> i32 {
         EDIT_MANAGE_ROOTS => manage_roots_interactively(),
         EDIT_REBUILD => crate::runhere::run_cmd("prelude index"),
         EDIT_TOGGLE if it.get("setting") == "update" => choose_update_mode(),
+        EDIT_TOGGLE if it.get("setting") == "rewrite" => choose_rewrite_provider(),
+        EDIT_TOGGLE if it.get("setting") == "rewrite_profile" => choose_rewrite_profile(),
         EDIT_TOGGLE => toggle(it),
+        // Enter opens the same chooser `→` does. The alternative would be a
+        // free-text box for a value the endpoint can simply be asked for, and
+        // a typo there does not fail until the launcher has closed.
+        EDIT_PROMPT if it.get("setting") == "rewrite_model" => choose_rewrite_model(),
+        EDIT_PROMPT if it.get("setting") == "rewrite_key" => set_rewrite_key(),
         EDIT_PROMPT => prompt_for(it),
         EDIT_COLLECTION => manage_collection(it),
         _ => open_file(it),
@@ -1338,6 +1553,17 @@ pub fn direction_label(it: &Item, direction: &str) -> &'static str {
         "preview" => if left { "Set off" } else { "Set on" },
         "enter" => if left { "Per kind" } else { "Copy commands" },
         "update" => if left { "Previous mode" } else { "Next mode" },
+        // Ordered enums, so previous/next without wrapping — the same shape as
+        // `update` and for the same reason: `off` is one end and must not be
+        // one keystroke past the far end.
+        "rewrite" => if left { "Previous service" } else { "Next service" },
+        "rewrite_profile" => if left { "Previous style" } else { "Next style" },
+        "rewrite_review" => if left { "Set off" } else { "Set on" },
+        // The one row whose right arrow can answer for itself: the endpoint
+        // knows its own models, so it is asked rather than typed at.
+        "rewrite_model" => if left { "Reset default" } else { "Choose model…" },
+        "rewrite_url" => if left { "Reset default" } else { "Change…" },
+        "rewrite_key" => if left { "Remove key" } else { "Set key…" },
         "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             if left { "Remove one…" } else { "Add one…" }
         }
@@ -1355,8 +1581,22 @@ pub fn direction_is_interactive(it: &Item, direction: &str) -> bool {
     !matches!(
         (it.get("setting"), direction),
         ("preview" | "enter" | "update", _)
+            | ("rewrite" | "rewrite_profile" | "rewrite_review", _)
             | ("hotkey" | "paneldir" | "key" | "fallbacks", "left")
+            | ("rewrite_url" | "rewrite_model", "left")
     )
+}
+
+/// The same adjustment, addressed by name rather than by a row in hand.
+///
+/// The action panel reaches settings this way: a Clip row's "Choose a rewrite
+/// model…" wants exactly what `→` does on that settings row, and building a
+/// second path to it is how the two start disagreeing.
+pub fn adjust_named(setting: &str, direction: &str) -> i32 {
+    match items().into_iter().find(|item| item.get("setting") == setting) {
+        Some(row) => adjust(&row, direction),
+        None => 2,
+    }
 }
 
 /// Apply the semantic left/right action for one settings row.
@@ -1380,6 +1620,19 @@ pub fn adjust(it: &Item, direction: &str) -> i32 {
         "preview" => set_boolean("preview", !left),
         "enter" => set_boolean("classic_enter", !left),
         "update" => step_update(if left { -1 } else { 1 }),
+        "rewrite" => step_enum("rewrite", &["off", "ollama", "openai"], if left { -1 } else { 1 }),
+        "rewrite_profile" => {
+            let ids: Vec<&str> = crate::rewrite::PROFILES
+                .iter()
+                .map(|p| p.id)
+                .chain(std::iter::once(crate::rewrite::CUSTOM))
+                .collect();
+            step_enum("rewrite_profile", &ids, if left { -1 } else { 1 })
+        }
+        "rewrite_review" => set_boolean("rewrite_review", !left),
+        "rewrite_url" => if left { reset_item(it) } else { prompt_for(it) },
+        "rewrite_model" => if left { reset_item(it) } else { choose_rewrite_model() },
+        "rewrite_key" => if left { remove_rewrite_key() } else { set_rewrite_key() },
         "openwith" | "snippets" | "quicklinks" | "favorites" | "aliases" => {
             if left { remove_collection_item(it) } else { add_collection_item(it) }
         }
@@ -1438,13 +1691,186 @@ fn set_boolean(key: &str, value: bool) -> i32 {
         crate::ui::note(&error);
         return 2;
     }
+    // Named rather than defaulted. It used to fall through to
+    // `PRELUDE_CLASSIC_ENTER` for anything unrecognised, which would tell
+    // somebody toggling an unrelated preference that a variable they have
+    // never heard of is overriding it.
     let overridden = match key {
         "preview" => env("PRELUDE_NO_PREVIEW").is_some(),
-        _ => env("PRELUDE_CLASSIC_ENTER").is_some(),
+        "classic_enter" => env("PRELUDE_CLASSIC_ENTER").is_some(),
+        _ => false,
     };
     if overridden {
         crate::ui::note("saved, but the environment variable remains effective");
     }
+    0
+}
+
+/// Walk an ordered enum without wrapping, and say so when a variable is going
+/// to keep winning. `update` keeps its own stepper because its modes are a
+/// constant this shares no vocabulary with.
+fn step_enum(key: &str, values: &[&str], delta: isize) -> i32 {
+    let current = match key {
+        "rewrite" => rewrite_provider().name().to_string(),
+        _ => rewrite_profile(),
+    };
+    let at = values.iter().position(|v| *v == current).unwrap_or(0) as isize;
+    let next = values[(at + delta).clamp(0, values.len() as isize - 1) as usize];
+    if let Err(error) = write_pref(key, next) {
+        crate::ui::note(&error);
+        return 2;
+    }
+    if override_for(key).is_some() {
+        crate::ui::note("saved, but the environment variable remains effective");
+    }
+    0
+}
+
+/// Ask for the key, and say where it will end up.
+///
+/// fzf has no masked input, so the characters are visible while they are being
+/// typed. That is stated in the label rather than left to be discovered: a
+/// person pasting a production key deserves to know the screen will show it,
+/// and `prelude rewrite --key` is the door for anyone who would rather it did
+/// not. Nothing is echoed back afterwards — the row only ever says "set".
+fn set_rewrite_key() -> i32 {
+    let Some(value) = crate::ui::prompt_line(" API key · visible as you type · stored 0600 ") else {
+        return 130;
+    };
+    match crate::rewrite::set_api_key(&value) {
+        Ok(()) => {
+            crate::ui::note("API key saved");
+            0
+        }
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn remove_rewrite_key() -> i32 {
+    if !crate::rewrite::has_api_key() {
+        crate::ui::note("there is no stored API key");
+        return 0;
+    }
+    if !crate::ui::confirm("remove the stored API key?", "Remove key", "the endpoint is unchanged")
+    {
+        return 130;
+    }
+    match crate::rewrite::set_api_key("") {
+        Ok(()) => {
+            crate::ui::note("API key removed");
+            0
+        }
+        Err(error) => {
+            crate::ui::note(&error);
+            2
+        }
+    }
+}
+
+fn choose_rewrite_provider() -> i32 {
+    let current = rewrite_provider().name().to_string();
+    let choices = [
+        (
+            "off".to_string(),
+            "Off".to_string(),
+            "p: is disabled · nothing is ever sent".to_string(),
+        ),
+        (
+            "ollama".to_string(),
+            "Ollama".to_string(),
+            "a model running on this machine".to_string(),
+        ),
+        (
+            "openai".to_string(),
+            "OpenAI compatible".to_string(),
+            "any chat-completions API · text leaves the machine".to_string(),
+        ),
+    ];
+    let Some(chosen) = crate::actions::pick_one(
+        &format!(" rewrite service · current {current} "),
+        &choices,
+    ) else {
+        return 130;
+    };
+    if let Err(error) = write_pref("rewrite", &chosen) {
+        crate::ui::note(&error);
+        return 2;
+    }
+    0
+}
+
+fn choose_rewrite_profile() -> i32 {
+    let current = rewrite_profile();
+    let mut choices: Vec<(String, String, String)> = crate::rewrite::PROFILES
+        .iter()
+        .map(|p| (p.id.to_string(), p.name.to_string(), p.desc.to_string()))
+        .collect();
+    choices.push((
+        crate::rewrite::CUSTOM.to_string(),
+        "Custom".to_string(),
+        format!(
+            "your own, in {}",
+            crate::paths::tilde(&crate::rewrite::custom_prompt_file().to_string_lossy())
+        ),
+    ));
+    let Some(chosen) =
+        crate::actions::pick_one(&format!(" rewrite style · current {current} "), &choices)
+    else {
+        return 130;
+    };
+    if let Err(error) = write_pref("rewrite_profile", &chosen) {
+        crate::ui::note(&error);
+        return 2;
+    }
+    0
+}
+
+/// Ask the endpoint what it has, and pick from that.
+///
+/// The one place in this feature that reaches the network without a rewrite
+/// being asked for — and it is a `→` on a settings row, which is as explicit
+/// as a request gets. Typing a model name by hand is the failure this avoids:
+/// a wrong one fails at the moment of use, after the launcher has closed, with
+/// an error from somebody else's server.
+fn choose_rewrite_model() -> i32 {
+    let cfg = crate::rewrite::config();
+    if cfg.provider == crate::rewrite::Provider::Off {
+        crate::ui::note("rewriting is off — turn it on first");
+        return 2;
+    }
+    let names = match crate::rewrite::models(&cfg) {
+        Ok(names) if !names.is_empty() => names,
+        Ok(_) => {
+            crate::ui::note(&format!("{} reported no models", cfg.url));
+            return 2;
+        }
+        Err(error) => {
+            crate::ui::note(&error);
+            return 2;
+        }
+    };
+    let current = rewrite_model();
+    let choices: Vec<(String, String, String)> = names
+        .iter()
+        .map(|name| {
+            let note = if *name == current { "current".to_string() } else { String::new() };
+            (name.clone(), name.clone(), note)
+        })
+        .collect();
+    let Some(chosen) = crate::actions::pick_one(
+        &format!(" model · {} ", crate::compute::host_of(&cfg.url)),
+        &choices,
+    ) else {
+        return 130;
+    };
+    if let Err(error) = write_pref("rewrite_model", &chosen) {
+        crate::ui::note(&error);
+        return 2;
+    }
+    crate::ui::note(&format!("rewriting will use {chosen}"));
     0
 }
 
@@ -1879,6 +2305,12 @@ fn override_for(key: &str) -> Option<&'static str> {
         "classic_enter" if env("PRELUDE_CLASSIC_ENTER").is_some() => {
             Some("PRELUDE_CLASSIC_ENTER")
         }
+        "rewrite" if env("PRELUDE_REWRITE").is_some() => Some("PRELUDE_REWRITE"),
+        "rewrite_url" if env("PRELUDE_REWRITE_URL").is_some() => Some("PRELUDE_REWRITE_URL"),
+        "rewrite_model" if env("PRELUDE_REWRITE_MODEL").is_some() => Some("PRELUDE_REWRITE_MODEL"),
+        "rewrite_profile" if env("PRELUDE_REWRITE_PROFILE").is_some() => {
+            Some("PRELUDE_REWRITE_PROFILE")
+        }
         _ => None,
     }
 }
@@ -1888,7 +2320,8 @@ fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
     match key {
         "hotkey" => crate::global::set_hotkey(raw_value),
         "paneldir" => crate::global::set_directory(raw_value),
-        key @ ("key" | "preview" | "classic_enter" | "update" | "fallbacks") => {
+        key @ ("key" | "preview" | "classic_enter" | "update" | "fallbacks" | "rewrite"
+        | "rewrite_url" | "rewrite_model" | "rewrite_profile" | "rewrite_review") => {
             let value = validate_pref(key, raw_value)?;
             write_pref(key, &value)?;
             let shown = match (key, value.as_str()) {
@@ -1896,6 +2329,8 @@ fn set_named(raw_key: &str, raw_value: &str) -> Result<String, String> {
                 ("preview", "false") => "preview = off".into(),
                 ("classic_enter", "true") => "enter = copy commands".into(),
                 ("classic_enter", "false") => "enter = per kind".into(),
+                ("rewrite_review", "true") => "rewrite_review = on".into(),
+                ("rewrite_review", "false") => "rewrite_review = off".into(),
                 ("key", value) => format!("key = {value} — bound in the next shell you open"),
                 (key, value) => format!("{key} = {value}"),
             };
@@ -1933,13 +2368,21 @@ fn reset_named(raw_key: &str) -> Result<String, String> {
         }
         "hotkey" => crate::global::set_hotkey("cmd+shift+space"),
         "paneldir" => crate::global::set_directory_default(),
-        key @ ("key" | "preview" | "classic_enter" | "update" | "fallbacks") => {
+        key @ ("key" | "preview" | "classic_enter" | "update" | "fallbacks" | "rewrite"
+        | "rewrite_url" | "rewrite_model" | "rewrite_profile" | "rewrite_review") => {
             remove_pref(key)?;
             let default = match key {
                 "key" => DEFAULT_KEY,
                 "preview" => "on",
                 "update" => DEFAULT_UPDATE,
                 "fallbacks" => DEFAULT_FALLBACKS,
+                "rewrite" => DEFAULT_REWRITE,
+                // Follows whichever provider is now in force, which is the
+                // whole reason the endpoint is not stored with a default.
+                "rewrite_url" => rewrite_provider().default_url(),
+                "rewrite_model" => "not chosen",
+                "rewrite_profile" => crate::rewrite::default_profile().id,
+                "rewrite_review" => "off",
                 _ => "per kind",
             };
             let shown = format!("{key} restored to {default}");
@@ -2310,7 +2753,10 @@ mod tests {
             assert!(!it.get("setting").is_empty(), "{} has no id", it.title);
             assert!(!it.get("source").is_empty(), "{} has no source", it.title);
             assert!(
-                matches!(it.get("group"), "Search" | "Launcher" | "Behavior" | "Library"),
+                matches!(
+                    it.get("group"),
+                    "Search" | "Launcher" | "Behavior" | "Rewrite" | "Library"
+                ),
                 "{} has no user-facing category",
                 it.title,
             );
@@ -2405,6 +2851,12 @@ mod tests {
             ("enter", "Per kind", "Copy commands", false, false),
             ("update", "Previous mode", "Next mode", false, false),
             ("fallbacks", "Reset default", "Change…", false, true),
+            ("rewrite", "Previous service", "Next service", false, false),
+            ("rewrite_url", "Reset default", "Change…", false, true),
+            ("rewrite_model", "Reset default", "Choose model…", false, true),
+            ("rewrite_key", "Remove key", "Set key…", true, true),
+            ("rewrite_profile", "Previous style", "Next style", false, false),
+            ("rewrite_review", "Set off", "Set on", false, false),
             ("openwith", "Remove one…", "Add one…", true, true),
             ("snippets", "Remove one…", "Add one…", true, true),
             ("quicklinks", "Remove one…", "Add one…", true, true),
