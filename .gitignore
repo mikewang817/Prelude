@@ -8,5 +8,6 @@ target/
 !.claude/skills/
 !.claude/commands/
 
-# Draft posts, not part of the published project
-social-media/
+# Draft posts and promo assets, not part of the published project
+socialmedia/
+Media/
